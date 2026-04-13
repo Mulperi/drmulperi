@@ -706,15 +706,15 @@ def draw(
             return
         if x0 < 0 or y0 < 0 or x1 >= w or y1 >= h:
             return
-        draw_hline(y0, x0 + 1, x1 - 1, "-", attr)
-        draw_hline(y1, x0 + 1, x1 - 1, "-", attr)
-        safe_add(y0, x0, "+", attr)
-        safe_add(y0, x1, "+", attr)
-        safe_add(y1, x0, "+", attr)
-        safe_add(y1, x1, "+", attr)
+        draw_hline(y0, x0 + 1, x1 - 1, "─", attr)
+        draw_hline(y1, x0 + 1, x1 - 1, "─", attr)
+        safe_add(y0, x0, "╭", attr)
+        safe_add(y0, x1, "╮", attr)
+        safe_add(y1, x0, "╰", attr)
+        safe_add(y1, x1, "╯", attr)
         for y in range(y0 + 1, y1):
-            safe_add(y, x0, "|", attr)
-            safe_add(y, x1, "|", attr)
+            safe_add(y, x0, "│", attr)
+            safe_add(y, x1, "│", attr)
 
     if h < 16 or w < 80:
         safe_add(0, 0, "Terminal too small for outlined layout")
@@ -745,7 +745,13 @@ def draw(
     mode = "RATCHET" if edit_mode == "ratchet" else "VELOCITY"
 
     safe_add(2, content_x, "DR. MULPERI", theme["title"])
-    safe_add(3, content_x, f"PATTERN FILE: {seq.pattern_name}"[:header_right - content_x], theme["text"])
+    kit_name = os.path.basename(os.path.normpath(seq.kit_path))
+    safe_add(
+        3,
+        content_x,
+        f"PATTERN FILE: {seq.pattern_name}  KIT: {kit_name}"[:header_right - content_x],
+        theme["text"]
+    )
     safe_add(
         4,
         content_x,
