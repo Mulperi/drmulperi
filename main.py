@@ -28,6 +28,8 @@ DEFAULT_KEYMAP = {
     "mode_toggle": "T",
     "clear_pattern": "N",
     "mute_row": "M",
+    "tempo_inc": "U",
+    "tempo_dec": "J",
     "pattern_length_dec": "[",
     "pattern_length_inc": "]",
     "pattern_export": "X",
@@ -1055,9 +1057,9 @@ class Controller:
             self.seq.change_current_pattern_length(-1)
         elif self.keymap.matches("pattern_length_inc", event_tokens):
             self.seq.change_current_pattern_length(1)
-        elif key_code == ord('+') or key_code == ord('='):
+        elif self.keymap.matches("tempo_inc", event_tokens):
             self.seq.change_bpm(1)
-        elif key_code == ord('-'):
+        elif self.keymap.matches("tempo_dec", event_tokens):
             self.seq.change_bpm(-1)
         elif key_code in [
             ord('!'), ord('@'), ord('#'), ord('$'),
@@ -1152,6 +1154,7 @@ def ui_loop(stdscr, seq):
 
     keymap = Keymap()
     controller = Controller(seq, keymap)
+    help_lines = keymap.file_lines()
     help_key_label = keymap.label("help_menu")
     mode_key_label = keymap.label("mode_toggle")
     clear_key_label = keymap.label("clear_pattern")
@@ -1161,46 +1164,93 @@ def ui_loop(stdscr, seq):
     pattern_load_label = keymap.label("pattern_load")
     kit_load_label = keymap.label("kit_load")
 
+    should_draw = True
+    last_step = -1
+    last_pattern = -1
+    last_next_pattern = None
+    last_playing = None
+    last_ui_state = None
+
     while True:
-        draw(
-            stdscr,
-            seq,
-            controller.cursor_x,
-            controller.cursor_y,
-            controller.edit_mode,
-            controller.clear_confirm,
-            (
-                f"Save pattern filename ({pattern_export_label}, Esc cancels): {controller.pattern_save_input}"
-                if controller.pattern_save_active
-                else (
-                    f"Give pattern filename ({pattern_load_label}, Esc cancels): {controller.pattern_load_input}"
-                    if controller.pattern_load_active
-                    else (
-                        f"Give sample folder name ({kit_load_label}, Esc cancels): {controller.kit_load_input}"
-                        if controller.kit_load_active
-                        else ""
-                    )
-                )
-            ),
-            controller.status_message if not controller.pattern_save_active and not controller.pattern_load_active and not controller.kit_load_active else "",
-            controller.help_active,
-            keymap.file_lines(),
-            help_key_label,
-            mode_key_label,
-            clear_key_label,
-            length_dec_label,
-            length_inc_label,
-            theme
-        )
         try:
             key = stdscr.get_wch()
         except curses.error:
             key = -1
 
-        if not controller.handle_key(key):
-            return
+        if key != -1:
+            if not controller.handle_key(key):
+                return
+            should_draw = True
 
-        time.sleep(0.01)
+        ui_state = (
+            controller.cursor_x,
+            controller.cursor_y,
+            controller.edit_mode,
+            controller.clear_confirm,
+            controller.pattern_save_active,
+            controller.pattern_load_active,
+            controller.kit_load_active,
+            controller.help_active,
+            controller.pattern_save_input,
+            controller.pattern_load_input,
+            controller.kit_load_input,
+            controller.status_message,
+            seq.bpm,
+            seq.pattern_length[seq.pattern],
+            seq.pattern,
+            seq.next_pattern,
+        )
+        if ui_state != last_ui_state:
+            should_draw = True
+
+        if (
+            seq.step != last_step
+            or seq.pattern != last_pattern
+            or seq.next_pattern != last_next_pattern
+            or seq.playing != last_playing
+        ):
+            should_draw = True
+
+        if should_draw:
+            draw(
+                stdscr,
+                seq,
+                controller.cursor_x,
+                controller.cursor_y,
+                controller.edit_mode,
+                controller.clear_confirm,
+                (
+                    f"Save pattern filename ({pattern_export_label}, Esc cancels): {controller.pattern_save_input}"
+                    if controller.pattern_save_active
+                    else (
+                        f"Give pattern filename ({pattern_load_label}, Esc cancels): {controller.pattern_load_input}"
+                        if controller.pattern_load_active
+                        else (
+                            f"Give sample folder name ({kit_load_label}, Esc cancels): {controller.kit_load_input}"
+                            if controller.kit_load_active
+                            else ""
+                        )
+                    )
+                ),
+                controller.status_message if not controller.pattern_save_active and not controller.pattern_load_active and not controller.kit_load_active else "",
+                controller.help_active,
+                help_lines,
+                help_key_label,
+                mode_key_label,
+                clear_key_label,
+                length_dec_label,
+                length_inc_label,
+                theme
+            )
+
+            last_step = seq.step
+            last_pattern = seq.pattern
+            last_next_pattern = seq.next_pattern
+            last_playing = seq.playing
+            last_ui_state = ui_state
+            should_draw = False
+
+        time.sleep(0.002)
 
 # ---------- MAIN ----------
 def main():
