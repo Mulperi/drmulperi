@@ -11,6 +11,10 @@ import configparser
 import warnings
 import shutil
 from scipy.io import wavfile
+try:
+    import mido
+except Exception:
+    mido = None
 
 TRACKS = 9
 STEPS = 16
@@ -59,7 +63,10 @@ PAGE_MENU_ITEMS = [
     "7. Toggle Chain Mode",
     "8. Set Swing",
     "9. Save Pack",
+    "10. Toggle MIDI OUT",
 ]
+
+MIDI_NOTES = [36, 37, 38, 39, 40, 41, 42, 43]
 
 
 def _normalize_key_token(token):
@@ -210,6 +217,65 @@ class Voice:
         self.pan_l = 1.0
         self.pan_r = 1.0
 
+
+class MidiOut:
+    def __init__(self):
+        self.port = None
+        self.port_name = None
+
+    def enable(self):
+        if mido is None:
+            return False, "MIDI unavailable (install mido + python-rtmidi)"
+        try:
+            names = mido.get_output_names()
+        except Exception as exc:
+            return False, f"MIDI enumerate failed: {exc}"
+        if not names:
+            return False, "No MIDI output ports found"
+        try:
+            self.port = mido.open_output(names[0])
+            self.port_name = names[0]
+        except Exception as exc:
+            self.port = None
+            self.port_name = None
+            return False, f"MIDI open failed: {exc}"
+        return True, f"MIDI OUT ON ({self.port_name})"
+
+    def disable(self):
+        if self.port is not None:
+            try:
+                self.port.close()
+            except Exception:
+                pass
+        self.port = None
+        self.port_name = None
+        return True, "MIDI OUT OFF"
+
+    def send_note_on(self, channel, note, velocity):
+        if self.port is None or mido is None:
+            return
+        try:
+            self.port.send(mido.Message("note_on", channel=channel, note=note, velocity=velocity))
+        except Exception:
+            pass
+
+    def send_note_off(self, channel, note):
+        if self.port is None or mido is None:
+            return
+        try:
+            self.port.send(mido.Message("note_off", channel=channel, note=note, velocity=0))
+        except Exception:
+            pass
+
+    def all_notes_off(self):
+        if self.port is None or mido is None:
+            return
+        for ch in range(8):
+            try:
+                self.port.send(mido.Message("control_change", channel=ch, control=123, value=0))
+            except Exception:
+                pass
+
 # ---------- AUDIO ENGINE ----------
 class AudioEngine:
     def __init__(self, kit_path, samplerate=44100, blocksize=512):
@@ -271,8 +337,7 @@ class AudioEngine:
     def reload_kit(self, kit_path):
         self.kit_path = kit_path
         self.samples, self.sample_names, self.sample_paths = self.load_samples()
-        for v in self.voices:
-            v.active = False
+        self.stop_all()
         loaded_count = sum(1 for s in self.samples[:TRACKS - 1] if s is not None)
         return loaded_count
 
@@ -305,9 +370,12 @@ class AudioEngine:
         self.samples[track] = data
         self.sample_names[track] = os.path.basename(path)
         self.sample_paths[track] = path
+        self.stop_all()
+        return True, f"Loaded {self.sample_names[track]} on track {track + 1}"
+
+    def stop_all(self):
         for v in self.voices:
             v.active = False
-        return True, f"Loaded {self.sample_names[track]} on track {track + 1}"
 
     def trigger(self, track, velocity, pan):
         pan_pos = (pan - 1) / 8.0
@@ -383,6 +451,7 @@ class Sequencer:
         self.view_pattern = 0
         self.next_pattern = None
         self.pending_events = []
+        self.pending_midi_off = []
         self.chain_enabled = False
         self.chain = [0]
         self.chain_pos = 0
@@ -399,6 +468,8 @@ class Sequencer:
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
         self.page_clipboard = None
+        self.midi = MidiOut()
+        self.midi_out_enabled = False
 
         self.enter_held = False
         self.draw_mode = None
@@ -423,7 +494,8 @@ class Sequencer:
             "pattern_swing": self.pattern_swing,
             "ratchet_grid": self.ratchet_grid,
             "chain_enabled": self.chain_enabled,
-            "chain": self.chain
+            "chain": self.chain,
+            "midi_out_enabled": self.midi_out_enabled,
         }
 
     def _apply_loaded_data(self, data):
@@ -514,6 +586,13 @@ class Sequencer:
             self.chain_enabled = raw_chain_enabled.strip().lower() in ["1", "true", "yes", "on"]
         else:
             self.chain_enabled = bool(raw_chain_enabled)
+
+        raw_midi_enabled = data.get("midi_out_enabled", False)
+        if isinstance(raw_midi_enabled, str):
+            target_midi = raw_midi_enabled.strip().lower() in ["1", "true", "yes", "on"]
+        else:
+            target_midi = bool(raw_midi_enabled)
+        self._set_midi_out_enabled(target_midi)
         self._sync_chain_pos_to_pattern()
 
     def save(self):
@@ -558,6 +637,7 @@ class Sequencer:
         self.step = 0
         self.next_pattern = None
         self.pending_events.clear()
+        self.pending_midi_off.clear()
         self.dirty = False
         self._sync_chain_pos_to_pattern()
         return True, f"Loaded {self.pattern_name}"
@@ -640,7 +720,14 @@ class Sequencer:
 
             while self.pending_events and self.pending_events[0][0] <= now:
                 _, track, vel = heapq.heappop(self.pending_events)
-                self.engine.trigger(track, vel, self.track_pan[track])
+                if self.midi_out_enabled:
+                    self._trigger_midi(track, vel, 0.05)
+                else:
+                    self.engine.trigger(track, vel, self.track_pan[track])
+
+            while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
+                _, channel, note = heapq.heappop(self.pending_midi_off)
+                self.midi.send_note_off(channel, note)
 
             if self.playing:
                 if now >= next_time:
@@ -689,6 +776,9 @@ class Sequencer:
             else:
                 self.step = 0
                 self.pending_events.clear()
+                if self.pending_midi_off:
+                    self.midi.all_notes_off()
+                    self.pending_midi_off.clear()
                 next_time = time.perf_counter()
 
             # ---------- AUTO SAVE (debounce) ----------
@@ -707,6 +797,10 @@ class Sequencer:
         if not self.playing:
             self.step = 0
             self.next_pattern = None
+            self.pending_events.clear()
+            if self.pending_midi_off:
+                self.midi.all_notes_off()
+                self.pending_midi_off.clear()
 
     def _sync_chain_pos_to_pattern(self):
         if not self.chain:
@@ -728,15 +822,50 @@ class Sequencer:
             self.next_pattern = None
             self.step = 0
             self.pending_events.clear()
+            self.pending_midi_off.clear()
             self.dirty = True
             return True, "Chain ON"
         self.pattern = self.view_pattern
         self.next_pattern = None
         self.step = 0
         self.pending_events.clear()
+        self.pending_midi_off.clear()
         self._sync_chain_pos_to_pattern()
         self.dirty = True
         return True, "Chain OFF"
+
+    def _set_midi_out_enabled(self, enabled):
+        if enabled == self.midi_out_enabled and not (enabled and self.midi.port is None):
+            return True, ("MIDI OUT ON" if enabled else "MIDI OUT OFF")
+        if enabled:
+            ok, message = self.midi.enable()
+            if not ok:
+                self.midi_out_enabled = False
+                return False, message
+            self.midi_out_enabled = True
+            self.engine.stop_all()
+            self.dirty = True
+            return True, message
+        self.midi.all_notes_off()
+        self.pending_midi_off.clear()
+        ok, message = self.midi.disable()
+        self.midi_out_enabled = False
+        self.dirty = True
+        return ok, message
+
+    def toggle_midi_out(self):
+        return self._set_midi_out_enabled(not self.midi_out_enabled)
+
+    def _trigger_midi(self, track, velocity_norm, gate_seconds):
+        if not self.midi_out_enabled:
+            return
+        if track < 0 or track >= TRACKS - 1:
+            return
+        velocity = max(1, min(127, int(round(velocity_norm * 127))))
+        channel = track
+        note = MIDI_NOTES[track] if track < len(MIDI_NOTES) else 36
+        self.midi.send_note_on(channel, note, velocity)
+        heapq.heappush(self.pending_midi_off, (time.perf_counter() + max(0.01, gate_seconds), channel, note))
 
     def set_chain_from_text(self, text):
         src = text.strip()
@@ -942,12 +1071,18 @@ class Sequencer:
     def preview_row(self, track):
         if track >= TRACKS - 1:
             return
-        self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track])
+        if self.midi_out_enabled:
+            self._trigger_midi(track, self.last_velocity / 9.0, 0.08)
+        else:
+            self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track])
 
     def _preview_note_if_idle(self, track, velocity):
         if self.playing or track >= TRACKS - 1 or velocity <= 0:
             return
-        self.engine.trigger(track, velocity / 9.0, self.track_pan[track])
+        if self.midi_out_enabled:
+            self._trigger_midi(track, velocity / 9.0, 0.06)
+        else:
+            self.engine.trigger(track, velocity / 9.0, self.track_pan[track])
 
 # ---------- UI ----------
 def draw(
@@ -1057,6 +1192,10 @@ def draw(
         f"PATTERN FILE: {seq.pattern_name}  KIT: {kit_name}"[:header_right - content_x],
         theme["text"]
     )
+    midi_text = "MIDI OUT"
+    midi_attr = theme["midi_on"] if seq.midi_out_enabled else theme["midi_off"]
+    midi_x = header_right - len(midi_text) - 1
+    safe_add(3, midi_x, midi_text, midi_attr)
     safe_add(
         4,
         content_x,
@@ -1526,7 +1665,7 @@ class Controller:
             self.chain_edit_active = False
             self.chain_edit_input = ""
             ok, message = True, ""
-        else:
+        elif self.page_menu_index == 8:
             self.pack_save_active = True
             self.pack_save_input = ""
             self.pattern_save_active = False
@@ -1540,6 +1679,8 @@ class Controller:
             self.swing_edit_active = False
             self.swing_edit_input = ""
             ok, message = True, ""
+        else:
+            ok, message = self.seq.toggle_midi_out()
         self.status_message = message
 
     def handle_key(self, key):
@@ -1958,6 +2099,8 @@ def ui_loop(stdscr, seq):
         "pattern_chain_off": curses.A_DIM,
         "velocity_low": 0,
         "velocity_high": curses.A_BOLD,
+        "midi_on": curses.A_BOLD,
+        "midi_off": curses.A_DIM,
     }
     if curses.has_colors():
         curses.start_color()
@@ -1985,6 +2128,8 @@ def ui_loop(stdscr, seq):
         theme["pattern_chain_off"] = curses.color_pair(2) | curses.A_DIM
         theme["velocity_low"] = curses.color_pair(2) | curses.A_DIM
         theme["velocity_high"] = curses.color_pair(2) | curses.A_BOLD
+        theme["midi_on"] = curses.color_pair(3) | curses.A_BOLD
+        theme["midi_off"] = curses.color_pair(2) | curses.A_DIM
 
     keymap = Keymap()
     controller = Controller(seq, keymap)
@@ -2048,6 +2193,7 @@ def ui_loop(stdscr, seq):
             seq.bpm,
             seq.pattern_length[seq.view_pattern],
             seq.pattern_swing[seq.view_pattern],
+            seq.midi_out_enabled,
             seq.pattern,
             seq.view_pattern,
             seq.next_pattern,

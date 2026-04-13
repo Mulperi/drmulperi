@@ -12,9 +12,19 @@ This program was created with help from AI tools.
 - Audio output device working on your system
 - `pip`
 
+## Dependency Purpose
+
+- `numpy`: fast array math for audio buffers and mixing.
+- `scipy` (`scipy.io.wavfile`): reads `.wav` sample files.
+- `sounddevice`: real-time audio output stream (plays the sequencer audio).
+- `mido` (optional): MIDI message API used for MIDI OUT mode.
+- `python-rtmidi` (optional): backend driver used by `mido` to access system MIDI ports.
+- `curses` (Python stdlib): terminal UI drawing and keyboard input.
+
 Optional (helps if `sounddevice` build/install fails):
 
 - macOS: `brew install portaudio`
+- MIDI out (optional): `pip install mido python-rtmidi`
 
 ## Quick Start
 
@@ -42,6 +52,18 @@ source .venv/bin/activate
 
 ```bash
 pip install numpy scipy sounddevice
+```
+
+Minimal install (audio sequencer only):
+
+```bash
+pip install numpy scipy sounddevice
+```
+
+With MIDI OUT support:
+
+```bash
+pip install numpy scipy sounddevice mido python-rtmidi
 ```
 
 4. Run:
@@ -97,6 +119,8 @@ Pattern JSON stores:
 - `Esc` cancels any open dialog
 - Filename prompts auto-add `.json` if omitted
 - Page menu includes `Save Pack`: creates a folder with `pattern.json` and current track samples
+- Page menu includes `Toggle MIDI OUT` (tracks 1-8 send note triggers on channels 1-8)
+- When MIDI OUT is enabled, internal sample playback is muted
 
 ## Chain
 
