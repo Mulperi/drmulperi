@@ -28,6 +28,8 @@ DEFAULT_KEYMAP = {
     "mode_toggle": "T",
     "clear_pattern": "N",
     "mute_row": "M",
+    "pattern_length_dec": "[",
+    "pattern_length_inc": "]",
     "pattern_export": "X",
     "pattern_load": "L",
     "kit_load": "K",
@@ -342,6 +344,7 @@ class Sequencer:
 
         self.last_velocity = 5
         self.track_pan = [5 for _ in range(TRACKS)]
+        self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
 
         self.enter_held = False
@@ -363,6 +366,7 @@ class Sequencer:
             "last_velocity": self.last_velocity,
             "grid": self.grid,
             "track_pan": self.track_pan,
+            "pattern_length": self.pattern_length,
             "ratchet_grid": self.ratchet_grid
         }
 
@@ -406,6 +410,16 @@ class Sequencer:
                     normalized_pan[i] = 5
         normalized_pan[ACCENT_TRACK] = 5
         self.track_pan = normalized_pan
+
+        loaded_lengths = data.get("pattern_length", self.pattern_length)
+        normalized_lengths = [STEPS for _ in range(PATTERNS)]
+        if isinstance(loaded_lengths, list):
+            for i in range(min(PATTERNS, len(loaded_lengths))):
+                try:
+                    normalized_lengths[i] = max(1, min(STEPS, int(loaded_lengths[i])))
+                except (ValueError, TypeError):
+                    normalized_lengths[i] = STEPS
+        self.pattern_length = normalized_lengths
 
     def save(self):
         data = self._serialize()
@@ -495,6 +509,7 @@ class Sequencer:
 
             if self.playing:
                 if now >= next_time:
+                    current_length = self.pattern_length[self.pattern]
 
                     accent_on = (
                         not self.muted_rows[ACCENT_TRACK]
@@ -523,7 +538,7 @@ class Sequencer:
 
                     self.step += 1
 
-                    if self.step >= STEPS:
+                    if self.step >= current_length:
                         self.step = 0
                         if self.next_pattern is not None:
                             self.pattern = self.next_pattern
@@ -548,6 +563,15 @@ class Sequencer:
         if not self.playing:
             self.step = 0
             self.next_pattern = None
+
+    def change_current_pattern_length(self, delta):
+        current = self.pattern_length[self.pattern]
+        new_length = max(1, min(STEPS, current + delta))
+        if new_length != current:
+            self.pattern_length[self.pattern] = new_length
+            if self.step >= new_length:
+                self.step = 0
+            self.dirty = True
 
     def change_bpm(self, delta):
         self.bpm = max(1, self.bpm + delta)
@@ -641,6 +665,8 @@ def draw(
     help_key_label,
     mode_key_label,
     clear_key_label,
+    length_dec_label,
+    length_inc_label,
     theme
 ):
     stdscr.clear()
@@ -721,7 +747,11 @@ def draw(
     safe_add(
         4,
         content_x,
-        f"BPM:{seq.bpm}  {status}  {beat}/4  MODE:{mode} ({mode_key_label} to switch)"[:header_right - content_x],
+        (
+            f"BPM:{seq.bpm}  {status}  {beat}/4  "
+            f"LEN:{seq.pattern_length[seq.pattern]} ({length_dec_label}/{length_inc_label})  "
+            f"MODE:{mode} ({mode_key_label} to switch)"
+        )[:header_right - content_x],
         theme["text"]
     )
 
@@ -743,12 +773,18 @@ def draw(
 
     grid_content_x = grid_left + 2
     playhead_y = grid_top + 1
+    current_length = seq.pattern_length[seq.pattern]
     x = grid_content_x
     safe_add(playhead_y, x, "  ", theme["text"])
     x += 2
     for s in range(GRID_COLS):
-        sep = "| " if s == PAN_COL or (s < STEPS and s % 4 == 0) else "  "
-        safe_add(playhead_y, x, sep, theme["divider"])
+        sep = "  "
+        sep_attr = theme["divider"]
+        if s == current_length and s < STEPS:
+            sep = "| "
+            sep_attr = theme["hint"]
+
+        safe_add(playhead_y, x, sep, sep_attr)
         x += len(sep)
         body = "  v  " if seq.playing and s == seq.step else "     "
         body_attr = theme["playhead"] if seq.playing and s == seq.step else theme["muted"]
@@ -798,6 +834,9 @@ def draw(
                     cell_attr = theme["accent"] | (curses.A_BOLD if val > 0 else 0)
                 else:
                     cell_attr = velocity_attr(val)
+
+                if s >= seq.pattern_length[seq.pattern]:
+                    cell_attr = theme["muted"]
 
             sep = "| " if s == PAN_COL or (s < STEPS and s % 4 == 0) else "  "
             safe_add(y, x, sep, theme["divider"])
@@ -1012,6 +1051,10 @@ class Controller:
                     self.edit_mode = "ratchet"
                 else:
                     self.edit_mode = "velocity"
+        elif self.keymap.matches("pattern_length_dec", event_tokens):
+            self.seq.change_current_pattern_length(-1)
+        elif self.keymap.matches("pattern_length_inc", event_tokens):
+            self.seq.change_current_pattern_length(1)
         elif key_code == ord('+') or key_code == ord('='):
             self.seq.change_bpm(1)
         elif key_code == ord('-'):
@@ -1112,6 +1155,8 @@ def ui_loop(stdscr, seq):
     help_key_label = keymap.label("help_menu")
     mode_key_label = keymap.label("mode_toggle")
     clear_key_label = keymap.label("clear_pattern")
+    length_dec_label = keymap.label("pattern_length_dec")
+    length_inc_label = keymap.label("pattern_length_inc")
     pattern_export_label = keymap.label("pattern_export")
     pattern_load_label = keymap.label("pattern_load")
     kit_load_label = keymap.label("kit_load")
@@ -1143,6 +1188,8 @@ def ui_loop(stdscr, seq):
             help_key_label,
             mode_key_label,
             clear_key_label,
+            length_dec_label,
+            length_inc_label,
             theme
         )
         try:
