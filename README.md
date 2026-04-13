@@ -2,6 +2,10 @@
 
 Terminal step sequencer built with Python + `curses`.
 
+## Disclaimer
+
+This program was created with help from AI tools.
+
 ## Requirements
 
 - Python 3.10+ (tested with 3.13)
