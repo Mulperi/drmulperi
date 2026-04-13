@@ -886,6 +886,11 @@ def draw(
     help_active,
     help_lines,
     help_key_label,
+    file_browser_active,
+    file_browser_mode,
+    file_browser_path,
+    file_browser_items,
+    file_browser_index,
     mode_key_label,
     clear_key_label,
     length_dec_label,
@@ -1142,6 +1147,41 @@ def draw(
                 item_attr = item_attr | curses.A_REVERSE
             safe_add(box_top + 3 + i, box_left + 2, item[: box_width - 4], item_attr)
 
+    if file_browser_active:
+        mode_name = "PATTERN" if file_browser_mode == "pattern" else "KIT"
+        title = f"{mode_name} BROWSER (Enter select, <-/-> nav, Esc close)"
+        visible_items = file_browser_items if file_browser_items else [{"name": "(empty)", "is_dir": False, "is_parent": False}]
+        list_height = min(14, max(6, h - 12))
+        max_name = max(len(it["name"]) for it in visible_items)
+        box_width = min(w - 6, max(52, max_name + 12))
+        box_height = min(h - 4, list_height + 4)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
+        box_right = box_left + box_width - 1
+        box_bottom = box_top + box_height - 1
+
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
+        for y in range(box_top + 1, box_bottom):
+            safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
+
+        safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
+        path_line = f"Path: {file_browser_path}"
+        safe_add(box_top + 2, box_left + 2, path_line[: box_width - 4], theme["muted"])
+
+        max_rows = box_height - 4
+        start = 0
+        if file_browser_index >= max_rows:
+            start = file_browser_index - max_rows + 1
+        end = min(len(visible_items), start + max_rows)
+
+        for i in range(start, end):
+            row = box_top + 3 + (i - start)
+            label = visible_items[i]["name"]
+            item_attr = theme["text"]
+            if i == file_browser_index and file_browser_items:
+                item_attr = item_attr | curses.A_REVERSE
+            safe_add(row, box_left + 2, label[: box_width - 4], item_attr)
+
     stdscr.refresh()
 
 # ---------- CONTROLLER ----------
@@ -1166,6 +1206,11 @@ class Controller:
         self.page_menu_active = False
         self.page_menu_index = 0
         self.help_active = False
+        self.file_browser_active = False
+        self.file_browser_mode = None
+        self.file_browser_path = os.getcwd()
+        self.file_browser_items = []
+        self.file_browser_index = 0
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
 
@@ -1192,6 +1237,97 @@ class Controller:
     def _close_page_menu(self):
         self.page_menu_active = False
 
+    def _close_file_browser(self):
+        self.file_browser_active = False
+        self.file_browser_mode = None
+        self.file_browser_items = []
+        self.file_browser_index = 0
+
+    def _refresh_file_browser(self):
+        items = []
+        current = self.file_browser_path
+        parent = os.path.dirname(current)
+        if parent and parent != current:
+            items.append({"name": "../", "path": parent, "is_dir": True, "is_parent": True})
+
+        try:
+            entries = list(os.scandir(current))
+        except Exception as exc:
+            self.status_message = f"Browse failed: {exc}"
+            entries = []
+
+        dirs = []
+        files = []
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            if e.is_dir(follow_symlinks=False):
+                dirs.append(e)
+            elif self.file_browser_mode == "pattern" and e.is_file(follow_symlinks=False) and e.name.lower().endswith(".json"):
+                files.append(e)
+
+        dirs.sort(key=lambda e: e.name.casefold())
+        files.sort(key=lambda e: e.name.casefold())
+
+        for e in dirs:
+            items.append({"name": f"{e.name}/", "path": e.path, "is_dir": True, "is_parent": False})
+        for e in files:
+            items.append({"name": e.name, "path": e.path, "is_dir": False, "is_parent": False})
+
+        self.file_browser_items = items
+        if self.file_browser_index >= len(items):
+            self.file_browser_index = max(0, len(items) - 1)
+
+    def _open_file_browser(self, mode):
+        self.file_browser_mode = mode
+        self.file_browser_path = os.getcwd()
+        self.file_browser_active = True
+        self.file_browser_index = 0
+        self.pattern_load_active = False
+        self.pattern_load_input = ""
+        self.kit_load_active = False
+        self.kit_load_input = ""
+        self._refresh_file_browser()
+
+    def _file_browser_enter_dir(self):
+        if not self.file_browser_items:
+            return
+        item = self.file_browser_items[self.file_browser_index]
+        if not item["is_dir"]:
+            return
+        self.file_browser_path = item["path"]
+        self.file_browser_index = 0
+        self._refresh_file_browser()
+
+    def _run_file_browser_select(self):
+        if not self.file_browser_items:
+            return
+        item = self.file_browser_items[self.file_browser_index]
+
+        if item["is_parent"]:
+            self.file_browser_path = item["path"]
+            self.file_browser_index = 0
+            self._refresh_file_browser()
+            return
+
+        if self.file_browser_mode == "pattern":
+            if item["is_dir"]:
+                self.file_browser_path = item["path"]
+                self.file_browser_index = 0
+                self._refresh_file_browser()
+                return
+            ok, message = self.seq.load_project_file(item["path"])
+            self.status_message = message
+            self._close_file_browser()
+            return
+
+        if self.file_browser_mode == "kit":
+            if item["is_dir"]:
+                ok, message = self.seq.load_kit_folder(item["path"])
+                self.status_message = message
+                self._close_file_browser()
+            return
+
     def _close_swing_dialog(self):
         self.swing_edit_active = False
         self.swing_edit_input = ""
@@ -1215,8 +1351,7 @@ class Controller:
             self.chain_edit_input = ""
             ok, message = True, ""
         elif self.page_menu_index == 4:
-            self.pattern_load_active = True
-            self.pattern_load_input = ""
+            self._open_file_browser("pattern")
             self.pattern_save_active = False
             self.pattern_save_input = ""
             self.kit_load_active = False
@@ -1225,8 +1360,7 @@ class Controller:
             self.chain_edit_input = ""
             ok, message = True, ""
         elif self.page_menu_index == 5:
-            self.kit_load_active = True
-            self.kit_load_input = ""
+            self._open_file_browser("kit")
             self.pattern_save_active = False
             self.pattern_save_input = ""
             self.pattern_load_active = False
@@ -1259,6 +1393,33 @@ class Controller:
         if self.help_active:
             if key_code == 27 or self.keymap.matches("help_menu", event_tokens):
                 self.help_active = False
+            return True
+
+        if self.file_browser_active:
+            if key_code == 27:
+                self._close_file_browser()
+                return True
+            if key_code == curses.KEY_UP:
+                if self.file_browser_items:
+                    self.file_browser_index = (self.file_browser_index - 1) % len(self.file_browser_items)
+                return True
+            if key_code == curses.KEY_DOWN:
+                if self.file_browser_items:
+                    self.file_browser_index = (self.file_browser_index + 1) % len(self.file_browser_items)
+                return True
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                self._run_file_browser_select()
+                return True
+            if key_code == curses.KEY_RIGHT:
+                self._file_browser_enter_dir()
+                return True
+            if key_code == curses.KEY_LEFT:
+                parent = os.path.dirname(self.file_browser_path)
+                if parent and parent != self.file_browser_path:
+                    self.file_browser_path = parent
+                    self.file_browser_index = 0
+                    self._refresh_file_browser()
+                return True
             return True
 
         if self.page_menu_active:
@@ -1463,8 +1624,7 @@ class Controller:
             self.swing_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("pattern_load", event_tokens):
-            self.pattern_load_active = True
-            self.pattern_load_input = ""
+            self._open_file_browser("pattern")
             self.pattern_save_active = False
             self.pattern_save_input = ""
             self.kit_load_active = False
@@ -1475,8 +1635,7 @@ class Controller:
             self.swing_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("kit_load", event_tokens):
-            self.kit_load_active = True
-            self.kit_load_input = ""
+            self._open_file_browser("kit")
             self.pattern_save_active = False
             self.pattern_save_input = ""
             self.pattern_load_active = False
@@ -1625,8 +1784,6 @@ def ui_loop(stdscr, seq):
     length_inc_label = keymap.label("pattern_length_inc")
     chain_edit_label = keymap.label("chain_edit")
     pattern_export_label = keymap.label("pattern_export")
-    pattern_load_label = keymap.label("pattern_load")
-    kit_load_label = keymap.label("kit_load")
 
     should_draw = True
     last_step = -1
@@ -1662,6 +1819,11 @@ def ui_loop(stdscr, seq):
             controller.page_menu_active,
             controller.page_menu_index,
             controller.help_active,
+            controller.file_browser_active,
+            controller.file_browser_mode,
+            controller.file_browser_path,
+            tuple(item["name"] for item in controller.file_browser_items),
+            controller.file_browser_index,
             controller.pattern_save_input,
             controller.pattern_load_input,
             controller.kit_load_input,
@@ -1725,6 +1887,11 @@ def ui_loop(stdscr, seq):
                 controller.help_active,
                 help_lines,
                 help_key_label,
+                controller.file_browser_active,
+                controller.file_browser_mode,
+                controller.file_browser_path,
+                controller.file_browser_items,
+                controller.file_browser_index,
                 mode_key_label,
                 clear_key_label,
                 length_dec_label,

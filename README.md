@@ -90,8 +90,8 @@ Pattern JSON stores:
 ## Load/Save Dialogs
 
 - `pattern_export` (default `X`): save pattern-set to filename
-- `pattern_load` (default `L`): load pattern JSON from filename
-- `kit_load` (default `K`): load sample kit folder
+- `pattern_load` (default `L`): open pattern file browser overlay (`.json`)
+- `kit_load` (default `K`): open kit folder browser overlay
 - `Esc` cancels any open dialog
 - Filename prompts auto-add `.json` if omitted
 
