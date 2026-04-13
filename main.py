@@ -26,8 +26,11 @@ ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
     "help_menu": "H,F1",
+    "page_menu": "F2",
     "mode_toggle": "T",
     "clear_pattern": "N",
+    "pattern_copy": "B",
+    "pattern_paste": "V",
     "mute_row": "M",
     "tempo_inc": "U",
     "tempo_dec": "J",
@@ -43,6 +46,16 @@ DEFAULT_KEYMAP = {
     "pattern_3": "E",
     "pattern_4": "R",
 }
+
+PAGE_MENU_ITEMS = [
+    "1. Copy Page",
+    "2. Paste Page",
+    "3. Erase Page",
+    "4. Save Pattern As",
+    "5. Load Pattern",
+    "6. Load Sample Kit",
+    "7. Toggle Chain Mode",
+]
 
 
 def _normalize_key_token(token):
@@ -355,6 +368,7 @@ class Sequencer:
         self.track_pan = [5 for _ in range(TRACKS)]
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
+        self.page_clipboard = None
 
         self.enter_held = False
         self.draw_mode = None
@@ -757,6 +771,38 @@ class Sequencer:
         self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
         self.dirty = True
 
+    def copy_current_page(self):
+        self.page_clipboard = {
+            "grid": [row[:] for row in self.grid[self.view_pattern]],
+            "ratchet_grid": [row[:] for row in self.ratchet_grid[self.view_pattern]],
+            "length": self.pattern_length[self.view_pattern],
+        }
+        return True, f"Copied page {self.view_pattern + 1}"
+
+    def paste_to_current_page(self):
+        if not self.page_clipboard:
+            return False, "Clipboard empty"
+
+        self.grid[self.view_pattern] = [row[:] for row in self.page_clipboard["grid"]]
+        self.ratchet_grid[self.view_pattern] = [row[:] for row in self.page_clipboard["ratchet_grid"]]
+        self.pattern_length[self.view_pattern] = max(1, min(STEPS, int(self.page_clipboard["length"])))
+        self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
+
+        if self.step >= self.pattern_length[self.view_pattern]:
+            self.step = 0
+
+        # In manual mode, make pasted page the active playback page immediately.
+        # This prevents hearing stale queued/scheduled data from another page.
+        if not self.chain_enabled:
+            self.pattern = self.view_pattern
+            self.next_pattern = None
+            self.step = 0
+            self.pending_events.clear()
+            self._sync_chain_pos_to_pattern()
+
+        self.dirty = True
+        return True, f"Pasted to page {self.view_pattern + 1}"
+
     def select_pattern(self, pattern_index):
         if self.chain_enabled:
             self.view_pattern = pattern_index
@@ -791,6 +837,9 @@ def draw(
     clear_confirm,
     pattern_load_prompt,
     status_message,
+    page_menu_active,
+    page_menu_index,
+    page_menu_key_label,
     help_active,
     help_lines,
     help_key_label,
@@ -887,7 +936,8 @@ def draw(
         (
             f"BPM:{seq.bpm}  {status}  {beat}/4  "
             f"LEN:{seq.pattern_length[seq.view_pattern]} ({length_dec_label}/{length_inc_label})  "
-            f"MODE:{mode} ({mode_key_label} to switch)"
+            f"MODE:{mode} ({mode_key_label} to switch)  "
+            f"MENU:{page_menu_key_label}"
         )[:header_right - content_x],
         theme["text"]
     )
@@ -913,6 +963,7 @@ def draw(
     grid_content_x = grid_left + 2
     playhead_y = grid_top + 1
     current_length = seq.pattern_length[seq.view_pattern]
+    show_playhead = seq.playing and (seq.view_pattern == seq.pattern)
     x = grid_content_x
     safe_add(playhead_y, x, "  ", theme["text"])
     x += 2
@@ -925,8 +976,8 @@ def draw(
 
         safe_add(playhead_y, x, sep, sep_attr)
         x += len(sep)
-        body = "  v  " if seq.playing and s == seq.step else "     "
-        body_attr = theme["playhead"] if seq.playing and s == seq.step else theme["muted"]
+        body = "  v  " if show_playhead and s == seq.step else "     "
+        body_attr = theme["playhead"] if show_playhead and s == seq.step else theme["muted"]
         safe_add(playhead_y, x, body, body_attr)
         x += len(body)
 
@@ -1026,6 +1077,27 @@ def draw(
                 break
             safe_add(line_y + i, box_left + 2, line[: box_width - 4], theme["text"])
 
+    if page_menu_active:
+        items = PAGE_MENU_ITEMS
+        title = f"PAGE MENU ({page_menu_key_label}/Esc close)"
+        max_item_len = max(len(title), *(len(item) for item in items))
+        box_width = min(w - 8, max(40, max_item_len + 6))
+        box_height = min(h - 4, len(items) + 4)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
+        box_right = box_left + box_width - 1
+        box_bottom = box_top + box_height - 1
+
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
+        for y in range(box_top + 1, box_bottom):
+            safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
+        safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
+        for i, item in enumerate(items):
+            item_attr = theme["text"]
+            if i == page_menu_index:
+                item_attr = item_attr | curses.A_REVERSE
+            safe_add(box_top + 3 + i, box_left + 2, item[: box_width - 4], item_attr)
+
     stdscr.refresh()
 
 # ---------- CONTROLLER ----------
@@ -1045,6 +1117,8 @@ class Controller:
         self.kit_load_input = ""
         self.chain_edit_active = False
         self.chain_edit_input = ""
+        self.page_menu_active = False
+        self.page_menu_index = 0
         self.help_active = False
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
@@ -1069,6 +1143,51 @@ class Controller:
         self.chain_edit_active = False
         self.chain_edit_input = ""
 
+    def _close_page_menu(self):
+        self.page_menu_active = False
+
+    def _run_page_menu_action(self):
+        if self.page_menu_index == 0:
+            ok, message = self.seq.copy_current_page()
+        elif self.page_menu_index == 1:
+            ok, message = self.seq.paste_to_current_page()
+        elif self.page_menu_index == 2:
+            self.seq.clear_current_pattern()
+            ok, message = True, f"Cleared page {self.seq.view_pattern + 1}"
+        elif self.page_menu_index == 3:
+            self.pattern_save_active = True
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            ok, message = True, ""
+        elif self.page_menu_index == 4:
+            self.pattern_load_active = True
+            self.pattern_load_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            ok, message = True, ""
+        elif self.page_menu_index == 5:
+            self.kit_load_active = True
+            self.kit_load_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            ok, message = True, ""
+        else:
+            ok, message = self.seq.toggle_chain()
+        self.status_message = message
+
     def handle_key(self, key):
         event_tokens = _event_tokens(key)
         key_code = key if isinstance(key, int) else ord(key)
@@ -1076,6 +1195,29 @@ class Controller:
         if self.help_active:
             if key_code == 27 or self.keymap.matches("help_menu", event_tokens):
                 self.help_active = False
+            return True
+
+        if self.page_menu_active:
+            if key_code == 27 or self.keymap.matches("page_menu", event_tokens):
+                self._close_page_menu()
+                return True
+            if key_code == curses.KEY_UP:
+                self.page_menu_index = (self.page_menu_index - 1) % len(PAGE_MENU_ITEMS)
+                return True
+            if key_code == curses.KEY_DOWN:
+                self.page_menu_index = (self.page_menu_index + 1) % len(PAGE_MENU_ITEMS)
+                return True
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                self._run_page_menu_action()
+                self._close_page_menu()
+                return True
+            if ord("1") <= key_code <= ord("9"):
+                idx = key_code - ord("1")
+                if idx < len(PAGE_MENU_ITEMS):
+                    self.page_menu_index = idx
+                    self._run_page_menu_action()
+                    self._close_page_menu()
+                    return True
             return True
 
         if key_code == curses.KEY_RIGHT:
@@ -1201,8 +1343,25 @@ class Controller:
         if key_code == ord(' '):
             self.seq.toggle_playback()
             self.status_message = ""
+        elif self.keymap.matches("page_menu", event_tokens):
+            self.page_menu_active = True
+            self.page_menu_index = 0
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
         elif self.keymap.matches("help_menu", event_tokens):
             self.help_active = True
+        elif self.keymap.matches("pattern_copy", event_tokens):
+            ok, message = self.seq.copy_current_page()
+            self.status_message = message
+        elif self.keymap.matches("pattern_paste", event_tokens):
+            ok, message = self.seq.paste_to_current_page()
+            self.status_message = message
         elif self.keymap.matches("pattern_export", event_tokens):
             self.pattern_save_active = True
             self.pattern_save_input = ""
@@ -1363,6 +1522,7 @@ def ui_loop(stdscr, seq):
     controller = Controller(seq, keymap)
     help_lines = keymap.file_lines()
     help_key_label = keymap.label("help_menu")
+    page_menu_label = keymap.label("page_menu")
     mode_key_label = keymap.label("mode_toggle")
     clear_key_label = keymap.label("clear_pattern")
     length_dec_label = keymap.label("pattern_length_dec")
@@ -1402,6 +1562,8 @@ def ui_loop(stdscr, seq):
             controller.pattern_load_active,
             controller.kit_load_active,
             controller.chain_edit_active,
+            controller.page_menu_active,
+            controller.page_menu_index,
             controller.help_active,
             controller.pattern_save_input,
             controller.pattern_load_input,
@@ -1437,16 +1599,16 @@ def ui_loop(stdscr, seq):
                 controller.edit_mode,
                 controller.clear_confirm,
                 (
-                    f"Save pattern filename ({pattern_export_label}, Esc cancels): {controller.pattern_save_input}"
+                    f"Save pattern filename (Esc cancels): {controller.pattern_save_input}"
                     if controller.pattern_save_active
                     else (
                         f"Give chain sequence ({chain_edit_label}, Esc cancels): {controller.chain_edit_input}"
                         if controller.chain_edit_active
                         else (
-                            f"Give pattern filename ({pattern_load_label}, Esc cancels): {controller.pattern_load_input}"
+                            f"Give pattern filename (Esc cancels): {controller.pattern_load_input}"
                             if controller.pattern_load_active
                             else (
-                                f"Give sample folder name ({kit_load_label}, Esc cancels): {controller.kit_load_input}"
+                                f"Give sample folder name (Esc cancels): {controller.kit_load_input}"
                                 if controller.kit_load_active
                                 else ""
                             )
@@ -1454,6 +1616,9 @@ def ui_loop(stdscr, seq):
                     )
                 ),
                 controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active else "",
+                controller.page_menu_active,
+                controller.page_menu_index,
+                page_menu_label,
                 controller.help_active,
                 help_lines,
                 help_key_label,
