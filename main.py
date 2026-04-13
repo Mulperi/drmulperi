@@ -24,10 +24,13 @@ ACCENT_TRACK = 8
 ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
+    "help_menu": "H,F1",
     "mode_toggle": "T",
     "clear_pattern": "N",
     "mute_row": "M",
+    "pattern_export": "X",
     "pattern_load": "L",
+    "kit_load": "K",
     "pattern_1": "Q",
     "pattern_2": "W",
     "pattern_3": "E",
@@ -161,6 +164,18 @@ class Keymap:
             return token
         return token
 
+    def file_lines(self):
+        if not os.path.exists(self.path):
+            return ["[keys]"]
+        lines = []
+        try:
+            with open(self.path, "r") as f:
+                for line in f:
+                    lines.append(line.rstrip("\n"))
+        except Exception:
+            return ["[keys]"]
+        return lines if lines else ["[keys]"]
+
 # ---------- VOICE ----------
 class Voice:
     def __init__(self):
@@ -236,6 +251,14 @@ class AudioEngine:
         samples.append(None)
         sample_names.append("Accent")
         return samples, sample_names
+
+    def reload_kit(self, kit_path):
+        self.kit_path = kit_path
+        self.samples, self.sample_names = self.load_samples()
+        for v in self.voices:
+            v.active = False
+        loaded_count = sum(1 for s in self.samples[:TRACKS - 1] if s is not None)
+        return loaded_count
 
     def trigger(self, track, velocity, pan):
         pan_pos = (pan - 1) / 8.0
@@ -428,6 +451,36 @@ class Sequencer:
         self.dirty = False
         return True, f"Loaded {self.pattern_name}"
 
+    def save_project_file(self, filename):
+        target = filename.strip()
+        if not target:
+            return False, "Save canceled"
+
+        if not target.lower().endswith(".json"):
+            target = f"{target}.json"
+
+        path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        try:
+            with open(path, "w") as f:
+                json.dump(self._serialize(), f)
+        except Exception as exc:
+            return False, f"Save failed: {exc}"
+
+        return True, f"Saved {os.path.basename(path)}"
+
+    def load_kit_folder(self, foldername):
+        target = foldername.strip()
+        if not target:
+            return False, "Load canceled"
+
+        path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        if not os.path.isdir(path):
+            return False, f"Kit folder not found: {os.path.basename(path)}"
+
+        self.kit_path = path
+        loaded_count = self.engine.reload_kit(path)
+        return True, f"Loaded kit {os.path.basename(path)} ({loaded_count}/8 samples)"
+
     # ---------- AUDIO LOOP ----------
     def run(self):
         next_time = time.perf_counter()
@@ -583,6 +636,9 @@ def draw(
     clear_confirm,
     pattern_load_prompt,
     status_message,
+    help_active,
+    help_lines,
+    help_key_label,
     mode_key_label,
     clear_key_label,
     theme
@@ -755,6 +811,28 @@ def draw(
         mute_mark = "M" if seq.muted_rows[t] else " "
         safe_add(y, x, f" {mute_mark} {seq.engine.sample_names[t]}", row_attr)
 
+    if help_active:
+        visible_lines = [line for line in help_lines if line.strip() != ""]
+        if not visible_lines:
+            visible_lines = ["[keys]"]
+
+        header = f"HELP ({help_key_label}/Esc to close)"
+        content = [header, ""] + visible_lines
+        max_line_len = max(len(line) for line in content)
+        box_width = min(w - 6, max(40, max_line_len + 4))
+        box_height = min(h - 6, len(content) + 3)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
+        box_right = box_left + box_width - 1
+        box_bottom = box_top + box_height - 1
+
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
+        line_y = box_top + 1
+        for i, line in enumerate(content):
+            if line_y + i >= box_bottom:
+                break
+            safe_add(line_y + i, box_left + 2, line[: box_width - 4], theme["text"])
+
     stdscr.refresh()
 
 # ---------- CONTROLLER ----------
@@ -766,8 +844,13 @@ class Controller:
         self.cursor_y = 0
         self.edit_mode = "velocity"
         self.clear_confirm = False
+        self.pattern_save_active = False
+        self.pattern_save_input = ""
         self.pattern_load_active = False
         self.pattern_load_input = ""
+        self.kit_load_active = False
+        self.kit_load_input = ""
+        self.help_active = False
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
 
@@ -779,9 +862,22 @@ class Controller:
         self.pattern_load_active = False
         self.pattern_load_input = ""
 
+    def _close_pattern_save_dialog(self):
+        self.pattern_save_active = False
+        self.pattern_save_input = ""
+
+    def _close_kit_dialog(self):
+        self.kit_load_active = False
+        self.kit_load_input = ""
+
     def handle_key(self, key):
         event_tokens = _event_tokens(key)
         key_code = key if isinstance(key, int) else ord(key)
+
+        if self.help_active:
+            if key_code == 27 or self.keymap.matches("help_menu", event_tokens):
+                self.help_active = False
+            return True
 
         if key_code == curses.KEY_RIGHT:
             self.move_cursor(1, 0)
@@ -796,6 +892,12 @@ class Controller:
             self.move_cursor(0, 1)
             return True
         if key_code == 27:  # ESC
+            if self.pattern_save_active:
+                self._close_pattern_save_dialog()
+                return True
+            if self.kit_load_active:
+                self._close_kit_dialog()
+                return True
             if self.pattern_load_active:
                 self._close_pattern_dialog()
                 return True
@@ -826,6 +928,44 @@ class Controller:
 
             return True
 
+        if self.pattern_save_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.save_project_file(self.pattern_save_input)
+                self.status_message = message
+                self._close_pattern_save_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.pattern_save_input = self.pattern_save_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.pattern_save_input) < 120:
+                    self.pattern_save_input += key
+                return True
+
+            return True
+
+        if self.kit_load_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.load_kit_folder(self.kit_load_input)
+                self.status_message = message
+                self._close_kit_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.kit_load_input = self.kit_load_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.kit_load_input) < 120:
+                    self.kit_load_input += key
+                return True
+
+            return True
+
         if self.keymap.matches("clear_pattern", event_tokens):
             if self.clear_confirm:
                 self.seq.clear_current_pattern()
@@ -840,8 +980,30 @@ class Controller:
         if key_code == ord(' '):
             self.seq.toggle_playback()
             self.status_message = ""
+        elif self.keymap.matches("help_menu", event_tokens):
+            self.help_active = True
+        elif self.keymap.matches("pattern_export", event_tokens):
+            self.pattern_save_active = True
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.status_message = ""
         elif self.keymap.matches("pattern_load", event_tokens):
             self.pattern_load_active = True
+            self.pattern_load_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.status_message = ""
+        elif self.keymap.matches("kit_load", event_tokens):
+            self.kit_load_active = True
+            self.kit_load_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
             self.pattern_load_input = ""
             self.status_message = ""
         elif self.keymap.matches("mode_toggle", event_tokens):
@@ -947,9 +1109,12 @@ def ui_loop(stdscr, seq):
 
     keymap = Keymap()
     controller = Controller(seq, keymap)
+    help_key_label = keymap.label("help_menu")
     mode_key_label = keymap.label("mode_toggle")
     clear_key_label = keymap.label("clear_pattern")
+    pattern_export_label = keymap.label("pattern_export")
     pattern_load_label = keymap.label("pattern_load")
+    kit_load_label = keymap.label("kit_load")
 
     while True:
         draw(
@@ -960,11 +1125,22 @@ def ui_loop(stdscr, seq):
             controller.edit_mode,
             controller.clear_confirm,
             (
-                f"Give pattern filename ({pattern_load_label}, Esc cancels): {controller.pattern_load_input}"
-                if controller.pattern_load_active
-                else ""
+                f"Save pattern filename ({pattern_export_label}, Esc cancels): {controller.pattern_save_input}"
+                if controller.pattern_save_active
+                else (
+                    f"Give pattern filename ({pattern_load_label}, Esc cancels): {controller.pattern_load_input}"
+                    if controller.pattern_load_active
+                    else (
+                        f"Give sample folder name ({kit_load_label}, Esc cancels): {controller.kit_load_input}"
+                        if controller.kit_load_active
+                        else ""
+                    )
+                )
             ),
-            controller.status_message if not controller.pattern_load_active else "",
+            controller.status_message if not controller.pattern_save_active and not controller.pattern_load_active and not controller.kit_load_active else "",
+            controller.help_active,
+            keymap.file_lines(),
+            help_key_label,
             mode_key_label,
             clear_key_label,
             theme
