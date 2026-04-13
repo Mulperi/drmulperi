@@ -13,6 +13,7 @@ from scipy.io import wavfile
 
 TRACKS = 9
 STEPS = 16
+CHAIN_MAX_STEPS = 16
 PAN_COL = STEPS
 GRID_COLS = STEPS + 1
 PATTERNS = 4
@@ -30,6 +31,8 @@ DEFAULT_KEYMAP = {
     "mute_row": "M",
     "tempo_inc": "U",
     "tempo_dec": "J",
+    "chain_toggle": "G",
+    "chain_edit": "C",
     "pattern_length_dec": "[",
     "pattern_length_inc": "]",
     "pattern_export": "X",
@@ -335,8 +338,12 @@ class Sequencer:
         ]
 
         self.pattern = 0
+        self.view_pattern = 0
         self.next_pattern = None
         self.pending_events = []
+        self.chain_enabled = False
+        self.chain = [0]
+        self.chain_pos = 0
 
         self.step = 0
 
@@ -369,7 +376,9 @@ class Sequencer:
             "grid": self.grid,
             "track_pan": self.track_pan,
             "pattern_length": self.pattern_length,
-            "ratchet_grid": self.ratchet_grid
+            "ratchet_grid": self.ratchet_grid,
+            "chain_enabled": self.chain_enabled,
+            "chain": self.chain
         }
 
     def _apply_loaded_data(self, data):
@@ -423,6 +432,35 @@ class Sequencer:
                     normalized_lengths[i] = STEPS
         self.pattern_length = normalized_lengths
 
+        loaded_chain = data.get("chain", self.chain)
+        normalized_chain = []
+        if isinstance(loaded_chain, list):
+            raw = []
+            for item in loaded_chain[:CHAIN_MAX_STEPS]:
+                try:
+                    raw.append(int(item))
+                except (ValueError, TypeError):
+                    continue
+
+            # Support both formats:
+            # - zero-based [0..PATTERNS-1] (current saves)
+            # - one-based  [1..PATTERNS]   (legacy/manual edits)
+            if raw:
+                has_zero = any(v == 0 for v in raw)
+                for value in raw:
+                    idx = value if has_zero else (value - 1)
+                    if 0 <= idx < PATTERNS:
+                        normalized_chain.append(idx)
+        if not normalized_chain:
+            normalized_chain = [0]
+        self.chain = normalized_chain
+        raw_chain_enabled = data.get("chain_enabled", False)
+        if isinstance(raw_chain_enabled, str):
+            self.chain_enabled = raw_chain_enabled.strip().lower() in ["1", "true", "yes", "on"]
+        else:
+            self.chain_enabled = bool(raw_chain_enabled)
+        self._sync_chain_pos_to_pattern()
+
     def save(self):
         data = self._serialize()
 
@@ -460,11 +498,13 @@ class Sequencer:
         self._apply_loaded_data(data)
         self.pattern_path = path
         self.pattern_name = os.path.basename(path)
+        self.view_pattern = self.pattern
         self.playing = False
         self.step = 0
         self.next_pattern = None
         self.pending_events.clear()
         self.dirty = False
+        self._sync_chain_pos_to_pattern()
         return True, f"Loaded {self.pattern_name}"
 
     def save_project_file(self, filename):
@@ -542,8 +582,13 @@ class Sequencer:
 
                     if self.step >= current_length:
                         self.step = 0
-                        if self.next_pattern is not None:
+                        if self.chain_enabled and self.chain:
+                            self.chain_pos = (self.chain_pos + 1) % len(self.chain)
+                            self.pattern = self.chain[self.chain_pos]
+                            self.next_pattern = None
+                        elif self.next_pattern is not None:
                             self.pattern = self.next_pattern
+                            self.view_pattern = self.pattern
                             self.next_pattern = None
 
                     next_time += step_time
@@ -561,16 +606,96 @@ class Sequencer:
             time.sleep(0.001)
 
     def toggle_playback(self):
+        if not self.playing and not self.chain_enabled:
+            self.pattern = self.view_pattern
+            self.next_pattern = None
         self.playing = not self.playing
         if not self.playing:
             self.step = 0
             self.next_pattern = None
 
+    def _sync_chain_pos_to_pattern(self):
+        if not self.chain:
+            self.chain = [0]
+            self.chain_pos = 0
+            return
+        if self.pattern in self.chain:
+            self.chain_pos = self.chain.index(self.pattern)
+        else:
+            self.chain_pos = 0
+
+    def toggle_chain(self):
+        self.chain_enabled = not self.chain_enabled
+        if self.chain_enabled:
+            if not self.chain:
+                self.chain = [0]
+            self.chain_pos = 0
+            self.pattern = self.chain[0]
+            self.next_pattern = None
+            self.step = 0
+            self.pending_events.clear()
+            self.dirty = True
+            return True, "Chain ON"
+        self.pattern = self.view_pattern
+        self.next_pattern = None
+        self.step = 0
+        self.pending_events.clear()
+        self._sync_chain_pos_to_pattern()
+        self.dirty = True
+        return True, "Chain OFF"
+
+    def set_chain_from_text(self, text):
+        src = text.strip()
+        if not src:
+            return False, "Chain canceled"
+
+        values = []
+        for ch in src:
+            if ch in [" ", ",", "-", ">"]:
+                continue
+            if not ch.isdigit():
+                return False, "Invalid chain (use 1-4 with spaces/commas)"
+            n = int(ch)
+            if n < 1 or n > PATTERNS:
+                return False, "Invalid chain (pattern range 1-4)"
+            values.append(n - 1)
+
+        if not values:
+            return False, "Invalid chain (empty)"
+
+        if len(values) > CHAIN_MAX_STEPS:
+            values = values[:CHAIN_MAX_STEPS]
+            clipped = True
+        else:
+            clipped = False
+
+        self.chain = values
+        self.chain_enabled = True
+        self._sync_chain_pos_to_pattern()
+        self.dirty = True
+        if clipped:
+            return True, f"Chain set (max {CHAIN_MAX_STEPS} steps)"
+        return True, "Chain set"
+
+    def chain_display(self):
+        if not self.chain_enabled:
+            return "OFF"
+        if not self.chain:
+            return "OFF"
+        parts = []
+        for idx, pat in enumerate(self.chain):
+            label = str(pat + 1)
+            if idx == self.chain_pos:
+                parts.append(f"[{label}]")
+            else:
+                parts.append(label)
+        return "-".join(parts)
+
     def change_current_pattern_length(self, delta):
-        current = self.pattern_length[self.pattern]
+        current = self.pattern_length[self.view_pattern]
         new_length = max(1, min(STEPS, current + delta))
         if new_length != current:
-            self.pattern_length[self.pattern] = new_length
+            self.pattern_length[self.view_pattern] = new_length
             if self.step >= new_length:
                 self.step = 0
             self.dirty = True
@@ -585,58 +710,62 @@ class Sequencer:
 
     def set_step_velocity(self, track, step, velocity):
         if track == ACCENT_TRACK:
-            self.grid[self.pattern][track][step] = 1 if velocity > 0 else 0
+            self.grid[self.view_pattern][track][step] = 1 if velocity > 0 else 0
         else:
-            self.grid[self.pattern][track][step] = max(0, min(9, velocity))
+            self.grid[self.view_pattern][track][step] = max(0, min(9, velocity))
         self.dirty = True
 
     def set_step_ratchet(self, track, step, ratchet):
         if track == ACCENT_TRACK:
             return
-        self.ratchet_grid[self.pattern][track][step] = max(1, min(4, ratchet))
+        self.ratchet_grid[self.view_pattern][track][step] = max(1, min(4, ratchet))
         self.dirty = True
 
     def quick_set_ratchet(self, track, step, ratchet):
         if track == ACCENT_TRACK:
             return
-        self.ratchet_grid[self.pattern][track][step] = max(1, min(4, ratchet))
-        if self.grid[self.pattern][track][step] == 0:
-            self.grid[self.pattern][track][step] = self.last_velocity
+        self.ratchet_grid[self.view_pattern][track][step] = max(1, min(4, ratchet))
+        if self.grid[self.view_pattern][track][step] == 0:
+            self.grid[self.view_pattern][track][step] = self.last_velocity
         self.dirty = True
 
     def cycle_step_ratchet(self, track, step):
         if track == ACCENT_TRACK:
             return
-        current = self.ratchet_grid[self.pattern][track][step]
-        self.ratchet_grid[self.pattern][track][step] = 1 + (current % 4)
+        current = self.ratchet_grid[self.view_pattern][track][step]
+        self.ratchet_grid[self.view_pattern][track][step] = 1 + (current % 4)
         self.dirty = True
 
     def toggle_step(self, track, step):
-        current = self.grid[self.pattern][track][step]
+        current = self.grid[self.view_pattern][track][step]
         if current == 0:
             if track == ACCENT_TRACK:
-                self.grid[self.pattern][track][step] = 1
+                self.grid[self.view_pattern][track][step] = 1
             else:
-                self.grid[self.pattern][track][step] = self.last_velocity
+                self.grid[self.view_pattern][track][step] = self.last_velocity
         else:
-            self.grid[self.pattern][track][step] = 0
+            self.grid[self.view_pattern][track][step] = 0
         self.dirty = True
 
     def clear_current_pattern(self):
-        self.grid[self.pattern] = [
+        self.grid[self.view_pattern] = [
             [0 for _ in range(STEPS)] for _ in range(TRACKS)
         ]
-        self.ratchet_grid[self.pattern] = [
+        self.ratchet_grid[self.view_pattern] = [
             [1 for _ in range(STEPS)] for _ in range(TRACKS)
         ]
-        self.ratchet_grid[self.pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
+        self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
         self.dirty = True
 
     def select_pattern(self, pattern_index):
-        if self.playing:
+        if self.chain_enabled:
+            self.view_pattern = pattern_index
+        elif self.playing:
             self.next_pattern = pattern_index
         else:
             self.pattern = pattern_index
+            self.view_pattern = pattern_index
+            self._sync_chain_pos_to_pattern()
 
     def toggle_mute_row(self, track):
         self.muted_rows[track] = not self.muted_rows[track]
@@ -757,31 +886,33 @@ def draw(
         content_x,
         (
             f"BPM:{seq.bpm}  {status}  {beat}/4  "
-            f"LEN:{seq.pattern_length[seq.pattern]} ({length_dec_label}/{length_inc_label})  "
+            f"LEN:{seq.pattern_length[seq.view_pattern]} ({length_dec_label}/{length_inc_label})  "
             f"MODE:{mode} ({mode_key_label} to switch)"
         )[:header_right - content_x],
         theme["text"]
     )
 
-    line = "PATTERN: "
+    pattern_line = "PATTERN: "
+    queue_flash_on = int(time.time() * 2) % 2 == 0
     for i in range(PATTERNS):
-        if seq.pattern == i:
-            line += f"[{i+1}] "
-        elif seq.next_pattern == i:
-            line += f"({i+1}) "
+        if seq.view_pattern == i:
+            pattern_line += f"[{i+1}] "
+        elif (not seq.chain_enabled) and seq.playing and seq.next_pattern == i:
+            pattern_line += f"({i+1}) " if queue_flash_on else f" {i+1}  "
         else:
-            line += f" {i+1}  "
-    if clear_confirm:
-        line = f"Clear current pattern? Press {clear_key_label} again to confirm."
-    elif pattern_load_prompt:
-        line = pattern_load_prompt
-    elif status_message:
-        line = status_message
-    safe_add(5, content_x, line[:header_right - content_x], theme["hint"])
+            pattern_line += f" {i+1}  "
+
+    pattern_attr = theme["pattern_manual"] if not seq.chain_enabled else theme["pattern_chain_off"]
+    safe_add(5, content_x, pattern_line[:header_right - content_x], pattern_attr)
+
+    chain_text = f"CHAIN:{seq.chain_display()}"
+    chain_attr = theme["chain_on"] if seq.chain_enabled else theme["chain_off"]
+    chain_x = content_x + len(pattern_line) + 2
+    safe_add(5, chain_x, chain_text[:header_right - chain_x], chain_attr)
 
     grid_content_x = grid_left + 2
     playhead_y = grid_top + 1
-    current_length = seq.pattern_length[seq.pattern]
+    current_length = seq.pattern_length[seq.view_pattern]
     x = grid_content_x
     safe_add(playhead_y, x, "  ", theme["text"])
     x += 2
@@ -830,8 +961,8 @@ def draw(
                     char = f"P{pan_val}"
                 cell_attr = row_attr
             else:
-                val = seq.grid[seq.pattern][t][s]
-                ratchet = seq.ratchet_grid[seq.pattern][t][s]
+                val = seq.grid[seq.view_pattern][t][s]
+                ratchet = seq.ratchet_grid[seq.view_pattern][t][s]
                 if val == 0:
                     char = "."
                 elif ratchet > 1:
@@ -843,7 +974,7 @@ def draw(
                 else:
                     cell_attr = velocity_attr(val)
 
-                if s >= seq.pattern_length[seq.pattern]:
+                if s >= seq.pattern_length[seq.view_pattern]:
                     cell_attr = theme["muted"]
 
             sep = "| " if s == PAN_COL or (s < STEPS and s % 4 == 0) else "  "
@@ -857,6 +988,21 @@ def draw(
 
         mute_mark = "M" if seq.muted_rows[t] else " "
         safe_add(y, x, f" {mute_mark} {seq.engine.sample_names[t]}", row_attr)
+
+    prompt_line = ""
+    if clear_confirm:
+        prompt_line = f"Clear current pattern? Press {clear_key_label} again to confirm."
+    elif pattern_load_prompt:
+        prompt_line = pattern_load_prompt
+    elif status_message:
+        prompt_line = status_message
+
+    if prompt_line:
+        prompt_y = row_start + TRACKS
+        if prompt_y < grid_bottom:
+            safe_add(prompt_y, grid_content_x, prompt_line[:grid_right - grid_content_x], theme["hint"])
+        else:
+            safe_add(5, content_x, prompt_line[:header_right - content_x], theme["hint"])
 
     if help_active:
         visible_lines = [line for line in help_lines if line.strip() != ""]
@@ -897,6 +1043,8 @@ class Controller:
         self.pattern_load_input = ""
         self.kit_load_active = False
         self.kit_load_input = ""
+        self.chain_edit_active = False
+        self.chain_edit_input = ""
         self.help_active = False
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
@@ -916,6 +1064,10 @@ class Controller:
     def _close_kit_dialog(self):
         self.kit_load_active = False
         self.kit_load_input = ""
+
+    def _close_chain_dialog(self):
+        self.chain_edit_active = False
+        self.chain_edit_input = ""
 
     def handle_key(self, key):
         event_tokens = _event_tokens(key)
@@ -939,6 +1091,9 @@ class Controller:
             self.move_cursor(0, 1)
             return True
         if key_code == 27:  # ESC
+            if self.chain_edit_active:
+                self._close_chain_dialog()
+                return True
             if self.pattern_save_active:
                 self._close_pattern_save_dialog()
                 return True
@@ -971,6 +1126,25 @@ class Controller:
             if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
                 if len(self.pattern_load_input) < 120:
                     self.pattern_load_input += key
+                return True
+
+            return True
+
+        if self.chain_edit_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.set_chain_from_text(self.chain_edit_input)
+                self.status_message = message
+                self._close_chain_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.chain_edit_input = self.chain_edit_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.chain_edit_input) < 120:
+                    self.chain_edit_input += key
                 return True
 
             return True
@@ -1036,6 +1210,8 @@ class Controller:
             self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("pattern_load", event_tokens):
             self.pattern_load_active = True
@@ -1044,6 +1220,8 @@ class Controller:
             self.pattern_save_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("kit_load", event_tokens):
             self.kit_load_active = True
@@ -1052,7 +1230,22 @@ class Controller:
             self.pattern_save_input = ""
             self.pattern_load_active = False
             self.pattern_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
             self.status_message = ""
+        elif self.keymap.matches("chain_edit", event_tokens):
+            self.chain_edit_active = True
+            self.chain_edit_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.status_message = ""
+        elif self.keymap.matches("chain_toggle", event_tokens):
+            ok, message = self.seq.toggle_chain()
+            self.status_message = message
         elif self.keymap.matches("mode_toggle", event_tokens):
             if self.cursor_x != PAN_COL:
                 if self.edit_mode == "velocity":
@@ -1132,6 +1325,10 @@ def ui_loop(stdscr, seq):
         "playhead": curses.A_BOLD,
         "muted": curses.A_DIM,
         "accent": curses.A_BOLD,
+        "chain_on": curses.A_BOLD,
+        "chain_off": curses.A_DIM,
+        "pattern_manual": curses.A_BOLD,
+        "pattern_chain_off": curses.A_DIM,
         "velocity_low": 0,
         "velocity_high": curses.A_BOLD,
     }
@@ -1155,6 +1352,10 @@ def ui_loop(stdscr, seq):
         theme["playhead"] = curses.color_pair(3) | curses.A_BOLD
         theme["muted"] = curses.color_pair(2) | curses.A_DIM
         theme["accent"] = curses.color_pair(4) | curses.A_BOLD
+        theme["chain_on"] = curses.color_pair(3) | curses.A_BOLD
+        theme["chain_off"] = curses.color_pair(2) | curses.A_DIM
+        theme["pattern_manual"] = curses.color_pair(3) | curses.A_BOLD
+        theme["pattern_chain_off"] = curses.color_pair(2) | curses.A_DIM
         theme["velocity_low"] = curses.color_pair(2) | curses.A_DIM
         theme["velocity_high"] = curses.color_pair(2) | curses.A_BOLD
 
@@ -1166,6 +1367,7 @@ def ui_loop(stdscr, seq):
     clear_key_label = keymap.label("clear_pattern")
     length_dec_label = keymap.label("pattern_length_dec")
     length_inc_label = keymap.label("pattern_length_inc")
+    chain_edit_label = keymap.label("chain_edit")
     pattern_export_label = keymap.label("pattern_export")
     pattern_load_label = keymap.label("pattern_load")
     kit_load_label = keymap.label("kit_load")
@@ -1185,6 +1387,9 @@ def ui_loop(stdscr, seq):
 
         if key != -1:
             if not controller.handle_key(key):
+                if seq.dirty:
+                    seq.save()
+                    seq.dirty = False
                 return
             should_draw = True
 
@@ -1196,15 +1401,21 @@ def ui_loop(stdscr, seq):
             controller.pattern_save_active,
             controller.pattern_load_active,
             controller.kit_load_active,
+            controller.chain_edit_active,
             controller.help_active,
             controller.pattern_save_input,
             controller.pattern_load_input,
             controller.kit_load_input,
+            controller.chain_edit_input,
             controller.status_message,
             seq.bpm,
-            seq.pattern_length[seq.pattern],
+            seq.pattern_length[seq.view_pattern],
             seq.pattern,
+            seq.view_pattern,
             seq.next_pattern,
+            seq.chain_enabled,
+            tuple(seq.chain),
+            seq.chain_pos,
         )
         if ui_state != last_ui_state:
             should_draw = True
@@ -1229,16 +1440,20 @@ def ui_loop(stdscr, seq):
                     f"Save pattern filename ({pattern_export_label}, Esc cancels): {controller.pattern_save_input}"
                     if controller.pattern_save_active
                     else (
-                        f"Give pattern filename ({pattern_load_label}, Esc cancels): {controller.pattern_load_input}"
-                        if controller.pattern_load_active
+                        f"Give chain sequence ({chain_edit_label}, Esc cancels): {controller.chain_edit_input}"
+                        if controller.chain_edit_active
                         else (
-                            f"Give sample folder name ({kit_load_label}, Esc cancels): {controller.kit_load_input}"
-                            if controller.kit_load_active
-                            else ""
+                            f"Give pattern filename ({pattern_load_label}, Esc cancels): {controller.pattern_load_input}"
+                            if controller.pattern_load_active
+                            else (
+                                f"Give sample folder name ({kit_load_label}, Esc cancels): {controller.kit_load_input}"
+                                if controller.kit_load_active
+                                else ""
+                            )
                         )
                     )
                 ),
-                controller.status_message if not controller.pattern_save_active and not controller.pattern_load_active and not controller.kit_load_active else "",
+                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active else "",
                 controller.help_active,
                 help_lines,
                 help_key_label,
