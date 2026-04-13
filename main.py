@@ -55,6 +55,7 @@ PAGE_MENU_ITEMS = [
     "5. Load Pattern",
     "6. Load Sample Kit",
     "7. Toggle Chain Mode",
+    "8. Set Swing",
 ]
 
 
@@ -367,6 +368,7 @@ class Sequencer:
         self.last_velocity = 5
         self.track_pan = [5 for _ in range(TRACKS)]
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
+        self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
         self.page_clipboard = None
 
@@ -390,6 +392,7 @@ class Sequencer:
             "grid": self.grid,
             "track_pan": self.track_pan,
             "pattern_length": self.pattern_length,
+            "pattern_swing": self.pattern_swing,
             "ratchet_grid": self.ratchet_grid,
             "chain_enabled": self.chain_enabled,
             "chain": self.chain
@@ -445,6 +448,16 @@ class Sequencer:
                 except (ValueError, TypeError):
                     normalized_lengths[i] = STEPS
         self.pattern_length = normalized_lengths
+
+        loaded_swing = data.get("pattern_swing", self.pattern_swing)
+        normalized_swing = [50 for _ in range(PATTERNS)]
+        if isinstance(loaded_swing, list):
+            for i in range(min(PATTERNS, len(loaded_swing))):
+                try:
+                    normalized_swing[i] = max(50, min(75, int(loaded_swing[i])))
+                except (ValueError, TypeError):
+                    normalized_swing[i] = 50
+        self.pattern_swing = normalized_swing
 
         loaded_chain = data.get("chain", self.chain)
         normalized_chain = []
@@ -556,7 +569,7 @@ class Sequencer:
         next_time = time.perf_counter()
 
         while True:
-            step_time = (60.0 / self.bpm) / self.steps_per_beat
+            base_step_time = (60.0 / self.bpm) / self.steps_per_beat
             now = time.perf_counter()
 
             while self.pending_events and self.pending_events[0][0] <= now:
@@ -565,6 +578,7 @@ class Sequencer:
 
             if self.playing:
                 if now >= next_time:
+                    step_time = self._step_duration_for(self.pattern, self.step, base_step_time)
                     current_length = self.pattern_length[self.pattern]
 
                     accent_on = (
@@ -713,6 +727,35 @@ class Sequencer:
             if self.step >= new_length:
                 self.step = 0
             self.dirty = True
+
+    def _step_duration_for(self, pattern_index, step_index, base_step_time):
+        swing = self.pattern_swing[pattern_index]
+        if swing <= 50:
+            return base_step_time
+
+        pair_total = base_step_time * 2.0
+        even_duration = pair_total * (swing / 100.0)
+        odd_duration = pair_total - even_duration
+        return even_duration if (step_index % 2 == 0) else odd_duration
+
+    def set_current_pattern_swing(self, value):
+        swing = max(50, min(75, int(value)))
+        if self.pattern_swing[self.view_pattern] != swing:
+            self.pattern_swing[self.view_pattern] = swing
+            self.dirty = True
+
+    def set_current_pattern_swing_from_text(self, text):
+        src = text.strip()
+        if not src:
+            return False, "Swing canceled"
+        try:
+            value = int(src)
+        except ValueError:
+            return False, "Swing must be a number (50-75)"
+        if value < 50 or value > 75:
+            return False, "Swing out of range (50-75)"
+        self.set_current_pattern_swing(value)
+        return True, f"Swing set to {value}"
 
     def change_bpm(self, delta):
         self.bpm = max(1, self.bpm + delta)
@@ -936,6 +979,7 @@ def draw(
         (
             f"BPM:{seq.bpm}  {status}  {beat}/4  "
             f"LEN:{seq.pattern_length[seq.view_pattern]} ({length_dec_label}/{length_inc_label})  "
+            f"SW:{seq.pattern_swing[seq.view_pattern]}  "
             f"MODE:{mode} ({mode_key_label} to switch)  "
             f"MENU:{page_menu_key_label}"
         )[:header_right - content_x],
@@ -1117,6 +1161,8 @@ class Controller:
         self.kit_load_input = ""
         self.chain_edit_active = False
         self.chain_edit_input = ""
+        self.swing_edit_active = False
+        self.swing_edit_input = ""
         self.page_menu_active = False
         self.page_menu_index = 0
         self.help_active = False
@@ -1145,6 +1191,10 @@ class Controller:
 
     def _close_page_menu(self):
         self.page_menu_active = False
+
+    def _close_swing_dialog(self):
+        self.swing_edit_active = False
+        self.swing_edit_input = ""
 
     def _run_page_menu_action(self):
         if self.page_menu_index == 0:
@@ -1184,8 +1234,22 @@ class Controller:
             self.chain_edit_active = False
             self.chain_edit_input = ""
             ok, message = True, ""
-        else:
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
+        elif self.page_menu_index == 6:
             ok, message = self.seq.toggle_chain()
+        else:
+            self.swing_edit_active = True
+            self.swing_edit_input = str(self.seq.pattern_swing[self.seq.view_pattern])
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            ok, message = True, ""
         self.status_message = message
 
     def handle_key(self, key):
@@ -1245,6 +1309,9 @@ class Controller:
             if self.pattern_load_active:
                 self._close_pattern_dialog()
                 return True
+            if self.swing_edit_active:
+                self._close_swing_dialog()
+                return True
             if self.clear_confirm:
                 self.clear_confirm = False
                 return True
@@ -1287,6 +1354,25 @@ class Controller:
             if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
                 if len(self.chain_edit_input) < 120:
                     self.chain_edit_input += key
+                return True
+
+            return True
+
+        if self.swing_edit_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.set_current_pattern_swing_from_text(self.swing_edit_input)
+                self.status_message = message
+                self._close_swing_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.swing_edit_input = self.swing_edit_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isdigit():
+                if len(self.swing_edit_input) < 3:
+                    self.swing_edit_input += key
                 return True
 
             return True
@@ -1354,6 +1440,8 @@ class Controller:
             self.kit_load_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
         elif self.keymap.matches("help_menu", event_tokens):
             self.help_active = True
         elif self.keymap.matches("pattern_copy", event_tokens):
@@ -1371,6 +1459,8 @@ class Controller:
             self.kit_load_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("pattern_load", event_tokens):
             self.pattern_load_active = True
@@ -1381,6 +1471,8 @@ class Controller:
             self.kit_load_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("kit_load", event_tokens):
             self.kit_load_active = True
@@ -1391,6 +1483,8 @@ class Controller:
             self.pattern_load_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("chain_edit", event_tokens):
             self.chain_edit_active = True
@@ -1401,6 +1495,8 @@ class Controller:
             self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
             self.status_message = ""
         elif self.keymap.matches("chain_toggle", event_tokens):
             ok, message = self.seq.toggle_chain()
@@ -1562,6 +1658,7 @@ def ui_loop(stdscr, seq):
             controller.pattern_load_active,
             controller.kit_load_active,
             controller.chain_edit_active,
+            controller.swing_edit_active,
             controller.page_menu_active,
             controller.page_menu_index,
             controller.help_active,
@@ -1569,9 +1666,11 @@ def ui_loop(stdscr, seq):
             controller.pattern_load_input,
             controller.kit_load_input,
             controller.chain_edit_input,
+            controller.swing_edit_input,
             controller.status_message,
             seq.bpm,
             seq.pattern_length[seq.view_pattern],
+            seq.pattern_swing[seq.view_pattern],
             seq.pattern,
             seq.view_pattern,
             seq.next_pattern,
@@ -1610,12 +1709,16 @@ def ui_loop(stdscr, seq):
                             else (
                                 f"Give sample folder name (Esc cancels): {controller.kit_load_input}"
                                 if controller.kit_load_active
-                                else ""
+                                else (
+                                    f"Swing 50-75 (Esc cancels): {controller.swing_edit_input}"
+                                    if controller.swing_edit_active
+                                    else ""
+                                )
                             )
                         )
                     )
                 ),
-                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active else "",
+                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.swing_edit_active else "",
                 controller.page_menu_active,
                 controller.page_menu_index,
                 page_menu_label,
