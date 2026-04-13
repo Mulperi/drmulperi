@@ -9,13 +9,15 @@ import argparse
 import heapq
 import configparser
 import warnings
+import shutil
 from scipy.io import wavfile
 
 TRACKS = 9
 STEPS = 16
 CHAIN_MAX_STEPS = 16
 PAN_COL = STEPS
-GRID_COLS = STEPS + 1
+LOAD_COL = STEPS + 1
+GRID_COLS = STEPS + 2
 PATTERNS = 4
 DEFAULT_KIT_PATH = "kit1"
 DEFAULT_PATTERN_NAME = "patterns"
@@ -56,6 +58,7 @@ PAGE_MENU_ITEMS = [
     "6. Load Sample Kit",
     "7. Toggle Chain Mode",
     "8. Set Swing",
+    "9. Save Pack",
 ]
 
 
@@ -221,7 +224,7 @@ class AudioEngine:
         self.event_write = 0
         self.event_read = 0
 
-        self.samples, self.sample_names = self.load_samples()
+        self.samples, self.sample_names, self.sample_paths = self.load_samples()
 
         self.stream = sd.OutputStream(
             samplerate=self.sr,
@@ -244,42 +247,67 @@ class AudioEngine:
 
         samples = []
         sample_names = []
+        sample_paths = []
 
         for i in range(TRACKS - 1):
             if i >= len(sample_files):
                 samples.append(None)
                 sample_names.append("-")
+                sample_paths.append(None)
                 continue
 
             path = sample_files[i]
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", wavfile.WavFileWarning)
-                sr, data = wavfile.read(path)
-
-            if data.dtype == np.int16:
-                data = data.astype(np.float32) / 32768.0
-            elif data.dtype == np.int32:
-                data = data.astype(np.float32) / 2147483648.0
-            else:
-                data = data.astype(np.float32)
-
-            if len(data.shape) == 2:
-                data = data.mean(axis=1)
+            data = self._read_wav_mono(path)
 
             samples.append(data)
             sample_names.append(os.path.basename(path))
+            sample_paths.append(path)
 
         samples.append(None)
         sample_names.append("Accent")
-        return samples, sample_names
+        sample_paths.append(None)
+        return samples, sample_names, sample_paths
 
     def reload_kit(self, kit_path):
         self.kit_path = kit_path
-        self.samples, self.sample_names = self.load_samples()
+        self.samples, self.sample_names, self.sample_paths = self.load_samples()
         for v in self.voices:
             v.active = False
         loaded_count = sum(1 for s in self.samples[:TRACKS - 1] if s is not None)
         return loaded_count
+
+    def _read_wav_mono(self, path):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", wavfile.WavFileWarning)
+            _, data = wavfile.read(path)
+
+        if data.dtype == np.int16:
+            data = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            data = data.astype(np.float32) / 2147483648.0
+        else:
+            data = data.astype(np.float32)
+
+        if len(data.shape) == 2:
+            data = data.mean(axis=1)
+        return data
+
+    def load_single_sample(self, track, path):
+        if track < 0 or track >= TRACKS - 1:
+            return False, "Invalid track"
+        if not os.path.isfile(path) or not path.lower().endswith(".wav"):
+            return False, "Select a .wav file"
+        try:
+            data = self._read_wav_mono(path)
+        except Exception as exc:
+            return False, f"Sample load failed: {exc}"
+
+        self.samples[track] = data
+        self.sample_names[track] = os.path.basename(path)
+        self.sample_paths[track] = path
+        for v in self.voices:
+            v.active = False
+        return True, f"Loaded {self.sample_names[track]} on track {track + 1}"
 
     def trigger(self, track, velocity, pan):
         pan_pos = (pan - 1) / 8.0
@@ -564,6 +592,44 @@ class Sequencer:
         loaded_count = self.engine.reload_kit(path)
         return True, f"Loaded kit {os.path.basename(path)} ({loaded_count}/8 samples)"
 
+    def load_single_sample_to_track(self, track, path):
+        ok, message = self.engine.load_single_sample(track, path)
+        if ok:
+            self.dirty = True
+        return ok, message
+
+    def save_pack(self, foldername):
+        target = foldername.strip()
+        if not target:
+            return False, "Save pack canceled"
+
+        pack_dir = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        try:
+            os.makedirs(pack_dir, exist_ok=True)
+        except Exception as exc:
+            return False, f"Pack folder create failed: {exc}"
+
+        copied = 0
+        for t in range(TRACKS - 1):
+            src = self.engine.sample_paths[t] if t < len(self.engine.sample_paths) else None
+            if not src or not os.path.isfile(src):
+                continue
+            dst = os.path.join(pack_dir, f"{t+1:02d}_{self.engine.sample_names[t]}")
+            try:
+                shutil.copy2(src, dst)
+                copied += 1
+            except Exception:
+                continue
+
+        pattern_path = os.path.join(pack_dir, "pattern.json")
+        try:
+            with open(pattern_path, "w") as f:
+                json.dump(self._serialize(), f)
+        except Exception as exc:
+            return False, f"Pattern save failed: {exc}"
+
+        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 samples + pattern.json)"
+
     # ---------- AUDIO LOOP ----------
     def run(self):
         next_time = time.perf_counter()
@@ -766,10 +832,14 @@ class Sequencer:
         self.dirty = True
 
     def set_step_velocity(self, track, step, velocity):
+        prev = self.grid[self.view_pattern][track][step]
         if track == ACCENT_TRACK:
             self.grid[self.view_pattern][track][step] = 1 if velocity > 0 else 0
         else:
             self.grid[self.view_pattern][track][step] = max(0, min(9, velocity))
+            new_val = self.grid[self.view_pattern][track][step]
+            if prev == 0 and new_val > 0:
+                self._preview_note_if_idle(track, new_val)
         self.dirty = True
 
     def set_step_ratchet(self, track, step, ratchet):
@@ -781,9 +851,12 @@ class Sequencer:
     def quick_set_ratchet(self, track, step, ratchet):
         if track == ACCENT_TRACK:
             return
+        prev = self.grid[self.view_pattern][track][step]
         self.ratchet_grid[self.view_pattern][track][step] = max(1, min(4, ratchet))
         if self.grid[self.view_pattern][track][step] == 0:
             self.grid[self.view_pattern][track][step] = self.last_velocity
+        if prev == 0 and self.grid[self.view_pattern][track][step] > 0:
+            self._preview_note_if_idle(track, self.grid[self.view_pattern][track][step])
         self.dirty = True
 
     def cycle_step_ratchet(self, track, step):
@@ -800,6 +873,7 @@ class Sequencer:
                 self.grid[self.view_pattern][track][step] = 1
             else:
                 self.grid[self.view_pattern][track][step] = self.last_velocity
+                self._preview_note_if_idle(track, self.grid[self.view_pattern][track][step])
         else:
             self.grid[self.view_pattern][track][step] = 0
         self.dirty = True
@@ -869,6 +943,11 @@ class Sequencer:
         if track >= TRACKS - 1:
             return
         self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track])
+
+    def _preview_note_if_idle(self, track, velocity):
+        if self.playing or track >= TRACKS - 1 or velocity <= 0:
+            return
+        self.engine.trigger(track, velocity / 9.0, self.track_pan[track])
 
 # ---------- UI ----------
 def draw(
@@ -1022,10 +1101,15 @@ def draw(
         if s == current_length and s < STEPS:
             sep = "| "
             sep_attr = theme["hint"]
+        elif s == PAN_COL or s == LOAD_COL:
+            sep = "| "
 
         safe_add(playhead_y, x, sep, sep_attr)
         x += len(sep)
-        body = "  v  " if show_playhead and s == seq.step else "     "
+        if s == LOAD_COL:
+            body = "      "
+        else:
+            body = "  v  " if show_playhead and s == seq.step else "     "
         body_attr = theme["playhead"] if show_playhead and s == seq.step else theme["muted"]
         safe_add(playhead_y, x, body, body_attr)
         x += len(body)
@@ -1060,6 +1144,9 @@ def draw(
                     pan_val = seq.track_pan[t]
                     char = f"P{pan_val}"
                 cell_attr = row_attr
+            elif s == LOAD_COL:
+                char = "LOAD" if t != ACCENT_TRACK else ""
+                cell_attr = row_attr
             else:
                 val = seq.grid[seq.view_pattern][t][s]
                 ratchet = seq.ratchet_grid[seq.view_pattern][t][s]
@@ -1077,25 +1164,33 @@ def draw(
                 if s >= seq.pattern_length[seq.view_pattern]:
                     cell_attr = theme["muted"]
 
-            sep = "| " if s == PAN_COL or (s < STEPS and s % 4 == 0) else "  "
+            sep = "| " if s == PAN_COL or s == LOAD_COL or (s < STEPS and s % 4 == 0) else "  "
             safe_add(y, x, sep, theme["divider"])
             x += len(sep)
-            body = f"[{char:>3}]" if cursor_x == s and cursor_y == t else f" {char:>3} "
+            cell_w = 4 if s == LOAD_COL else 3
+            body = f"[{char:>{cell_w}}]" if cursor_x == s and cursor_y == t else f" {char:>{cell_w}} "
             if cursor_x == s and cursor_y == t:
                 cell_attr = cell_attr | curses.A_REVERSE
             safe_add(y, x, body, cell_attr)
             x += len(body)
 
         mute_mark = "M" if seq.muted_rows[t] else " "
-        safe_add(y, x, f" {mute_mark} {seq.engine.sample_names[t]}", row_attr)
+        safe_add(y, x, f" {mute_mark}", row_attr)
 
     prompt_line = ""
+    if cursor_y < TRACKS - 1:
+        sample_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on L to load)"
+    else:
+        sample_line = "SAMPLE: Accent track (no sample file)"
+
     if clear_confirm:
         prompt_line = f"Clear current pattern? Press {clear_key_label} again to confirm."
     elif pattern_load_prompt:
         prompt_line = pattern_load_prompt
     elif status_message:
-        prompt_line = status_message
+        prompt_line = f"{status_message} | {sample_line}"
+    else:
+        prompt_line = sample_line
 
     if prompt_line:
         prompt_y = row_start + TRACKS
@@ -1148,8 +1243,13 @@ def draw(
             safe_add(box_top + 3 + i, box_left + 2, item[: box_width - 4], item_attr)
 
     if file_browser_active:
-        mode_name = "PATTERN" if file_browser_mode == "pattern" else "KIT"
-        title = f"{mode_name} BROWSER (Enter select, <-/-> nav, Esc close)"
+        if file_browser_mode == "pattern":
+            mode_name = "PATTERN"
+        elif file_browser_mode == "sample":
+            mode_name = "SAMPLE"
+        else:
+            mode_name = "KIT"
+        title = f"{mode_name} BROWSER (Enter open/select, <-/-> or Backspace up, Esc close)"
         visible_items = file_browser_items if file_browser_items else [{"name": "(empty)", "is_dir": False, "is_parent": False}]
         list_height = min(14, max(6, h - 12))
         max_name = max(len(it["name"]) for it in visible_items)
@@ -1199,6 +1299,8 @@ class Controller:
         self.pattern_load_input = ""
         self.kit_load_active = False
         self.kit_load_input = ""
+        self.pack_save_active = False
+        self.pack_save_input = ""
         self.chain_edit_active = False
         self.chain_edit_input = ""
         self.swing_edit_active = False
@@ -1208,6 +1310,7 @@ class Controller:
         self.help_active = False
         self.file_browser_active = False
         self.file_browser_mode = None
+        self.file_browser_target_track = None
         self.file_browser_path = os.getcwd()
         self.file_browser_items = []
         self.file_browser_index = 0
@@ -1230,6 +1333,10 @@ class Controller:
         self.kit_load_active = False
         self.kit_load_input = ""
 
+    def _close_pack_dialog(self):
+        self.pack_save_active = False
+        self.pack_save_input = ""
+
     def _close_chain_dialog(self):
         self.chain_edit_active = False
         self.chain_edit_input = ""
@@ -1240,15 +1347,20 @@ class Controller:
     def _close_file_browser(self):
         self.file_browser_active = False
         self.file_browser_mode = None
+        self.file_browser_target_track = None
         self.file_browser_items = []
         self.file_browser_index = 0
 
     def _refresh_file_browser(self):
         items = []
-        current = self.file_browser_path
+        current = os.path.abspath(self.file_browser_path)
+        self.file_browser_path = current
         parent = os.path.dirname(current)
         if parent and parent != current:
             items.append({"name": "../", "path": parent, "is_dir": True, "is_parent": True})
+
+        if self.file_browser_mode == "kit":
+            items.append({"name": "[LOAD THIS FOLDER]", "path": current, "is_dir": False, "is_parent": False, "is_action": True})
 
         try:
             entries = list(os.scandir(current))
@@ -1263,8 +1375,11 @@ class Controller:
                 continue
             if e.is_dir(follow_symlinks=False):
                 dirs.append(e)
-            elif self.file_browser_mode == "pattern" and e.is_file(follow_symlinks=False) and e.name.lower().endswith(".json"):
-                files.append(e)
+            elif e.is_file(follow_symlinks=False):
+                if self.file_browser_mode == "pattern" and e.name.lower().endswith(".json"):
+                    files.append(e)
+                elif self.file_browser_mode == "sample" and e.name.lower().endswith(".wav"):
+                    files.append(e)
 
         dirs.sort(key=lambda e: e.name.casefold())
         files.sort(key=lambda e: e.name.casefold())
@@ -1278,15 +1393,27 @@ class Controller:
         if self.file_browser_index >= len(items):
             self.file_browser_index = max(0, len(items) - 1)
 
-    def _open_file_browser(self, mode):
+    def _open_file_browser(self, mode, target_track=None):
         self.file_browser_mode = mode
-        self.file_browser_path = os.getcwd()
+        self.file_browser_target_track = target_track
+        start_path = os.getcwd()
+        if mode == "kit":
+            start_path = self.seq.kit_path if os.path.isdir(self.seq.kit_path) else start_path
+        elif mode == "sample" and target_track is not None:
+            sample_path = self.seq.engine.sample_paths[target_track]
+            if sample_path and os.path.exists(sample_path):
+                start_path = os.path.dirname(sample_path)
+            elif os.path.isdir(self.seq.kit_path):
+                start_path = self.seq.kit_path
+        self.file_browser_path = os.path.abspath(start_path)
         self.file_browser_active = True
         self.file_browser_index = 0
         self.pattern_load_active = False
         self.pattern_load_input = ""
         self.kit_load_active = False
         self.kit_load_input = ""
+        self.pack_save_active = False
+        self.pack_save_input = ""
         self._refresh_file_browser()
 
     def _file_browser_enter_dir(self):
@@ -1310,22 +1437,37 @@ class Controller:
             self._refresh_file_browser()
             return
 
+        if item.get("is_action"):
+            if self.file_browser_mode == "kit":
+                ok, message = self.seq.load_kit_folder(item["path"])
+                self.status_message = message
+                self._close_file_browser()
+            return
+
+        if item["is_dir"]:
+            self.file_browser_path = item["path"]
+            self.file_browser_index = 0
+            self._refresh_file_browser()
+            return
+
         if self.file_browser_mode == "pattern":
-            if item["is_dir"]:
-                self.file_browser_path = item["path"]
-                self.file_browser_index = 0
-                self._refresh_file_browser()
-                return
             ok, message = self.seq.load_project_file(item["path"])
             self.status_message = message
             self._close_file_browser()
             return
 
         if self.file_browser_mode == "kit":
-            if item["is_dir"]:
-                ok, message = self.seq.load_kit_folder(item["path"])
-                self.status_message = message
+            return
+
+        if self.file_browser_mode == "sample":
+            track = self.file_browser_target_track
+            if track is None:
+                self.status_message = "No target track selected"
                 self._close_file_browser()
+                return
+            ok, message = self.seq.load_single_sample_to_track(track, item["path"])
+            self.status_message = message
+            self._close_file_browser()
             return
 
     def _close_swing_dialog(self):
@@ -1372,7 +1514,7 @@ class Controller:
             self.swing_edit_input = ""
         elif self.page_menu_index == 6:
             ok, message = self.seq.toggle_chain()
-        else:
+        elif self.page_menu_index == 7:
             self.swing_edit_active = True
             self.swing_edit_input = str(self.seq.pattern_swing[self.seq.view_pattern])
             self.pattern_save_active = False
@@ -1384,11 +1526,27 @@ class Controller:
             self.chain_edit_active = False
             self.chain_edit_input = ""
             ok, message = True, ""
+        else:
+            self.pack_save_active = True
+            self.pack_save_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
+            ok, message = True, ""
         self.status_message = message
 
     def handle_key(self, key):
         event_tokens = _event_tokens(key)
         key_code = key if isinstance(key, int) else ord(key)
+        if self.status_message and key_code != -1:
+            self.status_message = ""
 
         if self.help_active:
             if key_code == 27 or self.keymap.matches("help_menu", event_tokens):
@@ -1398,6 +1556,13 @@ class Controller:
         if self.file_browser_active:
             if key_code == 27:
                 self._close_file_browser()
+                return True
+            if key_code in {curses.KEY_BACKSPACE, 127, 8}:
+                parent = os.path.dirname(self.file_browser_path)
+                if parent and parent != self.file_browser_path:
+                    self.file_browser_path = parent
+                    self.file_browser_index = 0
+                    self._refresh_file_browser()
                 return True
             if key_code == curses.KEY_UP:
                 if self.file_browser_items:
@@ -1457,6 +1622,17 @@ class Controller:
         if key_code == curses.KEY_DOWN:
             self.move_cursor(0, 1)
             return True
+        if "TAB" in event_tokens or key_code == 9:
+            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL]
+            next_idx = 0
+            for i, col in enumerate(cycle):
+                if col > self.cursor_x:
+                    next_idx = i
+                    break
+            else:
+                next_idx = 0
+            self.cursor_x = cycle[next_idx]
+            return True
         if key_code == 27:  # ESC
             if self.chain_edit_active:
                 self._close_chain_dialog()
@@ -1466,6 +1642,9 @@ class Controller:
                 return True
             if self.kit_load_active:
                 self._close_kit_dialog()
+                return True
+            if self.pack_save_active:
+                self._close_pack_dialog()
                 return True
             if self.pattern_load_active:
                 self._close_pattern_dialog()
@@ -1576,6 +1755,25 @@ class Controller:
 
             return True
 
+        if self.pack_save_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.save_pack(self.pack_save_input)
+                self.status_message = message
+                self._close_pack_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.pack_save_input = self.pack_save_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.pack_save_input) < 120:
+                    self.pack_save_input += key
+                return True
+
+            return True
+
         if self.keymap.matches("clear_pattern", event_tokens):
             if self.clear_confirm:
                 self.seq.clear_current_pattern()
@@ -1599,6 +1797,8 @@ class Controller:
             self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1618,6 +1818,8 @@ class Controller:
             self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1629,6 +1831,8 @@ class Controller:
             self.pattern_save_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1640,6 +1844,8 @@ class Controller:
             self.pattern_save_input = ""
             self.pattern_load_active = False
             self.pattern_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1654,6 +1860,8 @@ class Controller:
             self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.swing_edit_active = False
             self.swing_edit_input = ""
             self.status_message = ""
@@ -1661,7 +1869,7 @@ class Controller:
             ok, message = self.seq.toggle_chain()
             self.status_message = message
         elif self.keymap.matches("mode_toggle", event_tokens):
-            if self.cursor_x != PAN_COL:
+            if self.cursor_x < STEPS:
                 if self.edit_mode == "velocity":
                     self.edit_mode = "ratchet"
                 else:
@@ -1679,7 +1887,7 @@ class Controller:
             ord('"'), 164,  # common Shift+2 / Shift+4 on some EU layouts
             curses.KEY_F1, curses.KEY_F2, curses.KEY_F3, curses.KEY_F4
         ]:
-            if self.cursor_x != PAN_COL and self.cursor_y != ACCENT_TRACK:
+            if self.cursor_x < STEPS and self.cursor_y != ACCENT_TRACK:
                 quick_ratchet = {
                     ord('!'): 1,
                     ord('@'): 2,
@@ -1698,6 +1906,8 @@ class Controller:
             if self.cursor_x == PAN_COL:
                 if velocity > 0:
                     self.seq.set_track_pan(self.cursor_y, velocity)
+            elif self.cursor_x == LOAD_COL:
+                pass
             elif self.edit_mode == "ratchet":
                 if self.cursor_y == ACCENT_TRACK:
                     self.seq.set_step_velocity(self.cursor_y, self.cursor_x, velocity)
@@ -1707,9 +1917,12 @@ class Controller:
                 self.seq.set_step_velocity(self.cursor_y, self.cursor_x, velocity)
                 if velocity > 0:
                     self.seq.set_last_velocity(velocity)
-        elif key_code == 10:
+        elif key_code in [10, 13, curses.KEY_ENTER]:
             if self.cursor_x == PAN_COL:
                 self.seq.set_track_pan(self.cursor_y, 5)
+            elif self.cursor_x == LOAD_COL:
+                if self.cursor_y != ACCENT_TRACK:
+                    self._open_file_browser("sample", target_track=self.cursor_y)
             else:
                 self.seq.toggle_step(self.cursor_y, self.cursor_x)
         elif key_code in [ord('p'), ord('P')]:
@@ -1814,6 +2027,7 @@ def ui_loop(stdscr, seq):
             controller.pattern_save_active,
             controller.pattern_load_active,
             controller.kit_load_active,
+            controller.pack_save_active,
             controller.chain_edit_active,
             controller.swing_edit_active,
             controller.page_menu_active,
@@ -1827,6 +2041,7 @@ def ui_loop(stdscr, seq):
             controller.pattern_save_input,
             controller.pattern_load_input,
             controller.kit_load_input,
+            controller.pack_save_input,
             controller.chain_edit_input,
             controller.swing_edit_input,
             controller.status_message,
@@ -1872,15 +2087,19 @@ def ui_loop(stdscr, seq):
                                 f"Give sample folder name (Esc cancels): {controller.kit_load_input}"
                                 if controller.kit_load_active
                                 else (
-                                    f"Swing 50-75 (Esc cancels): {controller.swing_edit_input}"
-                                    if controller.swing_edit_active
-                                    else ""
+                                    f"Save pack folder name (Esc cancels): {controller.pack_save_input}"
+                                    if controller.pack_save_active
+                                    else (
+                                        f"Swing 50-75 (Esc cancels): {controller.swing_edit_input}"
+                                        if controller.swing_edit_active
+                                        else ""
+                                    )
                                 )
                             )
                         )
                     )
                 ),
-                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.swing_edit_active else "",
+                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.swing_edit_active else "",
                 controller.page_menu_active,
                 controller.page_menu_index,
                 page_menu_label,

@@ -79,6 +79,7 @@ Pattern JSON stores:
 - `P`: preview current track sample
 - `M`: mute/unmute current row
 - `Q/W/E/R`: select page (manual mode) or queue page while playing
+- `Enter` on `LOAD` column: open sample browser and load one `.wav` into current track
 
 ## Modes And Editing
 
@@ -92,8 +93,10 @@ Pattern JSON stores:
 - `pattern_export` (default `X`): save pattern-set to filename
 - `pattern_load` (default `L`): open pattern file browser overlay (`.json`)
 - `kit_load` (default `K`): open kit folder browser overlay
+- Browser navigation: `Up/Down` select, `Enter` open/select, `Left/Right` or `Backspace` go up/down folders
 - `Esc` cancels any open dialog
 - Filename prompts auto-add `.json` if omitted
+- Page menu includes `Save Pack`: creates a folder with `pattern.json` and current track samples
 
 ## Chain
 
