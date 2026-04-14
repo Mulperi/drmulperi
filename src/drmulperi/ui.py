@@ -468,6 +468,7 @@ def draw(
         count = seq.pattern_count()
         title = "PATTERNS (A:Add, D:Duplicate, X:Delete)"
         rows = []
+        row_is_empty = []
         for i in range(count):
             view_tag = "VIEW" if i == seq.view_pattern else "    "
             if i == seq.pattern:
@@ -479,11 +480,13 @@ def draw(
             hits = seq.pattern_note_count(i)
             length = seq.pattern_length[i]
             swing = seq.swing_internal_to_ui(seq.pattern_swing[i])
-            state = "EMPTY" if not seq.pattern_has_data(i) else "DATA "
+            is_empty = not seq.pattern_has_data(i)
+            state = "EMPTY" if is_empty else "     "
             confirm_tag = "X!" if i == patterns_overlay_delete_confirm_index else "  "
             rows.append(
                 f"{i+1:>2}. {view_tag} {play_tag} {confirm_tag} {state} LEN:{length:>2} SW:{swing:>2} HITS:{hits:>3}"
             )
+            row_is_empty.append(is_empty)
         if not rows:
             rows = ["(no patterns)"]
         list_height = min(14, max(6, h - 12))
@@ -505,7 +508,7 @@ def draw(
         end = min(len(rows), start + max_rows)
         for i in range(start, end):
             y = box_top + 2 + (i - start)
-            attr = theme["text"]
+            attr = theme["muted"] if row_is_empty[i] else theme["text"]
             if i == patterns_overlay_index:
                 attr = attr | curses.A_REVERSE
             safe_add(y, box_left + 2, rows[i][: box_width - 4], attr)
