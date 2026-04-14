@@ -50,10 +50,6 @@ source .venv/bin/activate
 
 3. Install dependencies:
 
-```bash
-pip install numpy scipy sounddevice
-```
-
 Minimal install (audio sequencer only):
 
 ```bash
@@ -79,17 +75,17 @@ python main.py --kit kit1 --pattern patterns
 ```
 
 - `--kit`: folder containing `.wav` samples (first 8 alphabetical files are used)
-- `--pattern`: pattern JSON name/path (`.json` is added automatically if missing)
+- `--pattern`: pattern bank JSON name/path (`.json` is added automatically if missing)
 
 ## Project Data
 
-Pattern JSON stores:
+Pattern bank JSON stores:
 
 - BPM
-- 4 pattern pages (`grid`)
+- 4 patterns (`grid`)
 - ratchets (`ratchet_grid`)
 - per-track pan (`track_pan`, accent row fixed center)
-- per-page length (`pattern_length`)
+- per-pattern length (`pattern_length`)
 - chain mode + chain sequence (`chain_enabled`, `chain`)
 
 ## Core Controls
@@ -100,7 +96,7 @@ Pattern JSON stores:
 - `Enter`: toggle step on/off (or reset pan to center when cursor is on pan column)
 - `P`: preview current track sample
 - `M`: mute/unmute current row
-- `Q/W/E/R`: select page (manual mode) or queue page while playing
+- `Q/W/E/R`: select pattern (manual mode) or queue pattern while playing
 - `Enter` on `LOAD` column: open sample browser and load one `.wav` into current track
 
 ## Modes And Editing
@@ -112,14 +108,15 @@ Pattern JSON stores:
 
 ## Load/Save Dialogs
 
-- `pattern_export` (default `X`): save pattern-set to filename
-- `pattern_load` (default `L`): open pattern file browser overlay (`.json`)
+- `pattern_export` (default `X`): save pattern bank to filename
+- `pattern_load` (default `L`): open pattern bank browser overlay (`.json`)
 - `kit_load` (default `K`): open kit folder browser overlay
 - Browser navigation: `Up/Down` select, `Enter` open/select, `Left/Right` or `Backspace` go up/down folders
 - `Esc` cancels any open dialog
 - Filename prompts auto-add `.json` if omitted
-- Page menu includes `Save Pack`: creates a folder with `pattern.json` and current track samples
-- Page menu includes `Toggle MIDI OUT` (tracks 1-8 send note triggers on channels 1-8)
+- Pattern menu includes `Save Pack`: creates a folder with `pattern_bank.json` and current track samples
+- Pattern menu includes `Toggle MIDI OUT` (tracks 1-8 send note triggers on channels 1-8)
+- Pattern menu includes `Export Pattern Audio`: renders current pattern to a `.wav` file
 - When MIDI OUT is enabled, internal sample playback is muted
 
 ## Chain
@@ -131,7 +128,7 @@ Pattern JSON stores:
 
 ## Pattern Length
 
-- Per-page length is supported (`1..16`)
+- Per-pattern length is supported (`1..16`)
 - Out-of-range steps are visually dimmed
 - Length controls:
   - `pattern_length_dec` (default `a`)

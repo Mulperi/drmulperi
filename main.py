@@ -32,7 +32,7 @@ ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
     "help_menu": "H,F1",
-    "page_menu": "F2",
+    "pattern_menu": "F2",
     "mode_toggle": "T",
     "clear_pattern": "N",
     "pattern_copy": "B",
@@ -53,10 +53,10 @@ DEFAULT_KEYMAP = {
     "pattern_4": "R",
 }
 
-PAGE_MENU_ITEMS = [
-    "1. Copy Page",
-    "2. Paste Page",
-    "3. Erase Page",
+PATTERN_MENU_ITEMS = [
+    "1. Copy Pattern",
+    "2. Paste Pattern",
+    "3. Erase Pattern",
     "4. Save Pattern As",
     "5. Load Pattern",
     "6. Load Sample Kit",
@@ -64,12 +64,14 @@ PAGE_MENU_ITEMS = [
     "8. Set Swing",
     "9. Save Pack",
     "10. Toggle MIDI OUT",
+    "11. Export Pattern Audio",
 ]
 
 MIDI_NOTES = [36, 37, 38, 39, 40, 41, 42, 43]
 
 
 def _normalize_key_token(token):
+    """Normalize a key token from config into an internal matcher format."""
     token = token.strip()
     if not token:
         return None
@@ -95,6 +97,7 @@ def _normalize_key_token(token):
 
 
 def _event_tokens(key):
+    """Convert a raw `curses` key event into normalized lookup tokens."""
     tokens = set()
 
     if isinstance(key, str):
@@ -145,6 +148,7 @@ def _event_tokens(key):
 
 
 class Keymap:
+    """Loads and resolves key bindings from `keymap.ini`."""
     def __init__(self, path=KEYMAP_PATH):
         self.path = path
         self.bindings = {}
@@ -165,6 +169,7 @@ class Keymap:
         return [fallback_token] if fallback_token is not None else []
 
     def load(self):
+        """Load key bindings, creating a default file when missing."""
         parser = configparser.ConfigParser()
 
         if not os.path.exists(self.path):
@@ -180,6 +185,7 @@ class Keymap:
             self.bindings[action] = self._parse_binding(raw_value, fallback)
 
     def matches(self, action, event_tokens):
+        """Return True when any token bound to `action` is present in `event_tokens`."""
         action_tokens = self.bindings.get(action, [])
         return any(token in event_tokens for token in action_tokens)
 
@@ -209,6 +215,7 @@ class Keymap:
 
 # ---------- VOICE ----------
 class Voice:
+    """Single active sample playback slot used by the mixer callback."""
     def __init__(self):
         self.active = False
         self.data = None
@@ -219,11 +226,13 @@ class Voice:
 
 
 class MidiOut:
+    """Thin MIDI output wrapper over `mido` with graceful failure handling."""
     def __init__(self):
         self.port = None
         self.port_name = None
 
     def enable(self):
+        """Open the first available system MIDI output port."""
         if mido is None:
             return False, "MIDI unavailable (install mido + python-rtmidi)"
         try:
@@ -278,6 +287,7 @@ class MidiOut:
 
 # ---------- AUDIO ENGINE ----------
 class AudioEngine:
+    """Real-time sample engine: buffering trigger events and rendering stereo audio."""
     def __init__(self, kit_path, samplerate=44100, blocksize=512):
         self.sr = samplerate
         self.blocksize = blocksize
@@ -302,6 +312,7 @@ class AudioEngine:
         self.stream.start()
 
     def load_samples(self):
+        """Load first 8 alphabetic WAV files from current kit path."""
         sample_files = []
         if os.path.isdir(self.kit_path):
             sample_files = [
@@ -378,6 +389,7 @@ class AudioEngine:
             v.active = False
 
     def trigger(self, track, velocity, pan):
+        """Queue one sample trigger event for the audio callback thread."""
         pan_pos = (pan - 1) / 8.0
         left_gain = float(np.cos(pan_pos * (np.pi / 2)))
         right_gain = float(np.sin(pan_pos * (np.pi / 2)))
@@ -387,6 +399,7 @@ class AudioEngine:
         self.event_write += 1
 
     def audio_callback(self, outdata, frames, time_info, status):
+        """PortAudio callback: consume trigger queue, mix voices, write to `outdata`."""
         mix = self.mix
         mix[:, :] = 0.0
 
@@ -432,6 +445,7 @@ class AudioEngine:
 
 # ---------- SEQUENCER ----------
 class Sequencer:
+    """Pattern sequencer state, persistence, scheduling, and high-level actions."""
     def __init__(self, kit_path, pattern_path):
         self.kit_path = kit_path
         self.pattern_path = pattern_path
@@ -467,7 +481,7 @@ class Sequencer:
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
-        self.page_clipboard = None
+        self.pattern_clipboard = None
         self.midi = MidiOut()
         self.midi_out_enabled = False
 
@@ -485,6 +499,7 @@ class Sequencer:
 
     # ---------- SAVE ----------
     def _serialize(self):
+        """Return JSON-serializable project state."""
         return {
             "bpm": self.bpm,
             "last_velocity": self.last_velocity,
@@ -499,6 +514,7 @@ class Sequencer:
         }
 
     def _apply_loaded_data(self, data):
+        """Apply and sanitize loaded project data into runtime state."""
         self.bpm = data.get("bpm", 120)
         self.last_velocity = data.get("last_velocity", 5)
         self.grid = data.get("grid", self.grid)
@@ -596,12 +612,14 @@ class Sequencer:
         self._sync_chain_pos_to_pattern()
 
     def save(self):
+        """Save current pattern bank to `self.pattern_path`."""
         data = self._serialize()
 
         with open(self.pattern_path, "w") as f:
             json.dump(data, f)
 
     def load(self):
+        """Load pattern bank from `self.pattern_path`, creating one if missing."""
         if not os.path.exists(self.pattern_path):
             self.save()
             return
@@ -612,6 +630,7 @@ class Sequencer:
         self._apply_loaded_data(data)
 
     def load_project_file(self, filename):
+        """Load a pattern bank JSON file and reset runtime playback state."""
         target = filename.strip()
         if not target:
             return False, "Load canceled"
@@ -643,6 +662,7 @@ class Sequencer:
         return True, f"Loaded {self.pattern_name}"
 
     def save_project_file(self, filename):
+        """Save pattern bank JSON to a user-provided filename."""
         target = filename.strip()
         if not target:
             return False, "Save canceled"
@@ -660,6 +680,7 @@ class Sequencer:
         return True, f"Saved {os.path.basename(path)}"
 
     def load_kit_folder(self, foldername):
+        """Load a sample kit folder (first 8 alphabetical WAV files)."""
         target = foldername.strip()
         if not target:
             return False, "Load canceled"
@@ -679,6 +700,7 @@ class Sequencer:
         return ok, message
 
     def save_pack(self, foldername):
+        """Save a portable pack folder with `pattern_bank.json` plus current samples."""
         target = foldername.strip()
         if not target:
             return False, "Save pack canceled"
@@ -701,17 +723,99 @@ class Sequencer:
             except Exception:
                 continue
 
-        pattern_path = os.path.join(pack_dir, "pattern.json")
+        pattern_path = os.path.join(pack_dir, "pattern_bank.json")
         try:
             with open(pattern_path, "w") as f:
                 json.dump(self._serialize(), f)
         except Exception as exc:
             return False, f"Pattern save failed: {exc}"
 
-        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 samples + pattern.json)"
+        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 samples + pattern_bank.json)"
+
+    def export_current_pattern_audio(self, filename):
+        """Offline-render the viewed pattern as one-loop stereo WAV."""
+        target = filename.strip()
+        if not target:
+            return False, "Audio export canceled"
+
+        if not target.lower().endswith(".wav"):
+            target = f"{target}.wav"
+
+        path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        pattern = self.view_pattern
+        current_length = self.pattern_length[pattern]
+        sr = self.engine.sr
+        base_step_time = (60.0 / self.bpm) / self.steps_per_beat
+
+        step_durations = [
+            self._step_duration_for(pattern, s, base_step_time)
+            for s in range(current_length)
+        ]
+        step_starts = []
+        t_cursor = 0.0
+        for d in step_durations:
+            step_starts.append(t_cursor)
+            t_cursor += d
+
+        # Export exactly one loop length (no extra tail after the loop end).
+        total_seconds = t_cursor
+        total_samples = max(1, int(total_seconds * sr))
+        mix = np.zeros((total_samples, 2), dtype=np.float32)
+
+        for s in range(current_length):
+            accent_on = (
+                not self.muted_rows[ACCENT_TRACK]
+                and self.grid[pattern][ACCENT_TRACK][s] > 0
+            )
+            step_time = step_durations[s]
+            for t in range(TRACKS - 1):
+                if self.muted_rows[t]:
+                    continue
+                vel = self.grid[pattern][t][s]
+                if vel <= 0:
+                    continue
+                sample = self.engine.samples[t]
+                if sample is None:
+                    continue
+
+                v = vel / 9.0
+                if accent_on:
+                    v = min(1.0, v + ACCENT_BOOST)
+
+                pan_pos = (self.track_pan[t] - 1) / 8.0
+                pan_l = float(np.cos(pan_pos * (np.pi / 2)))
+                pan_r = float(np.sin(pan_pos * (np.pi / 2)))
+
+                ratchet = max(1, min(4, self.ratchet_grid[pattern][t][s]))
+                interval = step_time / ratchet
+                for i in range(ratchet):
+                    hit_t = step_starts[s] + (i * interval)
+                    start = int(hit_t * sr)
+                    if start >= total_samples:
+                        continue
+                    n = min(len(sample), total_samples - start)
+                    if n <= 0:
+                        continue
+                    chunk = sample[:n] * v
+                    mix[start:start + n, 0] += chunk * pan_l
+                    mix[start:start + n, 1] += chunk * pan_r
+
+        # Louder export: normalize peak to near full scale.
+        peak = float(np.max(np.abs(mix))) if mix.size > 0 else 0.0
+        if peak > 1e-9:
+            out = np.clip(mix * (0.95 / peak), -1.0, 1.0)
+        else:
+            out = mix
+        out_i16 = (out * 32767.0).astype(np.int16)
+        try:
+            wavfile.write(path, sr, out_i16)
+        except Exception as exc:
+            return False, f"Audio export failed: {exc}"
+        return True, f"Exported audio: {os.path.basename(path)}"
 
     # ---------- AUDIO LOOP ----------
     def run(self):
+        """Sequencer scheduler loop for timed triggering and autosave debounce."""
         next_time = time.perf_counter()
 
         while True:
@@ -790,6 +894,7 @@ class Sequencer:
             time.sleep(0.001)
 
     def toggle_playback(self):
+        """Start/stop playback and clear queued/pending events on stop."""
         if not self.playing and not self.chain_enabled:
             self.pattern = self.view_pattern
             self.next_pattern = None
@@ -813,6 +918,7 @@ class Sequencer:
             self.chain_pos = 0
 
     def toggle_chain(self):
+        """Toggle chain mode and reset playback position at mode boundaries."""
         self.chain_enabled = not self.chain_enabled
         if self.chain_enabled:
             if not self.chain:
@@ -854,6 +960,7 @@ class Sequencer:
         return ok, message
 
     def toggle_midi_out(self):
+        """Toggle MIDI output mode on/off."""
         return self._set_midi_out_enabled(not self.midi_out_enabled)
 
     def _trigger_midi(self, track, velocity_norm, gate_seconds):
@@ -868,6 +975,7 @@ class Sequencer:
         heapq.heappush(self.pending_midi_off, (time.perf_counter() + max(0.01, gate_seconds), channel, note))
 
     def set_chain_from_text(self, text):
+        """Parse text chain input (e.g. `1 2 3 2`) and store it."""
         src = text.strip()
         if not src:
             return False, "Chain canceled"
@@ -915,6 +1023,7 @@ class Sequencer:
         return "-".join(parts)
 
     def change_current_pattern_length(self, delta):
+        """Increase or decrease viewed pattern length within 1..16."""
         current = self.pattern_length[self.view_pattern]
         new_length = max(1, min(STEPS, current + delta))
         if new_length != current:
@@ -961,6 +1070,7 @@ class Sequencer:
         self.dirty = True
 
     def set_step_velocity(self, track, step, velocity):
+        """Set step velocity (or accent on/off), with idle preview on note create."""
         prev = self.grid[self.view_pattern][track][step]
         if track == ACCENT_TRACK:
             self.grid[self.view_pattern][track][step] = 1 if velocity > 0 else 0
@@ -996,6 +1106,7 @@ class Sequencer:
         self.dirty = True
 
     def toggle_step(self, track, step):
+        """Toggle step between empty and last-used velocity."""
         current = self.grid[self.view_pattern][track][step]
         if current == 0:
             if track == ACCENT_TRACK:
@@ -1008,6 +1119,7 @@ class Sequencer:
         self.dirty = True
 
     def clear_current_pattern(self):
+        """Clear notes/ratchets for viewed pattern."""
         self.grid[self.view_pattern] = [
             [0 for _ in range(STEPS)] for _ in range(TRACKS)
         ]
@@ -1017,28 +1129,30 @@ class Sequencer:
         self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
         self.dirty = True
 
-    def copy_current_page(self):
-        self.page_clipboard = {
+    def copy_current_pattern(self):
+        """Copy viewed pattern into internal clipboard."""
+        self.pattern_clipboard = {
             "grid": [row[:] for row in self.grid[self.view_pattern]],
             "ratchet_grid": [row[:] for row in self.ratchet_grid[self.view_pattern]],
             "length": self.pattern_length[self.view_pattern],
         }
-        return True, f"Copied page {self.view_pattern + 1}"
+        return True, f"Copied pattern {self.view_pattern + 1}"
 
-    def paste_to_current_page(self):
-        if not self.page_clipboard:
+    def paste_to_current_pattern(self):
+        """Paste clipboard into viewed pattern and resync playback in manual mode."""
+        if not self.pattern_clipboard:
             return False, "Clipboard empty"
 
-        self.grid[self.view_pattern] = [row[:] for row in self.page_clipboard["grid"]]
-        self.ratchet_grid[self.view_pattern] = [row[:] for row in self.page_clipboard["ratchet_grid"]]
-        self.pattern_length[self.view_pattern] = max(1, min(STEPS, int(self.page_clipboard["length"])))
+        self.grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["grid"]]
+        self.ratchet_grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["ratchet_grid"]]
+        self.pattern_length[self.view_pattern] = max(1, min(STEPS, int(self.pattern_clipboard["length"])))
         self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
 
         if self.step >= self.pattern_length[self.view_pattern]:
             self.step = 0
 
-        # In manual mode, make pasted page the active playback page immediately.
-        # This prevents hearing stale queued/scheduled data from another page.
+        # In manual mode, make pasted pattern the active playback pattern immediately.
+        # This prevents hearing stale queued/scheduled data from another pattern.
         if not self.chain_enabled:
             self.pattern = self.view_pattern
             self.next_pattern = None
@@ -1047,9 +1161,10 @@ class Sequencer:
             self._sync_chain_pos_to_pattern()
 
         self.dirty = True
-        return True, f"Pasted to page {self.view_pattern + 1}"
+        return True, f"Pasted pattern {self.view_pattern + 1}"
 
     def select_pattern(self, pattern_index):
+        """Select/queue pattern depending on chain/playback mode."""
         if self.chain_enabled:
             self.view_pattern = pattern_index
         elif self.playing:
@@ -1069,6 +1184,7 @@ class Sequencer:
         self.dirty = True
 
     def preview_row(self, track):
+        """Preview current track sample (or MIDI note when MIDI mode is on)."""
         if track >= TRACKS - 1:
             return
         if self.midi_out_enabled:
@@ -1094,9 +1210,9 @@ def draw(
     clear_confirm,
     pattern_load_prompt,
     status_message,
-    page_menu_active,
-    page_menu_index,
-    page_menu_key_label,
+    pattern_menu_active,
+    pattern_menu_index,
+    pattern_menu_key_label,
     help_active,
     help_lines,
     help_key_label,
@@ -1111,6 +1227,7 @@ def draw(
     length_inc_label,
     theme
 ):
+    """Render full terminal UI frame from current sequencer/controller state."""
     stdscr.clear()
     h, w = stdscr.getmaxyx()
 
@@ -1189,7 +1306,7 @@ def draw(
     safe_add(
         3,
         content_x,
-        f"PATTERN FILE: {seq.pattern_name}  KIT: {kit_name}"[:header_right - content_x],
+        f"PATTERN BANK: {seq.pattern_name}  KIT: {kit_name}"[:header_right - content_x],
         theme["text"]
     )
     midi_text = "MIDI OUT"
@@ -1204,7 +1321,7 @@ def draw(
             f"LEN:{seq.pattern_length[seq.view_pattern]} ({length_dec_label}/{length_inc_label})  "
             f"SW:{seq.pattern_swing[seq.view_pattern]}  "
             f"MODE:{mode} ({mode_key_label} to switch)  "
-            f"MENU:{page_menu_key_label}"
+            f"MENU:{pattern_menu_key_label}"
         )[:header_right - content_x],
         theme["text"]
     )
@@ -1360,9 +1477,9 @@ def draw(
                 break
             safe_add(line_y + i, box_left + 2, line[: box_width - 4], theme["text"])
 
-    if page_menu_active:
-        items = PAGE_MENU_ITEMS
-        title = f"PAGE MENU ({page_menu_key_label}/Esc close)"
+    if pattern_menu_active:
+        items = PATTERN_MENU_ITEMS
+        title = f"PATTERN MENU ({pattern_menu_key_label}/Esc close)"
         max_item_len = max(len(title), *(len(item) for item in items))
         box_width = min(w - 8, max(40, max_item_len + 6))
         box_height = min(h - 4, len(items) + 4)
@@ -1377,7 +1494,7 @@ def draw(
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
         for i, item in enumerate(items):
             item_attr = theme["text"]
-            if i == page_menu_index:
+            if i == pattern_menu_index:
                 item_attr = item_attr | curses.A_REVERSE
             safe_add(box_top + 3 + i, box_left + 2, item[: box_width - 4], item_attr)
 
@@ -1425,6 +1542,7 @@ def draw(
 
 # ---------- CONTROLLER ----------
 class Controller:
+    """Owns transient UI/dialog state and translates key input into actions."""
     def __init__(self, sequencer, keymap):
         self.seq = sequencer
         self.keymap = keymap
@@ -1440,12 +1558,14 @@ class Controller:
         self.kit_load_input = ""
         self.pack_save_active = False
         self.pack_save_input = ""
+        self.audio_export_active = False
+        self.audio_export_input = ""
         self.chain_edit_active = False
         self.chain_edit_input = ""
         self.swing_edit_active = False
         self.swing_edit_input = ""
-        self.page_menu_active = False
-        self.page_menu_index = 0
+        self.pattern_menu_active = False
+        self.pattern_menu_index = 0
         self.help_active = False
         self.file_browser_active = False
         self.file_browser_mode = None
@@ -1476,12 +1596,16 @@ class Controller:
         self.pack_save_active = False
         self.pack_save_input = ""
 
+    def _close_audio_export_dialog(self):
+        self.audio_export_active = False
+        self.audio_export_input = ""
+
     def _close_chain_dialog(self):
         self.chain_edit_active = False
         self.chain_edit_input = ""
 
-    def _close_page_menu(self):
-        self.page_menu_active = False
+    def _close_pattern_menu(self):
+        self.pattern_menu_active = False
 
     def _close_file_browser(self):
         self.file_browser_active = False
@@ -1553,6 +1677,8 @@ class Controller:
         self.kit_load_input = ""
         self.pack_save_active = False
         self.pack_save_input = ""
+        self.audio_export_active = False
+        self.audio_export_input = ""
         self._refresh_file_browser()
 
     def _file_browser_enter_dir(self):
@@ -1613,15 +1739,15 @@ class Controller:
         self.swing_edit_active = False
         self.swing_edit_input = ""
 
-    def _run_page_menu_action(self):
-        if self.page_menu_index == 0:
-            ok, message = self.seq.copy_current_page()
-        elif self.page_menu_index == 1:
-            ok, message = self.seq.paste_to_current_page()
-        elif self.page_menu_index == 2:
+    def _run_pattern_menu_action(self):
+        if self.pattern_menu_index == 0:
+            ok, message = self.seq.copy_current_pattern()
+        elif self.pattern_menu_index == 1:
+            ok, message = self.seq.paste_to_current_pattern()
+        elif self.pattern_menu_index == 2:
             self.seq.clear_current_pattern()
-            ok, message = True, f"Cleared page {self.seq.view_pattern + 1}"
-        elif self.page_menu_index == 3:
+            ok, message = True, f"Cleared pattern {self.seq.view_pattern + 1}"
+        elif self.pattern_menu_index == 3:
             self.pattern_save_active = True
             self.pattern_save_input = ""
             self.pattern_load_active = False
@@ -1631,7 +1757,7 @@ class Controller:
             self.chain_edit_active = False
             self.chain_edit_input = ""
             ok, message = True, ""
-        elif self.page_menu_index == 4:
+        elif self.pattern_menu_index == 4:
             self._open_file_browser("pattern")
             self.pattern_save_active = False
             self.pattern_save_input = ""
@@ -1640,7 +1766,7 @@ class Controller:
             self.chain_edit_active = False
             self.chain_edit_input = ""
             ok, message = True, ""
-        elif self.page_menu_index == 5:
+        elif self.pattern_menu_index == 5:
             self._open_file_browser("kit")
             self.pattern_save_active = False
             self.pattern_save_input = ""
@@ -1651,9 +1777,9 @@ class Controller:
             ok, message = True, ""
             self.swing_edit_active = False
             self.swing_edit_input = ""
-        elif self.page_menu_index == 6:
+        elif self.pattern_menu_index == 6:
             ok, message = self.seq.toggle_chain()
-        elif self.page_menu_index == 7:
+        elif self.pattern_menu_index == 7:
             self.swing_edit_active = True
             self.swing_edit_input = str(self.seq.pattern_swing[self.seq.view_pattern])
             self.pattern_save_active = False
@@ -1664,8 +1790,10 @@ class Controller:
             self.kit_load_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
             ok, message = True, ""
-        elif self.page_menu_index == 8:
+        elif self.pattern_menu_index == 8:
             self.pack_save_active = True
             self.pack_save_input = ""
             self.pattern_save_active = False
@@ -1678,12 +1806,31 @@ class Controller:
             self.chain_edit_input = ""
             self.swing_edit_active = False
             self.swing_edit_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
             ok, message = True, ""
-        else:
+        elif self.pattern_menu_index == 9:
             ok, message = self.seq.toggle_midi_out()
+        else:
+            self.audio_export_active = True
+            self.audio_export_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
+            ok, message = True, ""
         self.status_message = message
 
     def handle_key(self, key):
+        """Handle a single key event. Returns False when app should exit."""
         event_tokens = _event_tokens(key)
         key_code = key if isinstance(key, int) else ord(key)
         if self.status_message and key_code != -1:
@@ -1728,26 +1875,26 @@ class Controller:
                 return True
             return True
 
-        if self.page_menu_active:
-            if key_code == 27 or self.keymap.matches("page_menu", event_tokens):
-                self._close_page_menu()
+        if self.pattern_menu_active:
+            if key_code == 27 or self.keymap.matches("pattern_menu", event_tokens):
+                self._close_pattern_menu()
                 return True
             if key_code == curses.KEY_UP:
-                self.page_menu_index = (self.page_menu_index - 1) % len(PAGE_MENU_ITEMS)
+                self.pattern_menu_index = (self.pattern_menu_index - 1) % len(PATTERN_MENU_ITEMS)
                 return True
             if key_code == curses.KEY_DOWN:
-                self.page_menu_index = (self.page_menu_index + 1) % len(PAGE_MENU_ITEMS)
+                self.pattern_menu_index = (self.pattern_menu_index + 1) % len(PATTERN_MENU_ITEMS)
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
-                self._run_page_menu_action()
-                self._close_page_menu()
+                self._run_pattern_menu_action()
+                self._close_pattern_menu()
                 return True
             if ord("1") <= key_code <= ord("9"):
                 idx = key_code - ord("1")
-                if idx < len(PAGE_MENU_ITEMS):
-                    self.page_menu_index = idx
-                    self._run_page_menu_action()
-                    self._close_page_menu()
+                if idx < len(PATTERN_MENU_ITEMS):
+                    self.pattern_menu_index = idx
+                    self._run_pattern_menu_action()
+                    self._close_pattern_menu()
                     return True
             return True
 
@@ -1786,6 +1933,9 @@ class Controller:
                 return True
             if self.pack_save_active:
                 self._close_pack_dialog()
+                return True
+            if self.audio_export_active:
+                self._close_audio_export_dialog()
                 return True
             if self.pattern_load_active:
                 self._close_pattern_dialog()
@@ -1915,6 +2065,25 @@ class Controller:
 
             return True
 
+        if self.audio_export_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.export_current_pattern_audio(self.audio_export_input)
+                self.status_message = message
+                self._close_audio_export_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.audio_export_input = self.audio_export_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.audio_export_input) < 120:
+                    self.audio_export_input += key
+                return True
+
+            return True
+
         if self.keymap.matches("clear_pattern", event_tokens):
             if self.clear_confirm:
                 self.seq.clear_current_pattern()
@@ -1929,9 +2098,9 @@ class Controller:
         if key_code == ord(' '):
             self.seq.toggle_playback()
             self.status_message = ""
-        elif self.keymap.matches("page_menu", event_tokens):
-            self.page_menu_active = True
-            self.page_menu_index = 0
+        elif self.keymap.matches("pattern_menu", event_tokens):
+            self.pattern_menu_active = True
+            self.pattern_menu_index = 0
             self.pattern_save_active = False
             self.pattern_save_input = ""
             self.pattern_load_active = False
@@ -1940,6 +2109,8 @@ class Controller:
             self.kit_load_input = ""
             self.pack_save_active = False
             self.pack_save_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1947,10 +2118,10 @@ class Controller:
         elif self.keymap.matches("help_menu", event_tokens):
             self.help_active = True
         elif self.keymap.matches("pattern_copy", event_tokens):
-            ok, message = self.seq.copy_current_page()
+            ok, message = self.seq.copy_current_pattern()
             self.status_message = message
         elif self.keymap.matches("pattern_paste", event_tokens):
-            ok, message = self.seq.paste_to_current_page()
+            ok, message = self.seq.paste_to_current_pattern()
             self.status_message = message
         elif self.keymap.matches("pattern_export", event_tokens):
             self.pattern_save_active = True
@@ -1961,6 +2132,8 @@ class Controller:
             self.kit_load_input = ""
             self.pack_save_active = False
             self.pack_save_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1974,6 +2147,8 @@ class Controller:
             self.kit_load_input = ""
             self.pack_save_active = False
             self.pack_save_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1987,6 +2162,8 @@ class Controller:
             self.pattern_load_input = ""
             self.pack_save_active = False
             self.pack_save_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -2003,6 +2180,8 @@ class Controller:
             self.kit_load_input = ""
             self.pack_save_active = False
             self.pack_save_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
             self.swing_edit_active = False
             self.swing_edit_input = ""
             self.status_message = ""
@@ -2080,6 +2259,7 @@ class Controller:
 
 # ---------- INPUT ----------
 def ui_loop(stdscr, seq):
+    """Main curses event/render loop."""
     curses.set_escdelay(25)
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -2135,7 +2315,7 @@ def ui_loop(stdscr, seq):
     controller = Controller(seq, keymap)
     help_lines = keymap.file_lines()
     help_key_label = keymap.label("help_menu")
-    page_menu_label = keymap.label("page_menu")
+    pattern_menu_label = keymap.label("pattern_menu")
     mode_key_label = keymap.label("mode_toggle")
     clear_key_label = keymap.label("clear_pattern")
     length_dec_label = keymap.label("pattern_length_dec")
@@ -2173,10 +2353,11 @@ def ui_loop(stdscr, seq):
             controller.pattern_load_active,
             controller.kit_load_active,
             controller.pack_save_active,
+            controller.audio_export_active,
             controller.chain_edit_active,
             controller.swing_edit_active,
-            controller.page_menu_active,
-            controller.page_menu_index,
+            controller.pattern_menu_active,
+            controller.pattern_menu_index,
             controller.help_active,
             controller.file_browser_active,
             controller.file_browser_mode,
@@ -2187,6 +2368,7 @@ def ui_loop(stdscr, seq):
             controller.pattern_load_input,
             controller.kit_load_input,
             controller.pack_save_input,
+            controller.audio_export_input,
             controller.chain_edit_input,
             controller.swing_edit_input,
             controller.status_message,
@@ -2221,13 +2403,13 @@ def ui_loop(stdscr, seq):
                 controller.edit_mode,
                 controller.clear_confirm,
                 (
-                    f"Save pattern filename (Esc cancels): {controller.pattern_save_input}"
+                    f"Save pattern bank filename (Esc cancels): {controller.pattern_save_input}"
                     if controller.pattern_save_active
                     else (
                         f"Give chain sequence ({chain_edit_label}, Esc cancels): {controller.chain_edit_input}"
                         if controller.chain_edit_active
                         else (
-                            f"Give pattern filename (Esc cancels): {controller.pattern_load_input}"
+                            f"Give pattern bank filename (Esc cancels): {controller.pattern_load_input}"
                             if controller.pattern_load_active
                             else (
                                 f"Give sample folder name (Esc cancels): {controller.kit_load_input}"
@@ -2235,6 +2417,9 @@ def ui_loop(stdscr, seq):
                                 else (
                                     f"Save pack folder name (Esc cancels): {controller.pack_save_input}"
                                     if controller.pack_save_active
+                                else (
+                                    f"Export audio filename (Esc cancels): {controller.audio_export_input}"
+                                    if controller.audio_export_active
                                     else (
                                         f"Swing 50-75 (Esc cancels): {controller.swing_edit_input}"
                                         if controller.swing_edit_active
@@ -2244,11 +2429,12 @@ def ui_loop(stdscr, seq):
                             )
                         )
                     )
+                    )
                 ),
-                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.swing_edit_active else "",
-                controller.page_menu_active,
-                controller.page_menu_index,
-                page_menu_label,
+                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.swing_edit_active else "",
+                controller.pattern_menu_active,
+                controller.pattern_menu_index,
+                pattern_menu_label,
                 controller.help_active,
                 help_lines,
                 help_key_label,
@@ -2275,6 +2461,7 @@ def ui_loop(stdscr, seq):
 
 # ---------- MAIN ----------
 def main():
+    """CLI entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--kit",
