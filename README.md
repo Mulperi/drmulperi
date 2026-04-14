@@ -68,6 +68,12 @@ pip install numpy scipy sounddevice mido python-rtmidi
 python main.py
 ```
 
+Quick start with bundled example kit:
+
+```bash
+python3 main.py --kit examplekit --pattern examplekit/patterns.json
+```
+
 ## Run With Kit/Pattern
 
 ```bash
