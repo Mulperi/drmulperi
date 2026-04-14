@@ -10,6 +10,7 @@ import heapq
 import configparser
 import warnings
 import shutil
+import random
 from scipy.io import wavfile
 try:
     import mido
@@ -21,7 +22,10 @@ STEPS = 16
 CHAIN_MAX_STEPS = 16
 PAN_COL = STEPS
 LOAD_COL = STEPS + 1
-GRID_COLS = STEPS + 2
+HUMANIZE_COL = STEPS + 2
+PROB_COL = STEPS + 3
+GROUP_COL = STEPS + 4
+GRID_COLS = STEPS + 5
 PATTERNS = 4
 DEFAULT_KIT_PATH = "kit1"
 DEFAULT_PATTERN_NAME = "patterns"
@@ -219,6 +223,7 @@ class Voice:
     def __init__(self):
         self.active = False
         self.data = None
+        self.track = -1
         self.pos = 0
         self.vel = 1.0
         self.pan_l = 1.0
@@ -387,6 +392,19 @@ class AudioEngine:
     def stop_all(self):
         for v in self.voices:
             v.active = False
+            v.track = -1
+
+    def choke_group(self, group_id, track_groups):
+        """Stop active voices belonging to a choke/mute group."""
+        if group_id <= 0:
+            return
+        for v in self.voices:
+            if not v.active:
+                continue
+            tr = v.track
+            if 0 <= tr < len(track_groups) and track_groups[tr] == group_id:
+                v.active = False
+                v.track = -1
 
     def trigger(self, track, velocity, pan):
         """Queue one sample trigger event for the audio callback thread."""
@@ -416,6 +434,7 @@ class AudioEngine:
                         if not v.active:
                             v.active = True
                             v.data = sample
+                            v.track = track
                             v.pos = 0
                             v.vel = vel
                             v.pan_l = pan_l
@@ -440,6 +459,7 @@ class AudioEngine:
 
             if v.pos >= len(v.data):
                 v.active = False
+                v.track = -1
 
         outdata[:] = mix * 0.25
 
@@ -478,6 +498,9 @@ class Sequencer:
 
         self.last_velocity = 5
         self.track_pan = [5 for _ in range(TRACKS)]
+        self.track_humanize = [0 for _ in range(TRACKS)]
+        self.track_probability = [100 for _ in range(TRACKS)]
+        self.track_group = [0 for _ in range(TRACKS)]
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
@@ -505,6 +528,9 @@ class Sequencer:
             "last_velocity": self.last_velocity,
             "grid": self.grid,
             "track_pan": self.track_pan,
+            "track_humanize": self.track_humanize,
+            "track_probability": self.track_probability,
+            "track_group": self.track_group,
             "pattern_length": self.pattern_length,
             "pattern_swing": self.pattern_swing,
             "ratchet_grid": self.ratchet_grid,
@@ -554,6 +580,39 @@ class Sequencer:
                     normalized_pan[i] = 5
         normalized_pan[ACCENT_TRACK] = 5
         self.track_pan = normalized_pan
+
+        loaded_humanize = data.get("track_humanize", self.track_humanize)
+        normalized_humanize = [0 for _ in range(TRACKS)]
+        if isinstance(loaded_humanize, list):
+            for i in range(min(TRACKS, len(loaded_humanize))):
+                try:
+                    normalized_humanize[i] = max(0, min(100, int(loaded_humanize[i])))
+                except (ValueError, TypeError):
+                    normalized_humanize[i] = 0
+        normalized_humanize[ACCENT_TRACK] = 0
+        self.track_humanize = normalized_humanize
+
+        loaded_prob = data.get("track_probability", self.track_probability)
+        normalized_prob = [100 for _ in range(TRACKS)]
+        if isinstance(loaded_prob, list):
+            for i in range(min(TRACKS, len(loaded_prob))):
+                try:
+                    normalized_prob[i] = max(0, min(100, int(loaded_prob[i])))
+                except (ValueError, TypeError):
+                    normalized_prob[i] = 100
+        normalized_prob[ACCENT_TRACK] = 100
+        self.track_probability = normalized_prob
+
+        loaded_group = data.get("track_group", self.track_group)
+        normalized_group = [0 for _ in range(TRACKS)]
+        if isinstance(loaded_group, list):
+            for i in range(min(TRACKS, len(loaded_group))):
+                try:
+                    normalized_group[i] = max(0, min(9, int(loaded_group[i])))
+                except (ValueError, TypeError):
+                    normalized_group[i] = 0
+        normalized_group[ACCENT_TRACK] = 0
+        self.track_group = normalized_group
 
         loaded_lengths = data.get("pattern_length", self.pattern_length)
         normalized_lengths = [STEPS for _ in range(PATTERNS)]
@@ -827,6 +886,9 @@ class Sequencer:
                 if self.midi_out_enabled:
                     self._trigger_midi(track, vel, 0.05)
                 else:
+                    group_id = self.track_group[track] if 0 <= track < len(self.track_group) else 0
+                    if group_id > 0:
+                        self.engine.choke_group(group_id, self.track_group)
                     self.engine.trigger(track, vel, self.track_pan[track])
 
             while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
@@ -850,10 +912,19 @@ class Sequencer:
                         vel = self.grid[self.pattern][t][self.step]
 
                         if vel > 0:
+                            prob = self.track_probability[t]
+                            if prob < 100 and (random.random() * 100.0) >= prob:
+                                continue
+
                             v = vel / 9.0
 
                             if accent_on:
                                 v = min(1.0, v + ACCENT_BOOST)
+
+                            humanize = self.track_humanize[t] / 100.0
+                            if humanize > 0.0:
+                                vel_jitter = 1.0 + (random.uniform(-0.3, 0.3) * humanize)
+                                v = max(0.0, min(1.0, v * vel_jitter))
 
                             ratchet = self.ratchet_grid[self.pattern][t][self.step]
                             ratchet = max(1, min(4, ratchet))
@@ -861,6 +932,9 @@ class Sequencer:
 
                             for i in range(ratchet):
                                 fire_time = next_time + (i * interval)
+                                if humanize > 0.0:
+                                    jitter_max = min(step_time * 0.2, interval * 0.45) * humanize
+                                    fire_time += random.uniform(-jitter_max, jitter_max)
                                 heapq.heappush(self.pending_events, (fire_time, t, v))
 
                     self.step += 1
@@ -1183,6 +1257,24 @@ class Sequencer:
         self.track_pan[track] = max(1, min(9, pan))
         self.dirty = True
 
+    def set_track_humanize(self, track, value):
+        if track == ACCENT_TRACK:
+            return
+        self.track_humanize[track] = max(0, min(100, int(value)))
+        self.dirty = True
+
+    def set_track_probability(self, track, value):
+        if track == ACCENT_TRACK:
+            return
+        self.track_probability[track] = max(0, min(100, int(value)))
+        self.dirty = True
+
+    def set_track_group(self, track, value):
+        if track == ACCENT_TRACK:
+            return
+        self.track_group[track] = max(0, min(9, int(value)))
+        self.dirty = True
+
     def preview_row(self, track):
         """Preview current track sample (or MIDI note when MIDI mode is on)."""
         if track >= TRACKS - 1:
@@ -1190,6 +1282,9 @@ class Sequencer:
         if self.midi_out_enabled:
             self._trigger_midi(track, self.last_velocity / 9.0, 0.08)
         else:
+            group_id = self.track_group[track]
+            if group_id > 0:
+                self.engine.choke_group(group_id, self.track_group)
             self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track])
 
     def _preview_note_if_idle(self, track, velocity):
@@ -1198,6 +1293,9 @@ class Sequencer:
         if self.midi_out_enabled:
             self._trigger_midi(track, velocity / 9.0, 0.06)
         else:
+            group_id = self.track_group[track]
+            if group_id > 0:
+                self.engine.choke_group(group_id, self.track_group)
             self.engine.trigger(track, velocity / 9.0, self.track_pan[track])
 
 # ---------- UI ----------
@@ -1351,21 +1449,43 @@ def draw(
     x = grid_content_x
     safe_add(playhead_y, x, "  ", theme["text"])
     x += 2
+
+    def col_cell_width(col):
+        if col in [LOAD_COL, HUMANIZE_COL, PROB_COL]:
+            return 4
+        if col == GROUP_COL:
+            return 3
+        return 3
+
     for s in range(GRID_COLS):
         sep = "  "
         sep_attr = theme["divider"]
         if s == current_length and s < STEPS:
             sep = "| "
             sep_attr = theme["hint"]
-        elif s == PAN_COL or s == LOAD_COL:
+        elif s in [PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]:
             sep = "| "
 
         safe_add(playhead_y, x, sep, sep_attr)
         x += len(sep)
-        if s == LOAD_COL:
-            body = "      "
+        cell_w = col_cell_width(s)
+        if s < STEPS:
+            body = ("  v  " if show_playhead and s == seq.step else "     ")
+            if cell_w != 3:
+                body = " " * (cell_w + 2)
         else:
-            body = "  v  " if show_playhead and s == seq.step else "     "
+            if s == PAN_COL:
+                body = " Pan  "
+            elif s == LOAD_COL:
+                body = "Sample"
+            elif s == HUMANIZE_COL:
+                body = "Human "
+            elif s == PROB_COL:
+                body = " Prob "
+            elif s == GROUP_COL:
+                body = "Group"
+            else:
+                body = " " * (cell_w + 2)
         body_attr = theme["playhead"] if show_playhead and s == seq.step else theme["muted"]
         safe_add(playhead_y, x, body, body_attr)
         x += len(body)
@@ -1401,7 +1521,16 @@ def draw(
                     char = f"P{pan_val}"
                 cell_attr = row_attr
             elif s == LOAD_COL:
-                char = "LOAD" if t != ACCENT_TRACK else ""
+                char = "↓" if t != ACCENT_TRACK else ""
+                cell_attr = row_attr
+            elif s == HUMANIZE_COL:
+                char = f"H{seq.track_humanize[t]}" if t != ACCENT_TRACK else ""
+                cell_attr = row_attr
+            elif s == PROB_COL:
+                char = f"%{seq.track_probability[t]}" if t != ACCENT_TRACK else ""
+                cell_attr = row_attr
+            elif s == GROUP_COL:
+                char = str(seq.track_group[t]) if t != ACCENT_TRACK else ""
                 cell_attr = row_attr
             else:
                 val = seq.grid[seq.view_pattern][t][s]
@@ -1420,10 +1549,10 @@ def draw(
                 if s >= seq.pattern_length[seq.view_pattern]:
                     cell_attr = theme["muted"]
 
-            sep = "| " if s == PAN_COL or s == LOAD_COL or (s < STEPS and s % 4 == 0) else "  "
+            sep = "| " if s in [PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL] or (s < STEPS and s % 4 == 0) else "  "
             safe_add(y, x, sep, theme["divider"])
             x += len(sep)
-            cell_w = 4 if s == LOAD_COL else 3
+            cell_w = col_cell_width(s)
             body = f"[{char:>{cell_w}}]" if cursor_x == s and cursor_y == t else f" {char:>{cell_w}} "
             if cursor_x == s and cursor_y == t:
                 cell_attr = cell_attr | curses.A_REVERSE
@@ -1434,8 +1563,16 @@ def draw(
         safe_add(y, x, f" {mute_mark}", row_attr)
 
     prompt_line = ""
-    if cursor_y < TRACKS - 1:
-        sample_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on L to load)"
+    if cursor_x == LOAD_COL:
+        sample_line = "Load sample"
+    elif cursor_x == HUMANIZE_COL:
+        sample_line = "H Humanize: timing/velocity randomization per track (0-100). Enter to edit."
+    elif cursor_x == PROB_COL:
+        sample_line = "% Probability: chance that a step triggers on this track (0-100). Enter to edit."
+    elif cursor_x == GROUP_COL:
+        sample_line = "Group: 0=off, 1-9=mute group. Tracks with same group choke each other."
+    elif cursor_y < TRACKS - 1:
+        sample_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on ↓ to load)"
     else:
         sample_line = "SAMPLE: Accent track (no sample file)"
 
@@ -1560,6 +1697,10 @@ class Controller:
         self.pack_save_input = ""
         self.audio_export_active = False
         self.audio_export_input = ""
+        self.humanize_edit_active = False
+        self.humanize_edit_input = ""
+        self.probability_edit_active = False
+        self.probability_edit_input = ""
         self.chain_edit_active = False
         self.chain_edit_input = ""
         self.swing_edit_active = False
@@ -1599,6 +1740,14 @@ class Controller:
     def _close_audio_export_dialog(self):
         self.audio_export_active = False
         self.audio_export_input = ""
+
+    def _close_humanize_dialog(self):
+        self.humanize_edit_active = False
+        self.humanize_edit_input = ""
+
+    def _close_probability_dialog(self):
+        self.probability_edit_active = False
+        self.probability_edit_input = ""
 
     def _close_chain_dialog(self):
         self.chain_edit_active = False
@@ -1679,6 +1828,10 @@ class Controller:
         self.pack_save_input = ""
         self.audio_export_active = False
         self.audio_export_input = ""
+        self.humanize_edit_active = False
+        self.humanize_edit_input = ""
+        self.probability_edit_active = False
+        self.probability_edit_input = ""
         self._refresh_file_browser()
 
     def _file_browser_enter_dir(self):
@@ -1781,7 +1934,7 @@ class Controller:
             ok, message = self.seq.toggle_chain()
         elif self.pattern_menu_index == 7:
             self.swing_edit_active = True
-            self.swing_edit_input = str(self.seq.pattern_swing[self.seq.view_pattern])
+            self.swing_edit_input = ""
             self.pattern_save_active = False
             self.pattern_save_input = ""
             self.pattern_load_active = False
@@ -1792,6 +1945,10 @@ class Controller:
             self.chain_edit_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
             ok, message = True, ""
         elif self.pattern_menu_index == 8:
             self.pack_save_active = True
@@ -1808,6 +1965,10 @@ class Controller:
             self.swing_edit_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
             ok, message = True, ""
         elif self.pattern_menu_index == 9:
             ok, message = self.seq.toggle_midi_out()
@@ -1911,7 +2072,7 @@ class Controller:
             self.move_cursor(0, 1)
             return True
         if "TAB" in event_tokens or key_code == 9:
-            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL]
+            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
             next_idx = 0
             for i, col in enumerate(cycle):
                 if col > self.cursor_x:
@@ -1936,6 +2097,12 @@ class Controller:
                 return True
             if self.audio_export_active:
                 self._close_audio_export_dialog()
+                return True
+            if self.humanize_edit_active:
+                self._close_humanize_dialog()
+                return True
+            if self.probability_edit_active:
+                self._close_probability_dialog()
                 return True
             if self.pattern_load_active:
                 self._close_pattern_dialog()
@@ -2084,6 +2251,58 @@ class Controller:
 
             return True
 
+        if self.humanize_edit_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                try:
+                    value = int(self.humanize_edit_input.strip())
+                except ValueError:
+                    self.status_message = "Humanize must be 0-100"
+                    self._close_humanize_dialog()
+                    return True
+                if self.cursor_y == ACCENT_TRACK:
+                    self.status_message = "Accent track has no humanize"
+                else:
+                    self.seq.set_track_humanize(self.cursor_y, value)
+                    self.status_message = f"Track {self.cursor_y + 1} humanize: {max(0, min(100, value))}"
+                self._close_humanize_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.humanize_edit_input = self.humanize_edit_input[:-1]
+                return True
+            if isinstance(key, str) and key.isdigit():
+                if len(self.humanize_edit_input) < 3:
+                    self.humanize_edit_input += key
+                return True
+            return True
+
+        if self.probability_edit_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                try:
+                    value = int(self.probability_edit_input.strip())
+                except ValueError:
+                    self.status_message = "Probability must be 0-100"
+                    self._close_probability_dialog()
+                    return True
+                if self.cursor_y == ACCENT_TRACK:
+                    self.status_message = "Accent track has no probability"
+                else:
+                    self.seq.set_track_probability(self.cursor_y, value)
+                    self.status_message = f"Track {self.cursor_y + 1} probability: {max(0, min(100, value))}%"
+                self._close_probability_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.probability_edit_input = self.probability_edit_input[:-1]
+                return True
+            if isinstance(key, str) and key.isdigit():
+                if len(self.probability_edit_input) < 3:
+                    self.probability_edit_input += key
+                return True
+            return True
+
         if self.keymap.matches("clear_pattern", event_tokens):
             if self.clear_confirm:
                 self.seq.clear_current_pattern()
@@ -2111,6 +2330,10 @@ class Controller:
             self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -2134,6 +2357,10 @@ class Controller:
             self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -2149,6 +2376,10 @@ class Controller:
             self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -2164,6 +2395,10 @@ class Controller:
             self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -2182,6 +2417,10 @@ class Controller:
             self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
             self.swing_edit_active = False
             self.swing_edit_input = ""
             self.status_message = ""
@@ -2226,7 +2465,10 @@ class Controller:
             if self.cursor_x == PAN_COL:
                 if velocity > 0:
                     self.seq.set_track_pan(self.cursor_y, velocity)
-            elif self.cursor_x == LOAD_COL:
+            elif self.cursor_x == GROUP_COL:
+                if self.cursor_y != ACCENT_TRACK:
+                    self.seq.set_track_group(self.cursor_y, velocity)
+            elif self.cursor_x in [LOAD_COL, HUMANIZE_COL, PROB_COL]:
                 pass
             elif self.edit_mode == "ratchet":
                 if self.cursor_y == ACCENT_TRACK:
@@ -2243,6 +2485,20 @@ class Controller:
             elif self.cursor_x == LOAD_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._open_file_browser("sample", target_track=self.cursor_y)
+            elif self.cursor_x == HUMANIZE_COL:
+                if self.cursor_y == ACCENT_TRACK:
+                    self.status_message = "Accent track has no humanize"
+                else:
+                    self.humanize_edit_active = True
+                    self.humanize_edit_input = ""
+            elif self.cursor_x == PROB_COL:
+                if self.cursor_y == ACCENT_TRACK:
+                    self.status_message = "Accent track has no probability"
+                else:
+                    self.probability_edit_active = True
+                    self.probability_edit_input = ""
+            elif self.cursor_x == GROUP_COL:
+                self.status_message = "Set group with number keys 0-9 (0 = off)"
             else:
                 self.seq.toggle_step(self.cursor_y, self.cursor_x)
         elif key_code in [ord('p'), ord('P')]:
@@ -2354,6 +2610,8 @@ def ui_loop(stdscr, seq):
             controller.kit_load_active,
             controller.pack_save_active,
             controller.audio_export_active,
+            controller.humanize_edit_active,
+            controller.probability_edit_active,
             controller.chain_edit_active,
             controller.swing_edit_active,
             controller.pattern_menu_active,
@@ -2369,6 +2627,8 @@ def ui_loop(stdscr, seq):
             controller.kit_load_input,
             controller.pack_save_input,
             controller.audio_export_input,
+            controller.humanize_edit_input,
+            controller.probability_edit_input,
             controller.chain_edit_input,
             controller.swing_edit_input,
             controller.status_message,
@@ -2417,21 +2677,29 @@ def ui_loop(stdscr, seq):
                                 else (
                                     f"Save pack folder name (Esc cancels): {controller.pack_save_input}"
                                     if controller.pack_save_active
-                                else (
-                                    f"Export audio filename (Esc cancels): {controller.audio_export_input}"
-                                    if controller.audio_export_active
                                     else (
-                                        f"Swing 50-75 (Esc cancels): {controller.swing_edit_input}"
-                                        if controller.swing_edit_active
-                                        else ""
+                                        f"Export audio filename (Esc cancels): {controller.audio_export_input}"
+                                        if controller.audio_export_active
+                                        else (
+                                            f"Humanize 0-100 (Esc cancels): {controller.humanize_edit_input}"
+                                            if controller.humanize_edit_active
+                                            else (
+                                                f"Probability 0-100 (Esc cancels): {controller.probability_edit_input}"
+                                                if controller.probability_edit_active
+                                                else (
+                                                    f"Swing 50-75 (Esc cancels): {controller.swing_edit_input}"
+                                                    if controller.swing_edit_active
+                                                    else ""
+                                                )
+                                            )
+                                        )
                                     )
                                 )
                             )
                         )
                     )
-                    )
                 ),
-                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.swing_edit_active else "",
+                controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.swing_edit_active else "",
                 controller.pattern_menu_active,
                 controller.pattern_menu_index,
                 pattern_menu_label,
