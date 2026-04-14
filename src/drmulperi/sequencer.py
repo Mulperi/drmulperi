@@ -64,6 +64,8 @@ class Sequencer:
         self.midi = MidiOut()
         self.midi_out_enabled = False
         self.pitch_semitones = 0
+        self.track_trigger_until = [0.0 for _ in range(TRACKS)]
+        self.trigger_flash_seconds = 0.12
 
         self.enter_held = False
         self.draw_mode = None
@@ -352,6 +354,7 @@ class Sequencer:
         pan = 5
         if track is not None and 0 <= track < TRACKS - 1:
             pan = self.track_pan[track]
+            self._mark_track_trigger(track)
         return self.engine.preview_wav_file(path, velocity=self.last_velocity / 9.0, pan=pan)
 
     def save_pack(self, foldername):
@@ -387,8 +390,14 @@ class Sequencer:
 
         return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 samples + pattern_bank.json)"
 
-    def export_current_pattern_audio(self, filename):
-        """Offline-render the viewed pattern as one-loop stereo WAV."""
+    def export_current_pattern_audio(self, filename, options=None):
+        """Offline-render the viewed pattern as one-loop WAV with export options.
+
+        Supported options:
+            bit_depth: 8 or 16
+            sample_rate: output sample rate in Hz
+            channels: 1 (mono) or 2 (stereo)
+        """
         target = filename.strip()
         if not target:
             return False, "Audio export canceled"
@@ -397,6 +406,25 @@ class Sequencer:
             target = f"{target}.wav"
 
         path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        opts = options or {}
+        try:
+            bit_depth = int(opts.get("bit_depth", 16))
+        except (TypeError, ValueError):
+            bit_depth = 16
+        bit_depth = 8 if bit_depth == 8 else 16
+
+        try:
+            target_sr = int(opts.get("sample_rate", self.engine.sr))
+        except (TypeError, ValueError):
+            target_sr = self.engine.sr
+        target_sr = max(8000, min(192000, target_sr))
+
+        try:
+            channels = int(opts.get("channels", 2))
+        except (TypeError, ValueError):
+            channels = 2
+        channels = 1 if channels == 1 else 2
+
         pattern = self.view_pattern
         current_length = self.pattern_length[pattern]
         sr = self.engine.sr
@@ -479,12 +507,45 @@ class Sequencer:
             out = np.clip(mix * (0.95 / peak), -1.0, 1.0)
         else:
             out = mix
-        out_i16 = (out * 32767.0).astype(np.int16)
+
+        # Convert channel count.
+        if channels == 1:
+            out = out.mean(axis=1)
+
+        # Resample final output if needed.
+        if target_sr != sr:
+            if out.ndim == 1:
+                out = self._resample_audio_mono(out, sr, target_sr)
+            else:
+                left = self._resample_audio_mono(out[:, 0], sr, target_sr)
+                right = self._resample_audio_mono(out[:, 1], sr, target_sr)
+                n = min(len(left), len(right))
+                out = np.column_stack((left[:n], right[:n]))
+
+        if bit_depth == 8:
+            out_wav = np.clip(((out + 1.0) * 127.5), 0, 255).astype(np.uint8)
+        else:
+            out_wav = (out * 32767.0).astype(np.int16)
+
         try:
-            wavfile.write(path, sr, out_i16)
+            wavfile.write(path, target_sr, out_wav)
         except Exception as exc:
             return False, f"Audio export failed: {exc}"
-        return True, f"Exported audio: {os.path.basename(path)}"
+        chan_label = "mono" if channels == 1 else "stereo"
+        return True, f"Exported audio: {os.path.basename(path)} ({target_sr}Hz, {bit_depth}-bit, {chan_label})"
+
+    @staticmethod
+    def _resample_audio_mono(samples, src_sr, dst_sr):
+        """Linear-resample mono audio to a new sample rate."""
+        if src_sr == dst_sr or len(samples) <= 1:
+            return samples
+        ratio = float(dst_sr) / float(src_sr)
+        new_len = max(1, int(round(len(samples) * ratio)))
+        src_pos = np.linspace(0, len(samples) - 1, num=new_len, endpoint=True)
+        idx0 = np.floor(src_pos).astype(np.int32)
+        idx1 = np.minimum(idx0 + 1, len(samples) - 1)
+        frac = src_pos - idx0
+        return ((1.0 - frac) * samples[idx0]) + (frac * samples[idx1])
 
     # ---------- AUDIO LOOP ----------
     def run(self):
@@ -497,6 +558,7 @@ class Sequencer:
 
             while self.pending_events and self.pending_events[0][0] <= now:
                 _, track, vel = heapq.heappop(self.pending_events)
+                self._mark_track_trigger(track)
                 if self.midi_out_enabled:
                     self._trigger_midi(track, vel, 0.05)
                 else:
@@ -672,6 +734,11 @@ class Sequencer:
         note = MIDI_NOTES[track] if track < len(MIDI_NOTES) else 36
         self.midi.send_note_on(channel, note, velocity)
         heapq.heappush(self.pending_midi_off, (time.perf_counter() + max(0.01, gate_seconds), channel, note))
+
+    def _mark_track_trigger(self, track):
+        """Mark a track as recently triggered for short UI flash feedback."""
+        if 0 <= track < TRACKS:
+            self.track_trigger_until[track] = time.perf_counter() + self.trigger_flash_seconds
 
     def set_chain_from_text(self, text):
         """Parse text chain input (e.g. `1 2 3 2`) and store it."""
@@ -922,6 +989,7 @@ class Sequencer:
         """Preview current track sample (or MIDI note when MIDI mode is on)."""
         if track >= TRACKS - 1:
             return
+        self._mark_track_trigger(track)
         if self.midi_out_enabled:
             self._trigger_midi(track, self.last_velocity / 9.0, 0.08)
         else:
@@ -933,6 +1001,7 @@ class Sequencer:
     def _preview_note_if_idle(self, track, velocity):
         if self.playing or track >= TRACKS - 1 or velocity <= 0:
             return
+        self._mark_track_trigger(track)
         if self.midi_out_enabled:
             self._trigger_midi(track, velocity / 9.0, 0.06)
         else:
