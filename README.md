@@ -65,10 +65,16 @@ pip install numpy scipy sounddevice mido python-rtmidi
 4. Run:
 
 ```bash
-python main.py
+PYTHONPATH=src python -m drmulperi
 ```
 
 Quick start with bundled example kit:
+
+```bash
+PYTHONPATH=src python -m drmulperi --kit examplekit --pattern examplekit/patterns.json
+```
+
+Compatibility launcher (still works):
 
 ```bash
 python3 main.py --kit examplekit --pattern examplekit/patterns.json
@@ -77,11 +83,16 @@ python3 main.py --kit examplekit --pattern examplekit/patterns.json
 ## Run With Kit/Pattern
 
 ```bash
-python main.py --kit kit1 --pattern patterns
+PYTHONPATH=src python -m drmulperi --kit kit1 --pattern patterns
 ```
 
 - `--kit`: folder containing `.wav` samples (first 8 alphabetical files are used)
 - `--pattern`: pattern bank JSON name/path (`.json` is added automatically if missing)
+
+## Project Layout
+
+- Source package: `src/drmulperi/`
+- Compatibility launcher: `main.py`
 
 ## Project Data
 

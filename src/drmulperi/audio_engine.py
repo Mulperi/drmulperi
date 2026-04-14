@@ -5,7 +5,7 @@ import numpy as np
 import sounddevice as sd
 from scipy.io import wavfile
 
-from config import TRACKS
+from .config import TRACKS
 
 try:
     import mido
@@ -306,4 +306,3 @@ class AudioEngine:
                 v.track = -1
 
         outdata[:] = mix * 0.25
-

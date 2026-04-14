@@ -9,8 +9,8 @@ import time
 import numpy as np
 from scipy.io import wavfile
 
-from audio_engine import AudioEngine, MidiOut
-from config import (
+from .audio_engine import AudioEngine, MidiOut
+from .config import (
     ACCENT_BOOST,
     ACCENT_TRACK,
     CHAIN_MAX_STEPS,
@@ -940,4 +940,3 @@ class Sequencer:
             if group_id > 0:
                 self.engine.choke_group(group_id, self.track_group)
             self.engine.trigger(track, velocity / 9.0, self.track_pan[track], rate=self.pitch_rate())
-

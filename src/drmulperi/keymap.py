@@ -1,8 +1,8 @@
+import configparser
 import curses
 import os
-import configparser
 
-from config import DEFAULT_KEYMAP, KEYMAP_PATH
+from .config import DEFAULT_KEYMAP, KEYMAP_PATH
 
 def _normalize_key_token(token):
     """Normalize a key token from config into an internal matcher format."""
@@ -148,4 +148,3 @@ class Keymap:
         except Exception:
             return ["[keys]"]
         return lines if lines else ["[keys]"]
-

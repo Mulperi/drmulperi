@@ -2,7 +2,7 @@ import curses
 import os
 import time
 
-from config import (
+from .config import (
     ACCENT_TRACK,
     GRID_COLS,
     GROUP_COL,
@@ -15,7 +15,7 @@ from config import (
     STEPS,
     TRACKS,
 )
-from keymap import Keymap, _event_tokens
+from .keymap import Keymap, _event_tokens
 
 def draw(
     stdscr,
@@ -1574,4 +1574,3 @@ def ui_loop(stdscr, seq):
             should_draw = False
 
         time.sleep(0.002)
-
