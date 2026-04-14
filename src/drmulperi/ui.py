@@ -13,6 +13,7 @@ from .config import (
     PATTERNS,
     PROB_COL,
     STEPS,
+    TRACK_PITCH_COL,
     TRACKS,
 )
 from .keymap import Keymap, _event_tokens
@@ -207,6 +208,8 @@ def draw(
             return 4
         if col == GROUP_COL:
             return 1
+        if col == TRACK_PITCH_COL:
+            return 3
         return 3
 
     for s in range(GRID_COLS):
@@ -275,6 +278,9 @@ def draw(
             elif s == GROUP_COL:
                 char = str(seq.track_group[t]) if t != ACCENT_TRACK else ""
                 cell_attr = row_attr
+            elif s == TRACK_PITCH_COL:
+                char = f"{seq.track_pitch[t] + 12}" if t != ACCENT_TRACK else ""
+                cell_attr = row_attr
             else:
                 val = seq.grid[seq.view_pattern][t][s]
                 ratchet = seq.ratchet_grid[seq.view_pattern][t][s]
@@ -292,7 +298,7 @@ def draw(
                 if s >= seq.pattern_length[seq.view_pattern]:
                     cell_attr = theme["muted"]
 
-            sep = "| " if s in [PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL] or (s < STEPS and s % 4 == 0) else "  "
+            sep = "| " if s in [PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL] or (s < STEPS and s % 4 == 0) else "  "
             safe_add(y, x, sep, theme["divider"])
             x += len(sep)
             cell_w = col_cell_width(s)
@@ -350,6 +356,8 @@ def draw(
         help_line = "% Probability: chance that a step triggers on this track (0-100). Type digits to set."
     elif cursor_x == GROUP_COL:
         help_line = "Group: 0=off, 1-9=mute group. Tracks with same group choke each other."
+    elif cursor_x == TRACK_PITCH_COL:
+        help_line = "Track pitch: 0..24 scale (12 = no shift). Type digits to set."
     elif cursor_y < TRACKS - 1:
         help_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on ↓ to load)"
     else:
@@ -584,7 +592,7 @@ class Controller:
         self.cursor_y = (self.cursor_y + dy) % TRACKS
 
     def _apply_inline_track_value(self, col, digit):
-        """Apply inline numeric typing for H/Prob columns without Enter."""
+        """Apply inline numeric typing for track parameter columns without Enter."""
         if self.cursor_y == ACCENT_TRACK:
             self.status_message = "Accent track has no parameter here"
             return
@@ -602,12 +610,15 @@ class Controller:
             value = int(self.inline_value_buffer)
         except ValueError:
             value = digit
-        value = max(0, min(100, value))
-
         if col == HUMANIZE_COL:
+            value = max(0, min(100, value))
             self.seq.set_track_humanize(self.cursor_y, value)
         elif col == PROB_COL:
+            value = max(0, min(100, value))
             self.seq.set_track_probability(self.cursor_y, value)
+        elif col == TRACK_PITCH_COL:
+            value = max(0, min(24, value))
+            self.seq.set_track_pitch_ui(self.cursor_y, value)
 
     def _close_pattern_dialog(self):
         self.pattern_load_active = False
@@ -1117,7 +1128,7 @@ class Controller:
                 if not self.header_edit_active:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
                 return True
-            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
+            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             next_idx = 0
             for i, col in enumerate(cycle):
                 if col > self.cursor_x:
@@ -1132,7 +1143,7 @@ class Controller:
                 if not self.header_edit_active:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
                 return True
-            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
+            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             prev_idx = len(cycle) - 1
             for i in range(len(cycle) - 1, -1, -1):
                 if cycle[i] < self.cursor_x:
@@ -1548,6 +1559,9 @@ class Controller:
             elif self.cursor_x == GROUP_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.set_track_group(self.cursor_y, velocity)
+            elif self.cursor_x == TRACK_PITCH_COL:
+                if self.cursor_y != ACCENT_TRACK:
+                    self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
             elif self.cursor_x == HUMANIZE_COL:
                 self._apply_inline_track_value(HUMANIZE_COL, velocity)
             elif self.cursor_x == PROB_COL:
@@ -1634,6 +1648,8 @@ class Controller:
                     self.probability_edit_input = ""
             elif self.cursor_x == GROUP_COL:
                 self.status_message = "Set group with number keys 0-9 (0 = off)"
+            elif self.cursor_x == TRACK_PITCH_COL:
+                self.status_message = "Track pitch: type 0..24 (12 = no shift)"
             else:
                 self.seq.toggle_step(self.cursor_y, self.cursor_x)
         elif key_code in [ord('p'), ord('P')]:

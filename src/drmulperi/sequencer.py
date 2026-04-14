@@ -57,6 +57,7 @@ class Sequencer:
         self.track_humanize = [0 for _ in range(TRACKS)]
         self.track_probability = [100 for _ in range(TRACKS)]
         self.track_group = [0 for _ in range(TRACKS)]
+        self.track_pitch = [0 for _ in range(TRACKS)]
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
@@ -104,6 +105,7 @@ class Sequencer:
             "track_humanize": self.track_humanize,
             "track_probability": self.track_probability,
             "track_group": self.track_group,
+            "track_pitch": self.track_pitch,
             "pattern_length": self.pattern_length,
             "pattern_swing": [self.swing_internal_to_ui(v) for v in self.pattern_swing],
             "ratchet_grid": self.ratchet_grid,
@@ -196,6 +198,17 @@ class Sequencer:
         normalized_group[ACCENT_TRACK] = 0
         self.track_group = normalized_group
 
+        loaded_track_pitch = data.get("track_pitch", self.track_pitch)
+        normalized_track_pitch = [0 for _ in range(TRACKS)]
+        if isinstance(loaded_track_pitch, list):
+            for i in range(min(TRACKS, len(loaded_track_pitch))):
+                try:
+                    normalized_track_pitch[i] = max(-12, min(12, int(loaded_track_pitch[i])))
+                except (ValueError, TypeError):
+                    normalized_track_pitch[i] = 0
+        normalized_track_pitch[ACCENT_TRACK] = 0
+        self.track_pitch = normalized_track_pitch
+
         loaded_lengths = data.get("pattern_length", self.pattern_length)
         normalized_lengths = [STEPS for _ in range(PATTERNS)]
         if isinstance(loaded_lengths, list):
@@ -249,6 +262,14 @@ class Sequencer:
             self.chain_enabled = raw_chain_enabled.strip().lower() in ["1", "true", "yes", "on"]
         else:
             self.chain_enabled = bool(raw_chain_enabled)
+        if self.chain_enabled:
+            # Always start chain from the first slot after loading a project.
+            if not self.chain:
+                self.chain = [0]
+            self.chain_pos = 0
+            self.pattern = self.chain[0]
+            self.next_pattern = None
+            self.step = 0
 
         raw_midi_enabled = data.get("midi_out_enabled", False)
         if isinstance(raw_midi_enabled, str):
@@ -432,24 +453,22 @@ class Sequencer:
 
         sr = self.engine.sr
         base_step_time = (60.0 / self.bpm) / self.steps_per_beat
-        pitch_rate = self.pitch_rate()
-
-        def pitch_sample(sample):
+        def pitch_sample(sample, rate):
             if sample is None:
                 return None
-            if abs(pitch_rate - 1.0) < 1e-6:
+            if abs(rate - 1.0) < 1e-6:
                 return sample
             src_len = len(sample)
             if src_len < 2:
                 return sample
-            out_len = max(1, int(((src_len - 1) / pitch_rate) + 1))
-            pos = np.arange(out_len, dtype=np.float32) * pitch_rate
+            out_len = max(1, int(((src_len - 1) / rate) + 1))
+            pos = np.arange(out_len, dtype=np.float32) * rate
             idx0 = np.minimum(pos.astype(np.int32), src_len - 2)
             frac = pos - idx0
             idx1 = idx0 + 1
             return ((1.0 - frac) * sample[idx0]) + (frac * sample[idx1])
 
-        pitched_samples = [pitch_sample(self.engine.samples[t]) for t in range(TRACKS - 1)]
+        pitched_samples = [pitch_sample(self.engine.samples[t], self.pitch_rate(t)) for t in range(TRACKS - 1)]
 
         if scope == "chain" and self.chain:
             pattern_order = [max(0, min(PATTERNS - 1, int(p))) for p in self.chain]
@@ -573,7 +592,7 @@ class Sequencer:
                     group_id = self.track_group[track] if 0 <= track < len(self.track_group) else 0
                     if group_id > 0:
                         self.engine.choke_group(group_id, self.track_group)
-                    self.engine.trigger(track, vel, self.track_pan[track], rate=self.pitch_rate())
+                    self.engine.trigger(track, vel, self.track_pan[track], rate=self.pitch_rate(track))
 
             while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
                 _, channel, note = heapq.heappop(self.pending_midi_off)
@@ -653,13 +672,28 @@ class Sequencer:
 
     def toggle_playback(self):
         """Start/stop playback and clear queued/pending events on stop."""
-        if not self.playing and not self.chain_enabled:
-            self.pattern = self.view_pattern
-            self.next_pattern = None
+        if not self.playing:
+            if self.chain_enabled:
+                if not self.chain:
+                    self.chain = [0]
+                self.chain_pos = 0
+                self.pattern = self.chain[0]
+                self.next_pattern = None
+                self.step = 0
+                self.pending_events.clear()
+                self.pending_midi_off.clear()
+            else:
+                self.pattern = self.view_pattern
+                self.next_pattern = None
         self.playing = not self.playing
         if not self.playing:
             self.step = 0
             self.next_pattern = None
+            if self.chain_enabled:
+                self.chain_pos = 0
+                if not self.chain:
+                    self.chain = [0]
+                self.pattern = self.chain[0]
             self.pending_events.clear()
             if self.pending_midi_off:
                 self.midi.all_notes_off()
@@ -721,9 +755,12 @@ class Sequencer:
         """Toggle MIDI output mode on/off."""
         return self._set_midi_out_enabled(not self.midi_out_enabled)
 
-    def pitch_rate(self):
-        """Return playback rate multiplier for global semitone transpose."""
-        return float(2.0 ** (self.pitch_semitones / 12.0))
+    def pitch_rate(self, track=None):
+        """Return playback rate multiplier for global+track semitone transpose."""
+        semitones = self.pitch_semitones
+        if track is not None and 0 <= track < TRACKS - 1:
+            semitones += self.track_pitch[track]
+        return float(2.0 ** (semitones / 12.0))
 
     def change_pitch_semitones(self, delta):
         """Adjust global transpose in semitones within [-12, +12]."""
@@ -999,6 +1036,18 @@ class Sequencer:
         self.track_group[track] = max(0, min(9, int(value)))
         self.dirty = True
 
+    def set_track_pitch(self, track, semitones):
+        if track == ACCENT_TRACK:
+            return
+        self.track_pitch[track] = max(-12, min(12, int(semitones)))
+        self.dirty = True
+
+    def set_track_pitch_ui(self, track, value_0_24):
+        """Set track pitch from UI scale 0..24 where 12 means no pitch shift."""
+        if track == ACCENT_TRACK:
+            return
+        self.set_track_pitch(track, int(value_0_24) - 12)
+
     def preview_row(self, track):
         """Preview current track sample (or MIDI note when MIDI mode is on)."""
         if track >= TRACKS - 1:
@@ -1010,7 +1059,7 @@ class Sequencer:
             group_id = self.track_group[track]
             if group_id > 0:
                 self.engine.choke_group(group_id, self.track_group)
-            self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track], rate=self.pitch_rate())
+            self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track], rate=self.pitch_rate(track))
 
     def _preview_note_if_idle(self, track, velocity):
         if self.playing or track >= TRACKS - 1 or velocity <= 0:
@@ -1022,4 +1071,4 @@ class Sequencer:
             group_id = self.track_group[track]
             if group_id > 0:
                 self.engine.choke_group(group_id, self.track_group)
-            self.engine.trigger(track, velocity / 9.0, self.track_pan[track], rate=self.pitch_rate())
+            self.engine.trigger(track, velocity / 9.0, self.track_pan[track], rate=self.pitch_rate(track))
