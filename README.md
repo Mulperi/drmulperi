@@ -82,29 +82,36 @@ python main.py --kit kit1 --pattern patterns
 Pattern bank JSON stores:
 
 - BPM
+- active/visible pattern (`pattern`, `view_pattern`)
 - 4 patterns (`grid`)
 - ratchets (`ratchet_grid`)
 - per-track pan (`track_pan`, accent row fixed center)
+- per-track humanize/probability/group (`track_humanize`, `track_probability`, `track_group`)
 - per-pattern length (`pattern_length`)
+- per-pattern swing (`pattern_swing`) stored as `0..10`
 - chain mode + chain sequence (`chain_enabled`, `chain`)
+- MIDI out state (`midi_out_enabled`)
+- global pitch transpose in semitones (`pitch_semitones`)
 
 ## Core Controls
 
 - `Space`: play/stop
 - Arrow keys: move cursor
+- `Tab` / `Shift+Tab`: jump next/previous edit column group
 - `0..9`: set velocity in step cells (`0` clears step, `1..9` sets velocity)
 - `Enter`: toggle step on/off (or reset pan to center when cursor is on pan column)
 - `P`: preview current track sample
 - `M`: mute/unmute current row
 - `Q/W/E/R`: select pattern (manual mode) or queue pattern while playing
-- `Enter` on `LOAD` column: open sample browser and load one `.wav` into current track
+- `Enter` on `↓` column: open sample browser and load one `.wav` into current track
 
 ## Modes And Editing
 
-- `mode_toggle` (default `v`): toggle velocity/ratchet mode
+- `mode_toggle` (default `T`): toggle velocity/ratchet mode
 - Ratchet mode: `1..4` sets ratchet count for selected step
 - Quick ratchet shortcuts: `Shift+1..4` (plus layout fallbacks) and `F1..F4`
-- Pan column: one extra column after 16 steps (`P1..P9`)
+- Right-side parameter columns after 16 steps: pan (`P1..P9`), sample load (`↓`), humanize (`H0..H100`), probability (`%0..%100`), mute group (`0..9`)
+- Humanize and probability can be edited directly by typing digits in their cells (no Enter required)
 
 ## Load/Save Dialogs
 
@@ -112,6 +119,7 @@ Pattern bank JSON stores:
 - `pattern_load` (default `L`): open pattern bank browser overlay (`.json`)
 - `kit_load` (default `K`): open kit folder browser overlay
 - Browser navigation: `Up/Down` select, `Enter` open/select, `Left/Right` or `Backspace` go up/down folders
+- Sample browser: `Space` previews highlighted `.wav`
 - `Esc` cancels any open dialog
 - Filename prompts auto-add `.json` if omitted
 - Pattern menu includes `Save Pack`: creates a folder with `pattern_bank.json` and current track samples
@@ -131,8 +139,16 @@ Pattern bank JSON stores:
 - Per-pattern length is supported (`1..16`)
 - Out-of-range steps are visually dimmed
 - Length controls:
-  - `pattern_length_dec` (default `a`)
-  - `pattern_length_inc` (default `s`)
+  - `pattern_length_dec` (default `[`)
+  - `pattern_length_inc` (default `]`)
+
+## Header Focus
+
+- From grid top row, press `Up` to enter header focus.
+- In header focus, `Tab` / `Shift+Tab` cycles parameters: `PATTERN BANK`, `KIT`, `BPM`, `LEN`, `SW`, `PITCH`.
+- `Enter` on `PATTERN BANK`/`KIT` opens their browser dialogs.
+- `Left/Right` adjusts numeric header params (`BPM`, `LEN`, `SW`, `PITCH`).
+- `Down` returns from header focus to the grid.
 
 ## Keymap
 
@@ -141,6 +157,7 @@ On first run, `keymap.ini` is created in project root.
 You can customize these keys there:
 
 - `help_menu`
+- `pattern_menu`
 - `mode_toggle`
 - `clear_pattern`
 - `mute_row`

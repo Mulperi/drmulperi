@@ -133,6 +133,8 @@ def _event_tokens(key):
             tokens.add("LEFT")
         elif key_code == curses.KEY_RIGHT:
             tokens.add("RIGHT")
+        elif key_code == curses.KEY_BTAB:
+            tokens.add("BTAB")
         elif key_code == 32:
             tokens.add("SPACE")
 
@@ -224,7 +226,8 @@ class Voice:
         self.active = False
         self.data = None
         self.track = -1
-        self.pos = 0
+        self.pos = 0.0
+        self.rate = 1.0
         self.vel = 1.0
         self.pan_l = 1.0
         self.pan_r = 1.0
@@ -373,6 +376,43 @@ class AudioEngine:
             data = data.mean(axis=1)
         return data
 
+    def preview_wav_file(self, path, velocity=1.0, pan=5):
+        """Preview an arbitrary wav file without loading it into a track slot."""
+        if not os.path.isfile(path) or not path.lower().endswith(".wav"):
+            return False, "Select a .wav file to preview"
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", wavfile.WavFileWarning)
+                sr, data = wavfile.read(path)
+        except Exception as exc:
+            return False, f"Preview failed: {exc}"
+
+        if data.dtype == np.int16:
+            data = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            data = data.astype(np.float32) / 2147483648.0
+        else:
+            data = data.astype(np.float32)
+
+        if len(data.shape) == 2:
+            mono = data.mean(axis=1)
+        else:
+            mono = data
+
+        velocity = max(0.0, min(1.0, float(velocity)))
+        pan_pos = (max(1, min(9, int(pan))) - 1) / 8.0
+        left_gain = float(np.cos(pan_pos * (np.pi / 2)))
+        right_gain = float(np.sin(pan_pos * (np.pi / 2)))
+        stereo = np.zeros((len(mono), 2), dtype=np.float32)
+        stereo[:, 0] = mono * velocity * left_gain
+        stereo[:, 1] = mono * velocity * right_gain
+
+        try:
+            sd.play(stereo, sr, blocking=False)
+        except Exception as exc:
+            return False, f"Preview failed: {exc}"
+        return True, f"Preview: {os.path.basename(path)}"
+
     def load_single_sample(self, track, path):
         if track < 0 or track >= TRACKS - 1:
             return False, "Invalid track"
@@ -406,14 +446,14 @@ class AudioEngine:
                 v.active = False
                 v.track = -1
 
-    def trigger(self, track, velocity, pan):
+    def trigger(self, track, velocity, pan, rate=1.0):
         """Queue one sample trigger event for the audio callback thread."""
         pan_pos = (pan - 1) / 8.0
         left_gain = float(np.cos(pan_pos * (np.pi / 2)))
         right_gain = float(np.sin(pan_pos * (np.pi / 2)))
 
         idx = self.event_write % len(self.event_buffer)
-        self.event_buffer[idx] = (track, velocity, left_gain, right_gain)
+        self.event_buffer[idx] = (track, velocity, left_gain, right_gain, float(rate))
         self.event_write += 1
 
     def audio_callback(self, outdata, frames, time_info, status):
@@ -426,7 +466,7 @@ class AudioEngine:
             event = self.event_buffer[idx]
 
             if event:
-                track, vel, pan_l, pan_r = event
+                track, vel, pan_l, pan_r, rate = event
                 sample = self.samples[track]
 
                 if sample is not None:
@@ -435,7 +475,8 @@ class AudioEngine:
                             v.active = True
                             v.data = sample
                             v.track = track
-                            v.pos = 0
+                            v.pos = 0.0
+                            v.rate = max(0.01, float(rate))
                             v.vel = vel
                             v.pan_l = pan_l
                             v.pan_r = pan_r
@@ -447,17 +488,28 @@ class AudioEngine:
             if not v.active:
                 continue
 
-            end = v.pos + frames
-            chunk = v.data[v.pos:end]
+            src = v.data
+            src_len = len(src)
+            if src_len < 2:
+                v.active = False
+                v.track = -1
+                continue
 
-            n = len(chunk)
-            scaled = chunk * v.vel
-            mix[:n, 0] += scaled * v.pan_l
-            mix[:n, 1] += scaled * v.pan_r
+            positions = v.pos + (np.arange(frames, dtype=np.float32) * v.rate)
+            valid = positions < (src_len - 1)
+            n = int(np.count_nonzero(valid))
+            if n > 0:
+                p = positions[:n]
+                idx0 = p.astype(np.int32)
+                frac = p - idx0
+                idx1 = idx0 + 1
+                chunk = ((1.0 - frac) * src[idx0]) + (frac * src[idx1])
+                scaled = chunk * v.vel
+                mix[:n, 0] += scaled * v.pan_l
+                mix[:n, 1] += scaled * v.pan_r
 
-            v.pos += frames
-
-            if v.pos >= len(v.data):
+            v.pos += frames * v.rate
+            if v.pos >= (src_len - 1):
                 v.active = False
                 v.track = -1
 
@@ -507,6 +559,7 @@ class Sequencer:
         self.pattern_clipboard = None
         self.midi = MidiOut()
         self.midi_out_enabled = False
+        self.pitch_semitones = 0
 
         self.enter_held = False
         self.draw_mode = None
@@ -521,28 +574,51 @@ class Sequencer:
         self.thread.start()
 
     # ---------- SAVE ----------
+    @staticmethod
+    def swing_ui_to_internal(ui_value):
+        """Convert user-facing swing value (0..10) into internal timing value (50..75)."""
+        ui = max(0, min(10, int(ui_value)))
+        return int(round(50 + (ui * 2.5)))
+
+    @staticmethod
+    def swing_internal_to_ui(internal_value):
+        """Convert internal timing swing value (50..75) into user-facing value (0..10)."""
+        val = max(50, min(75, int(internal_value)))
+        return max(0, min(10, int(round((val - 50) / 2.5))))
+
     def _serialize(self):
         """Return JSON-serializable project state."""
         return {
             "bpm": self.bpm,
             "last_velocity": self.last_velocity,
+            "pattern": self.pattern,
+            "view_pattern": self.view_pattern,
             "grid": self.grid,
             "track_pan": self.track_pan,
             "track_humanize": self.track_humanize,
             "track_probability": self.track_probability,
             "track_group": self.track_group,
             "pattern_length": self.pattern_length,
-            "pattern_swing": self.pattern_swing,
+            "pattern_swing": [self.swing_internal_to_ui(v) for v in self.pattern_swing],
             "ratchet_grid": self.ratchet_grid,
             "chain_enabled": self.chain_enabled,
             "chain": self.chain,
             "midi_out_enabled": self.midi_out_enabled,
+            "pitch_semitones": self.pitch_semitones,
         }
 
     def _apply_loaded_data(self, data):
         """Apply and sanitize loaded project data into runtime state."""
         self.bpm = data.get("bpm", 120)
         self.last_velocity = data.get("last_velocity", 5)
+        try:
+            self.pattern = max(0, min(PATTERNS - 1, int(data.get("pattern", self.pattern))))
+        except (TypeError, ValueError):
+            self.pattern = 0
+        try:
+            self.view_pattern = max(0, min(PATTERNS - 1, int(data.get("view_pattern", self.pattern))))
+        except (TypeError, ValueError):
+            self.view_pattern = self.pattern
         self.grid = data.get("grid", self.grid)
         for p in range(PATTERNS):
             if p < len(self.grid) and ACCENT_TRACK < len(self.grid[p]):
@@ -629,7 +705,13 @@ class Sequencer:
         if isinstance(loaded_swing, list):
             for i in range(min(PATTERNS, len(loaded_swing))):
                 try:
-                    normalized_swing[i] = max(50, min(75, int(loaded_swing[i])))
+                    raw = int(loaded_swing[i])
+                    # Backward compatibility:
+                    # old projects stored internal 50..75, new projects store UI 0..10.
+                    if raw > 10:
+                        normalized_swing[i] = max(50, min(75, raw))
+                    else:
+                        normalized_swing[i] = self.swing_ui_to_internal(raw)
                 except (ValueError, TypeError):
                     normalized_swing[i] = 50
         self.pattern_swing = normalized_swing
@@ -668,6 +750,10 @@ class Sequencer:
         else:
             target_midi = bool(raw_midi_enabled)
         self._set_midi_out_enabled(target_midi)
+        try:
+            self.pitch_semitones = max(-12, min(12, int(data.get("pitch_semitones", 0))))
+        except (TypeError, ValueError):
+            self.pitch_semitones = 0
         self._sync_chain_pos_to_pattern()
 
     def save(self):
@@ -710,7 +796,6 @@ class Sequencer:
         self._apply_loaded_data(data)
         self.pattern_path = path
         self.pattern_name = os.path.basename(path)
-        self.view_pattern = self.pattern
         self.playing = False
         self.step = 0
         self.next_pattern = None
@@ -757,6 +842,13 @@ class Sequencer:
         if ok:
             self.dirty = True
         return ok, message
+
+    def preview_sample_file(self, path, track=None):
+        """Preview a sample file from browser without assigning it."""
+        pan = 5
+        if track is not None and 0 <= track < TRACKS - 1:
+            pan = self.track_pan[track]
+        return self.engine.preview_wav_file(path, velocity=self.last_velocity / 9.0, pan=pan)
 
     def save_pack(self, foldername):
         """Save a portable pack folder with `pattern_bank.json` plus current samples."""
@@ -805,6 +897,24 @@ class Sequencer:
         current_length = self.pattern_length[pattern]
         sr = self.engine.sr
         base_step_time = (60.0 / self.bpm) / self.steps_per_beat
+        pitch_rate = self.pitch_rate()
+
+        def pitch_sample(sample):
+            if sample is None:
+                return None
+            if abs(pitch_rate - 1.0) < 1e-6:
+                return sample
+            src_len = len(sample)
+            if src_len < 2:
+                return sample
+            out_len = max(1, int(((src_len - 1) / pitch_rate) + 1))
+            pos = np.arange(out_len, dtype=np.float32) * pitch_rate
+            idx0 = np.minimum(pos.astype(np.int32), src_len - 2)
+            frac = pos - idx0
+            idx1 = idx0 + 1
+            return ((1.0 - frac) * sample[idx0]) + (frac * sample[idx1])
+
+        pitched_samples = [pitch_sample(self.engine.samples[t]) for t in range(TRACKS - 1)]
 
         step_durations = [
             self._step_duration_for(pattern, s, base_step_time)
@@ -833,7 +943,7 @@ class Sequencer:
                 vel = self.grid[pattern][t][s]
                 if vel <= 0:
                     continue
-                sample = self.engine.samples[t]
+                sample = pitched_samples[t]
                 if sample is None:
                     continue
 
@@ -889,7 +999,7 @@ class Sequencer:
                     group_id = self.track_group[track] if 0 <= track < len(self.track_group) else 0
                     if group_id > 0:
                         self.engine.choke_group(group_id, self.track_group)
-                    self.engine.trigger(track, vel, self.track_pan[track])
+                    self.engine.trigger(track, vel, self.track_pan[track], rate=self.pitch_rate())
 
             while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
                 _, channel, note = heapq.heappop(self.pending_midi_off)
@@ -1037,6 +1147,17 @@ class Sequencer:
         """Toggle MIDI output mode on/off."""
         return self._set_midi_out_enabled(not self.midi_out_enabled)
 
+    def pitch_rate(self):
+        """Return playback rate multiplier for global semitone transpose."""
+        return float(2.0 ** (self.pitch_semitones / 12.0))
+
+    def change_pitch_semitones(self, delta):
+        """Adjust global transpose in semitones within [-12, +12]."""
+        new_val = max(-12, min(12, self.pitch_semitones + int(delta)))
+        if new_val != self.pitch_semitones:
+            self.pitch_semitones = new_val
+            self.dirty = True
+
     def _trigger_midi(self, track, velocity_norm, gate_seconds):
         if not self.midi_out_enabled:
             return
@@ -1116,11 +1237,24 @@ class Sequencer:
         odd_duration = pair_total - even_duration
         return even_duration if (step_index % 2 == 0) else odd_duration
 
+    def current_pattern_swing_ui(self):
+        """Return user-facing swing value in 0..10 scale."""
+        internal = self.pattern_swing[self.view_pattern]
+        return self.swing_internal_to_ui(internal)
+
     def set_current_pattern_swing(self, value):
         swing = max(50, min(75, int(value)))
         if self.pattern_swing[self.view_pattern] != swing:
             self.pattern_swing[self.view_pattern] = swing
             self.dirty = True
+
+    def set_current_pattern_swing_ui(self, ui_value):
+        """Set swing from user-facing 0..10 scale."""
+        self.set_current_pattern_swing(self.swing_ui_to_internal(ui_value))
+
+    def change_current_pattern_swing(self, delta):
+        """Increase or decrease viewed pattern swing within 0..10."""
+        self.set_current_pattern_swing_ui(self.current_pattern_swing_ui() + int(delta))
 
     def set_current_pattern_swing_from_text(self, text):
         src = text.strip()
@@ -1129,10 +1263,10 @@ class Sequencer:
         try:
             value = int(src)
         except ValueError:
-            return False, "Swing must be a number (50-75)"
-        if value < 50 or value > 75:
-            return False, "Swing out of range (50-75)"
-        self.set_current_pattern_swing(value)
+            return False, "Swing must be a number (0-10)"
+        if value < 0 or value > 10:
+            return False, "Swing out of range (0-10)"
+        self.set_current_pattern_swing_ui(value)
         return True, f"Swing set to {value}"
 
     def change_bpm(self, delta):
@@ -1239,6 +1373,9 @@ class Sequencer:
 
     def select_pattern(self, pattern_index):
         """Select/queue pattern depending on chain/playback mode."""
+        prev_pattern = self.pattern
+        prev_view = self.view_pattern
+        prev_next = self.next_pattern
         if self.chain_enabled:
             self.view_pattern = pattern_index
         elif self.playing:
@@ -1247,6 +1384,8 @@ class Sequencer:
             self.pattern = pattern_index
             self.view_pattern = pattern_index
             self._sync_chain_pos_to_pattern()
+        if self.pattern != prev_pattern or self.view_pattern != prev_view or self.next_pattern != prev_next:
+            self.dirty = True
 
     def toggle_mute_row(self, track):
         self.muted_rows[track] = not self.muted_rows[track]
@@ -1285,7 +1424,7 @@ class Sequencer:
             group_id = self.track_group[track]
             if group_id > 0:
                 self.engine.choke_group(group_id, self.track_group)
-            self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track])
+            self.engine.trigger(track, self.last_velocity / 9.0, self.track_pan[track], rate=self.pitch_rate())
 
     def _preview_note_if_idle(self, track, velocity):
         if self.playing or track >= TRACKS - 1 or velocity <= 0:
@@ -1296,7 +1435,7 @@ class Sequencer:
             group_id = self.track_group[track]
             if group_id > 0:
                 self.engine.choke_group(group_id, self.track_group)
-            self.engine.trigger(track, velocity / 9.0, self.track_pan[track])
+            self.engine.trigger(track, velocity / 9.0, self.track_pan[track], rate=self.pitch_rate())
 
 # ---------- UI ----------
 def draw(
@@ -1304,6 +1443,8 @@ def draw(
     seq,
     cursor_x,
     cursor_y,
+    header_focus,
+    header_param,
     edit_mode,
     clear_confirm,
     pattern_load_prompt,
@@ -1401,28 +1542,42 @@ def draw(
 
     safe_add(2, content_x, "DR. MULPERI", theme["title"])
     kit_name = os.path.basename(os.path.normpath(seq.kit_path))
-    safe_add(
-        3,
-        content_x,
-        f"PATTERN BANK: {seq.pattern_name}  KIT: {kit_name}"[:header_right - content_x],
-        theme["text"]
-    )
+    line3_parts = [
+        ("pattern_bank", "PATTERN BANK: "),
+        ("pattern_bank", f"{seq.pattern_name}  "),
+        ("kit", "KIT: "),
+        ("kit", f"{kit_name}"),
+    ]
+    x_line3 = content_x
+    for key, text in line3_parts:
+        attr = theme["text"]
+        if header_focus and key == header_param:
+            attr = attr | curses.A_REVERSE
+        safe_add(3, x_line3, text[:max(0, header_right - x_line3)], attr)
+        x_line3 += len(text)
+        if x_line3 >= header_right:
+            break
     midi_text = "MIDI OUT"
     midi_attr = theme["midi_on"] if seq.midi_out_enabled else theme["midi_off"]
     midi_x = header_right - len(midi_text) - 1
     safe_add(3, midi_x, midi_text, midi_attr)
-    safe_add(
-        4,
-        content_x,
-        (
-            f"BPM:{seq.bpm}  {status}  {beat}/4  "
-            f"LEN:{seq.pattern_length[seq.view_pattern]} ({length_dec_label}/{length_inc_label})  "
-            f"SW:{seq.pattern_swing[seq.view_pattern]}  "
-            f"MODE:{mode} ({mode_key_label} to switch)  "
-            f"MENU:{pattern_menu_key_label}"
-        )[:header_right - content_x],
-        theme["text"]
-    )
+    info_parts = [
+        ("bpm", f"BPM:{seq.bpm}  "),
+        ("base", f"{status}  {beat}/4  "),
+        ("length", f"LEN:{seq.pattern_length[seq.view_pattern]}  "),
+        ("swing", f"SW:{seq.current_pattern_swing_ui()}  "),
+        ("pitch", f"PITCH:{seq.pitch_semitones:+d}st  "),
+        ("tail", f"MODE:{mode} ({mode_key_label} to switch)  MENU:{pattern_menu_key_label}"),
+    ]
+    x_info = content_x
+    for key, text in info_parts:
+        attr = theme["text"]
+        if header_focus and key == header_param:
+            attr = attr | curses.A_REVERSE
+        safe_add(4, x_info, text[:max(0, header_right - x_info)], attr)
+        x_info += len(text)
+        if x_info >= header_right:
+            break
 
     pattern_line = "PATTERN: "
     queue_flash_on = int(time.time() * 2) % 2 == 0
@@ -1451,41 +1606,26 @@ def draw(
     x += 2
 
     def col_cell_width(col):
-        if col in [LOAD_COL, HUMANIZE_COL, PROB_COL]:
+        if col == LOAD_COL:
+            return 1
+        if col in [HUMANIZE_COL, PROB_COL]:
             return 4
         if col == GROUP_COL:
-            return 3
+            return 1
         return 3
 
     for s in range(GRID_COLS):
-        sep = "  "
-        sep_attr = theme["divider"]
-        if s == current_length and s < STEPS:
-            sep = "| "
-            sep_attr = theme["hint"]
-        elif s in [PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]:
-            sep = "| "
-
+        sep = "| " if (s == current_length and s < STEPS) else "  "
+        sep_attr = theme["hint"] if sep.strip() else theme["text"]
         safe_add(playhead_y, x, sep, sep_attr)
-        x += len(sep)
+        x += 2
         cell_w = col_cell_width(s)
         if s < STEPS:
             body = ("  v  " if show_playhead and s == seq.step else "     ")
             if cell_w != 3:
                 body = " " * (cell_w + 2)
         else:
-            if s == PAN_COL:
-                body = " Pan  "
-            elif s == LOAD_COL:
-                body = "Sample"
-            elif s == HUMANIZE_COL:
-                body = "Human "
-            elif s == PROB_COL:
-                body = " Prob "
-            elif s == GROUP_COL:
-                body = "Group"
-            else:
-                body = " " * (cell_w + 2)
+            body = " " * (cell_w + 2)
         body_attr = theme["playhead"] if show_playhead and s == seq.step else theme["muted"]
         safe_add(playhead_y, x, body, body_attr)
         x += len(body)
@@ -1563,27 +1703,43 @@ def draw(
         safe_add(y, x, f" {mute_mark}", row_attr)
 
     prompt_line = ""
-    if cursor_x == LOAD_COL:
-        sample_line = "Load sample"
+    help_line = ""
+    if header_focus:
+        if header_param == "pattern_bank":
+            help_line = "Global header focus: Enter opens pattern bank browser. Tab switches parameter. Down returns to grid."
+        elif header_param == "kit":
+            help_line = "Global header focus: Enter opens kit browser. Tab switches parameter. Down returns to grid."
+        elif header_param == "length":
+            help_line = "Global header focus: Left/Right changes pattern length. Tab switches parameter. Down returns to grid."
+        elif header_param == "bpm":
+            help_line = "Global header focus: Left/Right changes BPM. Tab switches parameter. Down returns to grid."
+        elif header_param == "swing":
+            help_line = "Global header focus: Left/Right changes swing (0-10). Tab switches parameter. Down returns to grid."
+        else:
+            help_line = "Global header focus: Left/Right tunes pitch (-12..+12). Tab switches parameter. Down returns to grid."
+    elif cursor_x == LOAD_COL:
+        help_line = "Load sample"
+    elif cursor_x == PAN_COL:
+        help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
     elif cursor_x == HUMANIZE_COL:
-        sample_line = "H Humanize: timing/velocity randomization per track (0-100). Enter to edit."
+        help_line = "H Humanize: timing/velocity randomization per track (0-100). Type digits to set."
     elif cursor_x == PROB_COL:
-        sample_line = "% Probability: chance that a step triggers on this track (0-100). Enter to edit."
+        help_line = "% Probability: chance that a step triggers on this track (0-100). Type digits to set."
     elif cursor_x == GROUP_COL:
-        sample_line = "Group: 0=off, 1-9=mute group. Tracks with same group choke each other."
+        help_line = "Group: 0=off, 1-9=mute group. Tracks with same group choke each other."
     elif cursor_y < TRACKS - 1:
-        sample_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on ↓ to load)"
+        help_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on ↓ to load)"
     else:
-        sample_line = "SAMPLE: Accent track (no sample file)"
+        help_line = "SAMPLE: Accent track (no sample file)"
 
     if clear_confirm:
         prompt_line = f"Clear current pattern? Press {clear_key_label} again to confirm."
     elif pattern_load_prompt:
         prompt_line = pattern_load_prompt
     elif status_message:
-        prompt_line = f"{status_message} | {sample_line}"
+        prompt_line = f"{status_message} | {help_line}"
     else:
-        prompt_line = sample_line
+        prompt_line = help_line
 
     if prompt_line:
         prompt_y = row_start + TRACKS
@@ -1643,6 +1799,8 @@ def draw(
         else:
             mode_name = "KIT"
         title = f"{mode_name} BROWSER (Enter open/select, <-/-> or Backspace up, Esc close)"
+        if file_browser_mode == "sample":
+            title = f"{mode_name} BROWSER (Space preview, Enter select, <-/-> up/down, Esc close)"
         visible_items = file_browser_items if file_browser_items else [{"name": "(empty)", "is_dir": False, "is_parent": False}]
         list_height = min(14, max(6, h - 12))
         max_name = max(len(it["name"]) for it in visible_items)
@@ -1714,12 +1872,44 @@ class Controller:
         self.file_browser_path = os.getcwd()
         self.file_browser_items = []
         self.file_browser_index = 0
+        self.header_focus = False
+        self.header_params = ["pattern_bank", "kit", "bpm", "length", "swing", "pitch"]
+        self.header_param_index = 0
+        self.inline_value_buffer = ""
+        self.inline_value_target = None  # (row, col)
+        self.inline_value_time = 0.0
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
 
     def move_cursor(self, dx, dy):
         self.cursor_x = (self.cursor_x + dx) % GRID_COLS
         self.cursor_y = (self.cursor_y + dy) % TRACKS
+
+    def _apply_inline_track_value(self, col, digit):
+        """Apply inline numeric typing for H/Prob columns without Enter."""
+        if self.cursor_y == ACCENT_TRACK:
+            self.status_message = "Accent track has no parameter here"
+            return
+
+        now = time.time()
+        target = (self.cursor_y, col)
+        if self.inline_value_target != target or (now - self.inline_value_time) > 1.0:
+            self.inline_value_buffer = ""
+
+        self.inline_value_target = target
+        self.inline_value_time = now
+        self.inline_value_buffer = (self.inline_value_buffer + str(digit))[-3:]
+
+        try:
+            value = int(self.inline_value_buffer)
+        except ValueError:
+            value = digit
+        value = max(0, min(100, value))
+
+        if col == HUMANIZE_COL:
+            self.seq.set_track_humanize(self.cursor_y, value)
+        elif col == PROB_COL:
+            self.seq.set_track_probability(self.cursor_y, value)
 
     def _close_pattern_dialog(self):
         self.pattern_load_active = False
@@ -2006,6 +2196,13 @@ class Controller:
             if key_code == 27:
                 self._close_file_browser()
                 return True
+            if "SPACE" in event_tokens or key_code == 32:
+                if self.file_browser_mode == "sample" and self.file_browser_items:
+                    item = self.file_browser_items[self.file_browser_index]
+                    if (not item.get("is_parent")) and (not item.get("is_action")) and (not item["is_dir"]):
+                        ok, message = self.seq.preview_sample_file(item["path"], self.file_browser_target_track)
+                        self.status_message = message
+                return True
             if key_code in {curses.KEY_BACKSPACE, 127, 8}:
                 parent = os.path.dirname(self.file_browser_path)
                 if parent and parent != self.file_browser_path:
@@ -2060,18 +2257,55 @@ class Controller:
             return True
 
         if key_code == curses.KEY_RIGHT:
-            self.move_cursor(1, 0)
+            if self.header_focus:
+                param = self.header_params[self.header_param_index]
+                if param in ["pattern_bank", "kit"]:
+                    return True
+                elif param == "bpm":
+                    self.seq.change_bpm(+1)
+                elif param == "length":
+                    self.seq.change_current_pattern_length(+1)
+                elif param == "swing":
+                    self.seq.change_current_pattern_swing(+1)
+                else:
+                    self.seq.change_pitch_semitones(+1)
+            else:
+                self.move_cursor(1, 0)
             return True
         if key_code == curses.KEY_LEFT:
-            self.move_cursor(-1, 0)
+            if self.header_focus:
+                param = self.header_params[self.header_param_index]
+                if param in ["pattern_bank", "kit"]:
+                    return True
+                elif param == "bpm":
+                    self.seq.change_bpm(-1)
+                elif param == "length":
+                    self.seq.change_current_pattern_length(-1)
+                elif param == "swing":
+                    self.seq.change_current_pattern_swing(-1)
+                else:
+                    self.seq.change_pitch_semitones(-1)
+            else:
+                self.move_cursor(-1, 0)
             return True
         if key_code == curses.KEY_UP:
-            self.move_cursor(0, -1)
+            if self.header_focus:
+                return True
+            if self.cursor_y == 0:
+                self.header_focus = True
+            else:
+                self.move_cursor(0, -1)
             return True
         if key_code == curses.KEY_DOWN:
-            self.move_cursor(0, 1)
+            if self.header_focus:
+                self.header_focus = False
+            else:
+                self.move_cursor(0, 1)
             return True
         if "TAB" in event_tokens or key_code == 9:
+            if self.header_focus:
+                self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
+                return True
             cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
             next_idx = 0
             for i, col in enumerate(cycle):
@@ -2081,6 +2315,18 @@ class Controller:
             else:
                 next_idx = 0
             self.cursor_x = cycle[next_idx]
+            return True
+        if "BTAB" in event_tokens or key_code == curses.KEY_BTAB:
+            if self.header_focus:
+                self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
+                return True
+            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
+            prev_idx = len(cycle) - 1
+            for i in range(len(cycle) - 1, -1, -1):
+                if cycle[i] < self.cursor_x:
+                    prev_idx = i
+                    break
+            self.cursor_x = cycle[prev_idx]
             return True
         if key_code == 27:  # ESC
             if self.chain_edit_active:
@@ -2318,6 +2564,7 @@ class Controller:
             self.seq.toggle_playback()
             self.status_message = ""
         elif self.keymap.matches("pattern_menu", event_tokens):
+            self.header_focus = False
             self.pattern_menu_active = True
             self.pattern_menu_index = 0
             self.pattern_save_active = False
@@ -2339,6 +2586,7 @@ class Controller:
             self.swing_edit_active = False
             self.swing_edit_input = ""
         elif self.keymap.matches("help_menu", event_tokens):
+            self.header_focus = False
             self.help_active = True
         elif self.keymap.matches("pattern_copy", event_tokens):
             ok, message = self.seq.copy_current_pattern()
@@ -2468,7 +2716,11 @@ class Controller:
             elif self.cursor_x == GROUP_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.set_track_group(self.cursor_y, velocity)
-            elif self.cursor_x in [LOAD_COL, HUMANIZE_COL, PROB_COL]:
+            elif self.cursor_x == HUMANIZE_COL:
+                self._apply_inline_track_value(HUMANIZE_COL, velocity)
+            elif self.cursor_x == PROB_COL:
+                self._apply_inline_track_value(PROB_COL, velocity)
+            elif self.cursor_x == LOAD_COL:
                 pass
             elif self.edit_mode == "ratchet":
                 if self.cursor_y == ACCENT_TRACK:
@@ -2480,6 +2732,15 @@ class Controller:
                 if velocity > 0:
                     self.seq.set_last_velocity(velocity)
         elif key_code in [10, 13, curses.KEY_ENTER]:
+            if self.header_focus:
+                param = self.header_params[self.header_param_index]
+                if param == "pattern_bank":
+                    self._open_file_browser("pattern")
+                    self.header_focus = False
+                elif param == "kit":
+                    self._open_file_browser("kit")
+                    self.header_focus = False
+                return True
             if self.cursor_x == PAN_COL:
                 self.seq.set_track_pan(self.cursor_y, 5)
             elif self.cursor_x == LOAD_COL:
@@ -2603,6 +2864,8 @@ def ui_loop(stdscr, seq):
         ui_state = (
             controller.cursor_x,
             controller.cursor_y,
+            controller.header_focus,
+            controller.header_param_index,
             controller.edit_mode,
             controller.clear_confirm,
             controller.pattern_save_active,
@@ -2660,6 +2923,8 @@ def ui_loop(stdscr, seq):
                 seq,
                 controller.cursor_x,
                 controller.cursor_y,
+                controller.header_focus,
+                controller.header_params[controller.header_param_index],
                 controller.edit_mode,
                 controller.clear_confirm,
                 (
@@ -2687,7 +2952,7 @@ def ui_loop(stdscr, seq):
                                                 f"Probability 0-100 (Esc cancels): {controller.probability_edit_input}"
                                                 if controller.probability_edit_active
                                                 else (
-                                                    f"Swing 50-75 (Esc cancels): {controller.swing_edit_input}"
+                                                    f"Swing 0-10 (Esc cancels): {controller.swing_edit_input}"
                                                     if controller.swing_edit_active
                                                     else ""
                                                 )
