@@ -182,6 +182,11 @@ def draw(
     chain_attr = theme["chain_on"] if seq.chain_enabled else theme["chain_off"]
     chain_x = content_x + len(pattern_line) + 2
     safe_add(5, chain_x, chain_text[:header_right - chain_x], chain_attr)
+    set_x = chain_x + len(chain_text) + 2
+    set_attr = theme["text"]
+    if header_focus and header_param == "chain_set":
+        set_attr = set_attr | curses.A_REVERSE
+    safe_add(5, set_x, "SET", set_attr)
 
     grid_content_x = grid_left + 2
     playhead_y = grid_top + 1
@@ -328,6 +333,8 @@ def draw(
             help_line = "Header: Left/Right select field. Enter opens pattern menu. Down returns to grid."
         elif header_param == "help":
             help_line = "Header: Left/Right select field. Enter opens help. Down returns to grid."
+        elif header_param == "chain_set":
+            help_line = "Header: Left/Right select field. Enter sets chain order. Down returns to grid."
         else:
             if header_edit_active:
                 help_line = "Header edit: Left/Right or Up/Down tunes pitch. Enter exits edit."
@@ -458,9 +465,12 @@ def draw(
         bit_depth = int(audio_export_options.get("bit_depth", 16))
         sample_rate = int(audio_export_options.get("sample_rate", seq.engine.sr))
         channels = int(audio_export_options.get("channels", 2))
-        row_count = 4
+        scope = str(audio_export_options.get("scope", "pattern")).strip().lower()
+        if scope not in ["pattern", "chain"]:
+            scope = "pattern"
+        row_count = 5
         box_width = min(w - 8, 72)
-        box_height = 10
+        box_height = 11
         box_left = max(1, (w - box_width) // 2)
         box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
@@ -501,8 +511,15 @@ def draw(
             channels,
             audio_export_options_index == 2,
         )
+        draw_options_line(
+            box_top + 7,
+            "Export: ",
+            [("Current Pattern  ", "pattern"), ("Whole Chain", "chain")],
+            scope,
+            audio_export_options_index == 3,
+        )
         export_attr = theme["text"] | (curses.A_REVERSE if audio_export_options_index == (row_count - 1) else 0)
-        safe_add(box_top + 7, box_left + 4, "[ Export -> Filename ]", export_attr)
+        safe_add(box_top + 8, box_left + 4, "[ Export -> Filename ]", export_attr)
 
     stdscr.refresh()
 
@@ -532,6 +549,7 @@ class Controller:
             "bit_depth": 16,
             "sample_rate": self.seq.engine.sr,
             "channels": 2,
+            "scope": "pattern",
         }
         self.audio_export_options_index = 0
         self.humanize_edit_active = False
@@ -553,7 +571,7 @@ class Controller:
         self.file_browser_index = 0
         self.header_focus = False
         self.header_edit_active = False
-        self.header_params = ["pattern_bank", "kit", "bpm", "length", "swing", "pitch", "mode", "menu", "help"]
+        self.header_params = ["pattern_bank", "kit", "bpm", "length", "swing", "pitch", "mode", "menu", "help", "chain_set"]
         self.header_param_index = 0
         self.inline_value_buffer = ""
         self.inline_value_target = None  # (row, col)
@@ -855,6 +873,7 @@ class Controller:
                 "bit_depth": 16,
                 "sample_rate": self.seq.engine.sr,
                 "channels": 2,
+                "scope": "pattern",
             }
             self.audio_export_active = False
             self.audio_export_input = ""
@@ -892,7 +911,7 @@ class Controller:
             return True
 
         if self.audio_export_options_active:
-            row_count = 4
+            row_count = 5
             if key_code == 27:
                 self._close_audio_export_options_dialog()
                 return True
@@ -903,7 +922,7 @@ class Controller:
                 self.audio_export_options_index = (self.audio_export_options_index + 1) % row_count
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
-                if self.audio_export_options_index == 3:
+                if self.audio_export_options_index == 4:
                     self.audio_export_options_active = False
                     self.audio_export_active = True
                     self.audio_export_input = ""
@@ -942,6 +961,15 @@ class Controller:
                         idx = 1
                     idx = (idx + direction) % len(chans)
                     self.audio_export_options["channels"] = chans[idx]
+                elif self.audio_export_options_index == 3:
+                    scopes = ["pattern", "chain"]
+                    cur = str(self.audio_export_options.get("scope", "pattern")).strip().lower()
+                    try:
+                        idx = scopes.index(cur)
+                    except ValueError:
+                        idx = 0
+                    idx = (idx + direction) % len(scopes)
+                    self.audio_export_options["scope"] = scopes[idx]
                 return True
             return True
 
@@ -1561,6 +1589,29 @@ class Controller:
                     self.help_active = True
                     self.header_focus = False
                     self.header_edit_active = False
+                elif param == "chain_set":
+                    self.chain_edit_active = True
+                    self.chain_edit_input = ""
+                    self.pattern_save_active = False
+                    self.pattern_save_input = ""
+                    self.pattern_load_active = False
+                    self.pattern_load_input = ""
+                    self.kit_load_active = False
+                    self.kit_load_input = ""
+                    self.pack_save_active = False
+                    self.pack_save_input = ""
+                    self.audio_export_active = False
+                    self.audio_export_input = ""
+                    self.audio_export_options_active = False
+                    self.humanize_edit_active = False
+                    self.humanize_edit_input = ""
+                    self.probability_edit_active = False
+                    self.probability_edit_input = ""
+                    self.swing_edit_active = False
+                    self.swing_edit_input = ""
+                    self.status_message = ""
+                    self.header_focus = False
+                    self.header_edit_active = False
                 else:
                     self.header_edit_active = not self.header_edit_active
                 return True
@@ -1703,6 +1754,7 @@ def ui_loop(stdscr, seq):
             controller.audio_export_options["bit_depth"],
             controller.audio_export_options["sample_rate"],
             controller.audio_export_options["channels"],
+            controller.audio_export_options.get("scope", "pattern"),
             controller.humanize_edit_active,
             controller.probability_edit_active,
             controller.chain_edit_active,

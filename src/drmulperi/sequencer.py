@@ -397,6 +397,7 @@ class Sequencer:
             bit_depth: 8 or 16
             sample_rate: output sample rate in Hz
             channels: 1 (mono) or 2 (stereo)
+            scope: "pattern" (viewed pattern) or "chain" (one full chain pass)
         """
         target = filename.strip()
         if not target:
@@ -425,8 +426,10 @@ class Sequencer:
             channels = 2
         channels = 1 if channels == 1 else 2
 
-        pattern = self.view_pattern
-        current_length = self.pattern_length[pattern]
+        scope = str(opts.get("scope", "pattern")).strip().lower()
+        if scope not in ["pattern", "chain"]:
+            scope = "pattern"
+
         sr = self.engine.sr
         base_step_time = (60.0 / self.bpm) / self.steps_per_beat
         pitch_rate = self.pitch_rate()
@@ -448,27 +451,31 @@ class Sequencer:
 
         pitched_samples = [pitch_sample(self.engine.samples[t]) for t in range(TRACKS - 1)]
 
-        step_durations = [
-            self._step_duration_for(pattern, s, base_step_time)
-            for s in range(current_length)
-        ]
-        step_starts = []
+        if scope == "chain" and self.chain:
+            pattern_order = [max(0, min(PATTERNS - 1, int(p))) for p in self.chain]
+        else:
+            pattern_order = [self.view_pattern]
+
+        # Build timeline segments: (pattern_index, step_index, step_start_seconds, step_duration_seconds).
+        timeline = []
         t_cursor = 0.0
-        for d in step_durations:
-            step_starts.append(t_cursor)
-            t_cursor += d
+        for pattern in pattern_order:
+            current_length = self.pattern_length[pattern]
+            for s in range(current_length):
+                step_time = self._step_duration_for(pattern, s, base_step_time)
+                timeline.append((pattern, s, t_cursor, step_time))
+                t_cursor += step_time
 
         # Export exactly one loop length (no extra tail after the loop end).
         total_seconds = t_cursor
         total_samples = max(1, int(total_seconds * sr))
         mix = np.zeros((total_samples, 2), dtype=np.float32)
 
-        for s in range(current_length):
+        for pattern, s, step_start, step_time in timeline:
             accent_on = (
                 not self.muted_rows[ACCENT_TRACK]
                 and self.grid[pattern][ACCENT_TRACK][s] > 0
             )
-            step_time = step_durations[s]
             for t in range(TRACKS - 1):
                 if self.muted_rows[t]:
                     continue
@@ -490,7 +497,7 @@ class Sequencer:
                 ratchet = max(1, min(4, self.ratchet_grid[pattern][t][s]))
                 interval = step_time / ratchet
                 for i in range(ratchet):
-                    hit_t = step_starts[s] + (i * interval)
+                    hit_t = step_start + (i * interval)
                     start = int(hit_t * sr)
                     if start >= total_samples:
                         continue
@@ -532,7 +539,8 @@ class Sequencer:
         except Exception as exc:
             return False, f"Audio export failed: {exc}"
         chan_label = "mono" if channels == 1 else "stereo"
-        return True, f"Exported audio: {os.path.basename(path)} ({target_sr}Hz, {bit_depth}-bit, {chan_label})"
+        scope_label = "chain" if scope == "chain" else "pattern"
+        return True, f"Exported audio: {os.path.basename(path)} ({scope_label}, {target_sr}Hz, {bit_depth}-bit, {chan_label})"
 
     @staticmethod
     def _resample_audio_mono(samples, src_sr, dst_sr):
@@ -768,7 +776,13 @@ class Sequencer:
 
         self.chain = values
         self.chain_enabled = True
-        self._sync_chain_pos_to_pattern()
+        # Always restart chain from first slot when user sets a new sequence.
+        self.chain_pos = 0
+        self.pattern = self.chain[0]
+        self.next_pattern = None
+        self.step = 0
+        self.pending_events.clear()
+        self.pending_midi_off.clear()
         self.dirty = True
         if clipped:
             return True, f"Chain set (max {CHAIN_MAX_STEPS} steps)"
