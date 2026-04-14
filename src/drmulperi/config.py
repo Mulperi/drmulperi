@@ -3,13 +3,14 @@
 TRACKS = 9
 STEPS = 16
 CHAIN_MAX_STEPS = 16
-PAN_COL = STEPS
+PREVIEW_COL = STEPS
 LOAD_COL = STEPS + 1
-HUMANIZE_COL = STEPS + 2
-PROB_COL = STEPS + 3
-GROUP_COL = STEPS + 4
-TRACK_PITCH_COL = STEPS + 5
-GRID_COLS = STEPS + 6
+PAN_COL = STEPS + 2
+HUMANIZE_COL = STEPS + 3
+PROB_COL = STEPS + 4
+GROUP_COL = STEPS + 5
+TRACK_PITCH_COL = STEPS + 6
+GRID_COLS = STEPS + 7
 PATTERNS = 4
 DEFAULT_KIT_PATH = "kit1"
 DEFAULT_PATTERN_NAME = "patterns"
@@ -21,6 +22,7 @@ ACCENT_BOOST = 0.35
 DEFAULT_KEYMAP = {
     "help_menu": "H,F1",
     "pattern_menu": "F2",
+    "patterns_overlay": "Q,O",
     "mode_toggle": "T",
     "clear_pattern": "N",
     "pattern_copy": "B",
@@ -35,6 +37,8 @@ DEFAULT_KEYMAP = {
     "pattern_export": "X",
     "pattern_load": "L",
     "kit_load": "K",
+    "pattern_prev": "W",
+    "pattern_next": "E",
     "pattern_1": "Q",
     "pattern_2": "W",
     "pattern_3": "E",
@@ -44,7 +48,7 @@ DEFAULT_KEYMAP = {
 PATTERN_MENU_ITEMS = [
     "1. Copy Pattern",
     "2. Paste Pattern",
-    "3. Erase Pattern",
+    "3. Clear Pattern",
     "4. Save Pattern As",
     "5. Load Pattern",
     "6. Load Sample Kit",

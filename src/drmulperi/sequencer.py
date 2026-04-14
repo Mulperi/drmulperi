@@ -28,14 +28,8 @@ class Sequencer:
         self.pattern_name = os.path.basename(pattern_path)
         self.engine = AudioEngine(kit_path=self.kit_path)
 
-        self.grid = [
-            [[0 for _ in range(STEPS)] for _ in range(TRACKS)]
-            for _ in range(PATTERNS)
-        ]
-        self.ratchet_grid = [
-            [[1 for _ in range(STEPS)] for _ in range(TRACKS)]
-            for _ in range(PATTERNS)
-        ]
+        self.grid = [self._new_pattern_grid() for _ in range(PATTERNS)]
+        self.ratchet_grid = [self._new_pattern_ratchet() for _ in range(PATTERNS)]
 
         self.pattern = 0
         self.view_pattern = 0
@@ -82,6 +76,44 @@ class Sequencer:
 
     # ---------- SAVE ----------
     @staticmethod
+    def _new_pattern_grid():
+        return [[0 for _ in range(STEPS)] for _ in range(TRACKS)]
+
+    @staticmethod
+    def _new_pattern_ratchet():
+        data = [[1 for _ in range(STEPS)] for _ in range(TRACKS)]
+        data[ACCENT_TRACK] = [1 for _ in range(STEPS)]
+        return data
+
+    def pattern_count(self):
+        return len(self.grid)
+
+    def pattern_note_count(self, pattern_index):
+        """Return count of non-accent active steps for one pattern."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return 0
+        count = 0
+        for t in range(TRACKS - 1):
+            for s in range(STEPS):
+                if self.grid[pattern_index][t][s] > 0:
+                    count += 1
+        return count
+
+    def pattern_has_data(self, pattern_index):
+        """Return True when a pattern has notes or non-default timing settings."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return False
+        if self.pattern_note_count(pattern_index) > 0:
+            return True
+        if any(self.grid[pattern_index][ACCENT_TRACK][s] > 0 for s in range(STEPS)):
+            return True
+        if self.pattern_length[pattern_index] != STEPS:
+            return True
+        if self.pattern_swing[pattern_index] != 50:
+            return True
+        return False
+
+    @staticmethod
     def swing_ui_to_internal(ui_value):
         """Convert user-facing swing value (0..10) into internal timing value (50..75)."""
         ui = max(0, min(10, int(ui_value)))
@@ -96,6 +128,7 @@ class Sequencer:
     def _serialize(self):
         """Return JSON-serializable project state."""
         return {
+            "pattern_count": self.pattern_count(),
             "bpm": self.bpm,
             "last_velocity": self.last_velocity,
             "pattern": self.pattern,
@@ -119,27 +152,36 @@ class Sequencer:
         """Apply and sanitize loaded project data into runtime state."""
         self.bpm = data.get("bpm", 120)
         self.last_velocity = data.get("last_velocity", 5)
-        try:
-            self.pattern = max(0, min(PATTERNS - 1, int(data.get("pattern", self.pattern))))
-        except (TypeError, ValueError):
-            self.pattern = 0
-        try:
-            self.view_pattern = max(0, min(PATTERNS - 1, int(data.get("view_pattern", self.pattern))))
-        except (TypeError, ValueError):
-            self.view_pattern = self.pattern
-        self.grid = data.get("grid", self.grid)
-        for p in range(PATTERNS):
-            if p < len(self.grid) and ACCENT_TRACK < len(self.grid[p]):
-                for s in range(min(STEPS, len(self.grid[p][ACCENT_TRACK]))):
-                    self.grid[p][ACCENT_TRACK][s] = 1 if self.grid[p][ACCENT_TRACK][s] > 0 else 0
-        loaded_ratchet = data.get("ratchet_grid", self.ratchet_grid)
+        loaded_grid = data.get("grid", self.grid)
+        pattern_count = PATTERNS
+        if isinstance(data.get("pattern_count"), int):
+            pattern_count = max(1, int(data["pattern_count"]))
+        if isinstance(loaded_grid, list) and loaded_grid:
+            pattern_count = max(pattern_count, len(loaded_grid))
 
-        normalized_ratchet = [
-            [[1 for _ in range(STEPS)] for _ in range(TRACKS)]
-            for _ in range(PATTERNS)
-        ]
+        normalized_grid = [self._new_pattern_grid() for _ in range(pattern_count)]
+        if isinstance(loaded_grid, list):
+            for p in range(min(pattern_count, len(loaded_grid))):
+                if not isinstance(loaded_grid[p], list):
+                    continue
+                for t in range(min(TRACKS, len(loaded_grid[p]))):
+                    if not isinstance(loaded_grid[p][t], list):
+                        continue
+                    for s in range(min(STEPS, len(loaded_grid[p][t]))):
+                        try:
+                            val = int(loaded_grid[p][t][s])
+                        except (TypeError, ValueError):
+                            val = 0
+                        if t == ACCENT_TRACK:
+                            normalized_grid[p][t][s] = 1 if val > 0 else 0
+                        else:
+                            normalized_grid[p][t][s] = max(0, min(9, val))
+        self.grid = normalized_grid
+
+        loaded_ratchet = data.get("ratchet_grid", self.ratchet_grid)
+        normalized_ratchet = [self._new_pattern_ratchet() for _ in range(pattern_count)]
         if isinstance(loaded_ratchet, list):
-            for p in range(min(PATTERNS, len(loaded_ratchet))):
+            for p in range(min(pattern_count, len(loaded_ratchet))):
                 if not isinstance(loaded_ratchet[p], list):
                     continue
                 for t in range(min(TRACKS, len(loaded_ratchet[p]))):
@@ -153,6 +195,15 @@ class Sequencer:
                         normalized_ratchet[p][t][s] = max(1, min(4, ratchet))
                 normalized_ratchet[p][ACCENT_TRACK] = [1 for _ in range(STEPS)]
         self.ratchet_grid = normalized_ratchet
+
+        try:
+            self.pattern = max(0, min(pattern_count - 1, int(data.get("pattern", self.pattern))))
+        except (TypeError, ValueError):
+            self.pattern = 0
+        try:
+            self.view_pattern = max(0, min(pattern_count - 1, int(data.get("view_pattern", self.pattern))))
+        except (TypeError, ValueError):
+            self.view_pattern = self.pattern
 
         loaded_pan = data.get("track_pan", self.track_pan)
         normalized_pan = [5 for _ in range(TRACKS)]
@@ -210,9 +261,9 @@ class Sequencer:
         self.track_pitch = normalized_track_pitch
 
         loaded_lengths = data.get("pattern_length", self.pattern_length)
-        normalized_lengths = [STEPS for _ in range(PATTERNS)]
+        normalized_lengths = [STEPS for _ in range(pattern_count)]
         if isinstance(loaded_lengths, list):
-            for i in range(min(PATTERNS, len(loaded_lengths))):
+            for i in range(min(pattern_count, len(loaded_lengths))):
                 try:
                     normalized_lengths[i] = max(1, min(STEPS, int(loaded_lengths[i])))
                 except (ValueError, TypeError):
@@ -220,9 +271,9 @@ class Sequencer:
         self.pattern_length = normalized_lengths
 
         loaded_swing = data.get("pattern_swing", self.pattern_swing)
-        normalized_swing = [50 for _ in range(PATTERNS)]
+        normalized_swing = [50 for _ in range(pattern_count)]
         if isinstance(loaded_swing, list):
-            for i in range(min(PATTERNS, len(loaded_swing))):
+            for i in range(min(pattern_count, len(loaded_swing))):
                 try:
                     raw = int(loaded_swing[i])
                     # Backward compatibility:
@@ -246,13 +297,13 @@ class Sequencer:
                     continue
 
             # Support both formats:
-            # - zero-based [0..PATTERNS-1] (current saves)
-            # - one-based  [1..PATTERNS]   (legacy/manual edits)
+            # - zero-based [0..pattern_count-1] (current saves)
+            # - one-based  [1..pattern_count]   (legacy/manual edits)
             if raw:
                 has_zero = any(v == 0 for v in raw)
                 for value in raw:
                     idx = value if has_zero else (value - 1)
-                    if 0 <= idx < PATTERNS:
+                    if 0 <= idx < pattern_count:
                         normalized_chain.append(idx)
         if not normalized_chain:
             normalized_chain = [0]
@@ -471,7 +522,8 @@ class Sequencer:
         pitched_samples = [pitch_sample(self.engine.samples[t], self.pitch_rate(t)) for t in range(TRACKS - 1)]
 
         if scope == "chain" and self.chain:
-            pattern_order = [max(0, min(PATTERNS - 1, int(p))) for p in self.chain]
+            max_index = max(0, self.pattern_count() - 1)
+            pattern_order = [max(0, min(max_index, int(p))) for p in self.chain]
         else:
             pattern_order = [self.view_pattern]
 
@@ -792,14 +844,18 @@ class Sequencer:
             return False, "Chain canceled"
 
         values = []
-        for ch in src:
-            if ch in [" ", ",", "-", ">"]:
-                continue
-            if not ch.isdigit():
-                return False, "Invalid chain (use 1-4 with spaces/commas)"
-            n = int(ch)
-            if n < 1 or n > PATTERNS:
-                return False, "Invalid chain (pattern range 1-4)"
+        max_patterns = self.pattern_count()
+        src_norm = src.replace(">", " ").replace("-", " ").replace(",", " ")
+        parts = [p for p in src_norm.split() if p]
+        if not parts:
+            # Back-compat compact format like "1232"
+            parts = list(src)
+        for part in parts:
+            if not part.isdigit():
+                return False, f"Invalid chain (use pattern numbers 1-{max_patterns})"
+            n = int(part)
+            if n < 1 or n > max_patterns:
+                return False, f"Invalid chain (pattern range 1-{max_patterns})"
             values.append(n - 1)
 
         if not values:
@@ -959,6 +1015,61 @@ class Sequencer:
         self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
         self.dirty = True
 
+    def add_pattern(self, copy_from_view=False):
+        """Append a new pattern. Optionally duplicate currently viewed pattern."""
+        if copy_from_view and 0 <= self.view_pattern < self.pattern_count():
+            self.grid.append([row[:] for row in self.grid[self.view_pattern]])
+            self.ratchet_grid.append([row[:] for row in self.ratchet_grid[self.view_pattern]])
+            self.pattern_length.append(int(self.pattern_length[self.view_pattern]))
+            self.pattern_swing.append(int(self.pattern_swing[self.view_pattern]))
+        else:
+            self.grid.append(self._new_pattern_grid())
+            self.ratchet_grid.append(self._new_pattern_ratchet())
+            self.pattern_length.append(STEPS)
+            self.pattern_swing.append(50)
+        self.view_pattern = self.pattern_count() - 1
+        if not self.chain_enabled and not self.playing:
+            self.pattern = self.view_pattern
+        self.dirty = True
+        return True, f"Added pattern {self.view_pattern + 1}"
+
+    def delete_pattern(self, pattern_index):
+        """Delete a pattern by index, keeping at least one pattern."""
+        if self.pattern_count() <= 1:
+            return False, "At least one pattern is required"
+        idx = max(0, min(self.pattern_count() - 1, int(pattern_index)))
+        del self.grid[idx]
+        del self.ratchet_grid[idx]
+        del self.pattern_length[idx]
+        del self.pattern_swing[idx]
+
+        def remap_pattern_index(v):
+            if v == idx:
+                return max(0, min(self.pattern_count() - 1, idx - 1))
+            if v > idx:
+                return v - 1
+            return v
+
+        self.pattern = remap_pattern_index(self.pattern)
+        self.view_pattern = remap_pattern_index(self.view_pattern)
+        if self.next_pattern is not None:
+            self.next_pattern = remap_pattern_index(self.next_pattern)
+
+        new_chain = []
+        for p in self.chain:
+            if p == idx:
+                continue
+            new_chain.append(p - 1 if p > idx else p)
+        self.chain = new_chain if new_chain else [0]
+        self.chain_pos = min(self.chain_pos, len(self.chain) - 1)
+        self._sync_chain_pos_to_pattern()
+        self.dirty = True
+        return True, f"Deleted pattern {idx + 1}"
+
+    def delete_view_pattern(self):
+        """Delete currently viewed pattern, keeping at least one pattern."""
+        return self.delete_pattern(self.view_pattern)
+
     def copy_current_pattern(self):
         """Copy viewed pattern into internal clipboard."""
         self.pattern_clipboard = {
@@ -995,6 +1106,9 @@ class Sequencer:
 
     def select_pattern(self, pattern_index):
         """Select/queue pattern depending on chain/playback mode."""
+        if self.pattern_count() <= 0:
+            return
+        pattern_index = max(0, min(self.pattern_count() - 1, int(pattern_index)))
         prev_pattern = self.pattern
         prev_view = self.view_pattern
         prev_next = self.next_pattern

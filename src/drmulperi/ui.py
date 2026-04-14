@@ -9,6 +9,7 @@ from .config import (
     HUMANIZE_COL,
     LOAD_COL,
     PAN_COL,
+    PREVIEW_COL,
     PATTERN_MENU_ITEMS,
     PATTERNS,
     PROB_COL,
@@ -33,6 +34,9 @@ def draw(
     status_message,
     pattern_menu_active,
     pattern_menu_index,
+    patterns_overlay_active,
+    patterns_overlay_index,
+    patterns_overlay_delete_confirm_index,
     pattern_menu_key_label,
     help_active,
     help_lines,
@@ -166,22 +170,37 @@ def draw(
         if x_info >= header_right:
             break
 
-    pattern_line = "PATTERN: "
+    patterns_btn_attr = theme["text"]
+    if header_focus and header_param == "patterns":
+        patterns_btn_attr = patterns_btn_attr | curses.A_REVERSE
+    safe_add(5, content_x, "PATTERNS", patterns_btn_attr)
+
+    pattern_line = "  "
     queue_flash_on = int(time.time() * 2) % 2 == 0
-    for i in range(PATTERNS):
+    count = seq.pattern_count()
+    max_visible = min(12, max(1, count))
+    start_idx = 0
+    if count > max_visible:
+        start_idx = max(0, min(seq.view_pattern - (max_visible // 2), count - max_visible))
+    for i in range(start_idx, start_idx + max_visible):
         if seq.view_pattern == i:
             pattern_line += f"[{i+1}] "
         elif (not seq.chain_enabled) and seq.playing and seq.next_pattern == i:
             pattern_line += f"({i+1}) " if queue_flash_on else f" {i+1}  "
         else:
             pattern_line += f" {i+1}  "
+    if start_idx > 0:
+        pattern_line = "... " + pattern_line
+    if count > (start_idx + max_visible):
+        pattern_line += "... "
 
     pattern_attr = theme["pattern_manual"] if not seq.chain_enabled else theme["pattern_chain_off"]
-    safe_add(5, content_x, pattern_line[:header_right - content_x], pattern_attr)
+    pattern_x = content_x + len("PATTERNS")
+    safe_add(5, pattern_x, pattern_line[:header_right - pattern_x], pattern_attr)
 
     chain_text = f"CHAIN:{seq.chain_display()}"
     chain_attr = theme["chain_on"] if seq.chain_enabled else theme["chain_off"]
-    chain_x = content_x + len(pattern_line) + 2
+    chain_x = pattern_x + len(pattern_line) + 2
     safe_add(5, chain_x, chain_text[:header_right - chain_x], chain_attr)
     set_x = chain_x + len(chain_text) + 2
     set_attr = theme["text"]
@@ -198,10 +217,12 @@ def draw(
     x += 2
 
     def col_cell_width(col):
-        if col == PAN_COL:
-            return 2
+        if col == PREVIEW_COL:
+            return 1
         if col == LOAD_COL:
             return 1
+        if col == PAN_COL:
+            return 2
         if col == HUMANIZE_COL:
             return 3
         if col == PROB_COL:
@@ -259,15 +280,18 @@ def draw(
             return theme["velocity_high"]
 
         for s in range(GRID_COLS):
-            if s == PAN_COL:
+            if s == PREVIEW_COL:
+                char = "▶" if t != ACCENT_TRACK else ""
+                cell_attr = row_attr
+            elif s == LOAD_COL:
+                char = "↓" if t != ACCENT_TRACK else ""
+                cell_attr = row_attr
+            elif s == PAN_COL:
                 if t == ACCENT_TRACK:
                     char = ""
                 else:
                     pan_val = seq.track_pan[t]
                     char = f"P{pan_val}"
-                cell_attr = row_attr
-            elif s == LOAD_COL:
-                char = "↓" if t != ACCENT_TRACK else ""
                 cell_attr = row_attr
             elif s == HUMANIZE_COL:
                 char = f"{seq.track_humanize[t]}" if t != ACCENT_TRACK else ""
@@ -298,7 +322,7 @@ def draw(
                 if s >= seq.pattern_length[seq.view_pattern]:
                     cell_attr = theme["muted"]
 
-            sep = "| " if s in [PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL] or (s < STEPS and s % 4 == 0) else "  "
+            sep = "| " if s in [PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL] or (s < STEPS and s % 4 == 0) else "  "
             safe_add(y, x, sep, theme["divider"])
             x += len(sep)
             cell_w = col_cell_width(s)
@@ -314,7 +338,9 @@ def draw(
     prompt_line = ""
     help_line = ""
     if header_focus:
-        if header_param == "pattern_bank":
+        if header_param == "patterns":
+            help_line = "Header: Left/Right select field. Enter opens pattern overlay. Down returns to grid."
+        elif header_param == "pattern_bank":
             help_line = "Header: Left/Right select field. Enter opens pattern bank browser. Down returns to grid."
         elif header_param == "kit":
             help_line = "Header: Left/Right select field. Enter opens kit browser. Down returns to grid."
@@ -346,6 +372,8 @@ def draw(
                 help_line = "Header edit: Left/Right or Up/Down tunes pitch. Enter exits edit."
             else:
                 help_line = "Header: Left/Right select field. Enter edits pitch. Down returns to grid."
+    elif cursor_x == PREVIEW_COL:
+        help_line = "Preview sample"
     elif cursor_x == LOAD_COL:
         help_line = "Load sample"
     elif cursor_x == PAN_COL:
@@ -359,7 +387,7 @@ def draw(
     elif cursor_x == TRACK_PITCH_COL:
         help_line = "Track pitch: 0..24 scale (12 = no shift). Type digits to set."
     elif cursor_y < TRACKS - 1:
-        help_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on ↓ to load)"
+        help_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on ▶ preview, Enter on ↓ load)"
     else:
         help_line = "SAMPLE: Accent track (no sample file)"
 
@@ -380,6 +408,16 @@ def draw(
             safe_add(prompt_y, grid_content_x, prompt_line[:grid_right - grid_content_x], theme["hint"])
         else:
             safe_add(5, content_x, prompt_line[:header_right - content_x], theme["hint"])
+
+    # Always-visible current sample label at bottom-right of sequencer area.
+    if cursor_y < TRACKS - 1:
+        current_sample_name = seq.engine.sample_names[cursor_y]
+    else:
+        current_sample_name = "Accent track"
+    sample_label = f"SAMPLE: {current_sample_name}"
+    sample_y = grid_bottom - 1
+    sample_x = max(grid_left + 2, grid_right - len(sample_label) - 1)
+    safe_add(sample_y, sample_x, sample_label[: max(0, grid_right - sample_x)], theme["muted"])
 
     if help_active:
         visible_lines = [line for line in help_lines if line.strip() != ""]
@@ -407,7 +445,7 @@ def draw(
 
     if pattern_menu_active:
         items = PATTERN_MENU_ITEMS
-        title = f"PATTERN MENU ({pattern_menu_key_label}/Esc close)"
+        title = f"MENU ({pattern_menu_key_label}/Esc close)"
         max_item_len = max(len(title), *(len(item) for item in items))
         box_width = min(w - 8, max(40, max_item_len + 6))
         box_height = min(h - 4, len(items) + 4)
@@ -425,6 +463,52 @@ def draw(
             if i == pattern_menu_index:
                 item_attr = item_attr | curses.A_REVERSE
             safe_add(box_top + 3 + i, box_left + 2, item[: box_width - 4], item_attr)
+
+    if patterns_overlay_active:
+        count = seq.pattern_count()
+        title = "PATTERNS (A:Add, D:Duplicate, X:Delete)"
+        rows = []
+        for i in range(count):
+            view_tag = "VIEW" if i == seq.view_pattern else "    "
+            if i == seq.pattern:
+                play_tag = "▶"
+            elif (not seq.chain_enabled) and seq.playing and seq.next_pattern == i:
+                play_tag = "▶" if queue_flash_on else " "
+            else:
+                play_tag = " "
+            hits = seq.pattern_note_count(i)
+            length = seq.pattern_length[i]
+            swing = seq.swing_internal_to_ui(seq.pattern_swing[i])
+            state = "EMPTY" if not seq.pattern_has_data(i) else "DATA "
+            confirm_tag = "X!" if i == patterns_overlay_delete_confirm_index else "  "
+            rows.append(
+                f"{i+1:>2}. {view_tag} {play_tag} {confirm_tag} {state} LEN:{length:>2} SW:{swing:>2} HITS:{hits:>3}"
+            )
+        if not rows:
+            rows = ["(no patterns)"]
+        list_height = min(14, max(6, h - 12))
+        box_width = min(w - 8, 86)
+        box_height = min(h - 4, list_height + 4)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
+        box_right = box_left + box_width - 1
+        box_bottom = box_top + box_height - 1
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
+        for y in range(box_top + 1, box_bottom):
+            safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
+        safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
+
+        max_rows = box_height - 3
+        start = 0
+        if patterns_overlay_index >= max_rows:
+            start = patterns_overlay_index - max_rows + 1
+        end = min(len(rows), start + max_rows)
+        for i in range(start, end):
+            y = box_top + 2 + (i - start)
+            attr = theme["text"]
+            if i == patterns_overlay_index:
+                attr = attr | curses.A_REVERSE
+            safe_add(y, box_left + 2, rows[i][: box_width - 4], attr)
 
     if file_browser_active:
         if file_browser_mode == "pattern":
@@ -579,11 +663,14 @@ class Controller:
         self.file_browser_index = 0
         self.header_focus = False
         self.header_edit_active = False
-        self.header_params = ["pattern_bank", "kit", "bpm", "length", "swing", "pitch", "mode", "menu", "help", "chain_set"]
+        self.header_params = ["patterns", "pattern_bank", "kit", "bpm", "length", "swing", "pitch", "mode", "menu", "help", "chain_set"]
         self.header_param_index = 0
         self.inline_value_buffer = ""
         self.inline_value_target = None  # (row, col)
         self.inline_value_time = 0.0
+        self.patterns_overlay_active = False
+        self.patterns_overlay_index = 0
+        self.patterns_overlay_delete_confirm_index = -1
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
 
@@ -921,6 +1008,63 @@ class Controller:
                 self.help_active = False
             return True
 
+        if self.patterns_overlay_active:
+            count = self.seq.pattern_count()
+            if key_code == 27 or self.keymap.matches("patterns_overlay", event_tokens):
+                self.patterns_overlay_active = False
+                self.patterns_overlay_delete_confirm_index = -1
+                return True
+            if key_code == curses.KEY_UP:
+                if count > 0:
+                    self.patterns_overlay_index = (self.patterns_overlay_index - 1) % count
+                self.patterns_overlay_delete_confirm_index = -1
+                return True
+            if key_code == curses.KEY_DOWN:
+                if count > 0:
+                    self.patterns_overlay_index = (self.patterns_overlay_index + 1) % count
+                self.patterns_overlay_delete_confirm_index = -1
+                return True
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                if count > 0:
+                    self.seq.select_pattern(self.patterns_overlay_index)
+                self.patterns_overlay_delete_confirm_index = -1
+                return True
+            if key_code == 32:
+                if not self.seq.playing and count > 0:
+                    self.seq.select_pattern(self.patterns_overlay_index)
+                self.seq.toggle_playback()
+                self.patterns_overlay_delete_confirm_index = -1
+                return True
+            if key_code in [ord("a"), ord("A")]:
+                ok, message = self.seq.add_pattern(copy_from_view=False)
+                self.status_message = message
+                self.patterns_overlay_index = self.seq.view_pattern
+                self.patterns_overlay_delete_confirm_index = -1
+                return True
+            if key_code in [ord("d"), ord("D")]:
+                ok, message = self.seq.add_pattern(copy_from_view=True)
+                self.status_message = message
+                self.patterns_overlay_index = self.seq.view_pattern
+                self.patterns_overlay_delete_confirm_index = -1
+                return True
+            if key_code in [ord("x"), ord("X")]:
+                if count <= 0:
+                    return True
+                idx = self.patterns_overlay_index
+                if self.patterns_overlay_delete_confirm_index != idx:
+                    self.patterns_overlay_delete_confirm_index = idx
+                    if self.seq.pattern_has_data(idx):
+                        self.status_message = f"Pattern {idx + 1} has data. Press X again to delete (X! marker shown)."
+                    else:
+                        self.status_message = f"Press X again to delete pattern {idx + 1}."
+                    return True
+                ok, message = self.seq.delete_pattern(idx)
+                self.status_message = message
+                self.patterns_overlay_delete_confirm_index = -1
+                self.patterns_overlay_index = min(idx, self.seq.pattern_count() - 1)
+                return True
+            return True
+
         if self.audio_export_options_active:
             row_count = 5
             if key_code == 27:
@@ -1128,7 +1272,7 @@ class Controller:
                 if not self.header_edit_active:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
                 return True
-            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+            cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             next_idx = 0
             for i, col in enumerate(cycle):
                 if col > self.cursor_x:
@@ -1143,7 +1287,7 @@ class Controller:
                 if not self.header_edit_active:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
                 return True
-            cycle = [0, 4, 8, 12, PAN_COL, LOAD_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+            cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             prev_idx = len(cycle) - 1
             for i in range(len(cycle) - 1, -1, -1):
                 if cycle[i] < self.cursor_x:
@@ -1399,6 +1543,10 @@ class Controller:
         if key_code == ord(' '):
             self.seq.toggle_playback()
             self.status_message = ""
+        elif self.keymap.matches("patterns_overlay", event_tokens):
+            self.patterns_overlay_active = True
+            self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
+            self.patterns_overlay_delete_confirm_index = -1
         elif self.keymap.matches("pattern_menu", event_tokens):
             self.header_focus = False
             self.header_edit_active = False
@@ -1553,7 +1701,9 @@ class Controller:
                 self.seq.quick_set_ratchet(self.cursor_y, self.cursor_x, quick_ratchet)
         elif key_code in range(ord('0'), ord('9') + 1):
             velocity = key_code - ord('0')
-            if self.cursor_x == PAN_COL:
+            if self.cursor_x == PREVIEW_COL:
+                pass
+            elif self.cursor_x == PAN_COL:
                 if velocity > 0:
                     self.seq.set_track_pan(self.cursor_y, velocity)
             elif self.cursor_x == GROUP_COL:
@@ -1580,7 +1730,13 @@ class Controller:
         elif key_code in [10, 13, curses.KEY_ENTER]:
             if self.header_focus:
                 param = self.header_params[self.header_param_index]
-                if param == "pattern_bank":
+                if param == "patterns":
+                    self.patterns_overlay_active = True
+                    self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
+                    self.patterns_overlay_delete_confirm_index = -1
+                    self.header_focus = False
+                    self.header_edit_active = False
+                elif param == "pattern_bank":
                     self._open_file_browser("pattern")
                     self.header_focus = False
                     self.header_edit_active = False
@@ -1629,7 +1785,10 @@ class Controller:
                 else:
                     self.header_edit_active = not self.header_edit_active
                 return True
-            if self.cursor_x == PAN_COL:
+            if self.cursor_x == PREVIEW_COL:
+                if self.cursor_y != ACCENT_TRACK:
+                    self.seq.preview_row(self.cursor_y)
+            elif self.cursor_x == PAN_COL:
                 self.seq.set_track_pan(self.cursor_y, 5)
             elif self.cursor_x == LOAD_COL:
                 if self.cursor_y != ACCENT_TRACK:
@@ -1656,6 +1815,10 @@ class Controller:
             self.seq.preview_row(self.cursor_y)
         elif self.keymap.matches("mute_row", event_tokens):
             self.seq.toggle_mute_row(self.cursor_y)
+        elif self.keymap.matches("pattern_prev", event_tokens):
+            self.seq.select_pattern(max(0, self.seq.view_pattern - 1))
+        elif self.keymap.matches("pattern_next", event_tokens):
+            self.seq.select_pattern(min(self.seq.pattern_count() - 1, self.seq.view_pattern + 1))
         else:
             for pattern_index, action in enumerate(self.pattern_actions):
                 if self.keymap.matches(action, event_tokens):
@@ -1777,6 +1940,9 @@ def ui_loop(stdscr, seq):
             controller.swing_edit_active,
             controller.pattern_menu_active,
             controller.pattern_menu_index,
+            controller.patterns_overlay_active,
+            controller.patterns_overlay_index,
+            controller.patterns_overlay_delete_confirm_index,
             controller.help_active,
             controller.file_browser_active,
             controller.file_browser_mode,
@@ -1871,6 +2037,9 @@ def ui_loop(stdscr, seq):
                 controller.status_message if not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.swing_edit_active else "",
                 controller.pattern_menu_active,
                 controller.pattern_menu_index,
+                controller.patterns_overlay_active,
+                controller.patterns_overlay_index,
+                controller.patterns_overlay_delete_confirm_index,
                 pattern_menu_label,
                 controller.help_active,
                 help_lines,
