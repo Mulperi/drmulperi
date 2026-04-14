@@ -1606,9 +1606,13 @@ def draw(
     x += 2
 
     def col_cell_width(col):
+        if col == PAN_COL:
+            return 2
         if col == LOAD_COL:
             return 1
-        if col in [HUMANIZE_COL, PROB_COL]:
+        if col == HUMANIZE_COL:
+            return 3
+        if col == PROB_COL:
             return 4
         if col == GROUP_COL:
             return 1
@@ -1664,7 +1668,7 @@ def draw(
                 char = "↓" if t != ACCENT_TRACK else ""
                 cell_attr = row_attr
             elif s == HUMANIZE_COL:
-                char = f"H{seq.track_humanize[t]}" if t != ACCENT_TRACK else ""
+                char = f"{seq.track_humanize[t]}" if t != ACCENT_TRACK else ""
                 cell_attr = row_attr
             elif s == PROB_COL:
                 char = f"%{seq.track_probability[t]}" if t != ACCENT_TRACK else ""
