@@ -14,23 +14,32 @@ from .config import TRACKS
 
 
 def _start_take_capture(controller):
-    """Start one take capture using `sd.rec` without Python callbacks."""
-    sr = int(controller.record_capture_sr) if controller.record_capture_sr > 0 else int(controller.seq.engine.sr)
+    """Start one take capture in the engine duplex callback."""
+    sr = int(controller.seq.engine.sr)
     frames = max(1, int(round(controller.record_capture_duration_seconds * sr)))
-    dev_id = controller.record_device_ids[controller.record_device_index] if controller.record_device_ids else None
     idx = controller.record_capture_input_indices if controller.record_capture_input_indices else [0]
-    mapping = [(max(0, int(v)) + 1) for v in idx]
-    if controller.record_capture_channels >= 2 and len(mapping) < 2:
-        mapping = [mapping[0], mapping[0]]
-    controller.record_capture_array = sd.rec(
-        frames=frames,
-        samplerate=sr,
-        channels=controller.record_capture_channels,
-        dtype="float32",
-        device=dev_id,
-        mapping=mapping,
-        blocking=False,
-    )
+    if controller.record_use_external_capture:
+        dev_id = controller.record_device_ids[controller.record_device_index] if controller.record_device_ids else None
+        mapping = [(max(0, int(v)) + 1) for v in idx]
+        if controller.record_capture_channels >= 2 and len(mapping) < 2:
+            mapping = [mapping[0], mapping[0]]
+        controller._record_stream = sd.rec(
+            frames=frames,
+            samplerate=sr,
+            channels=controller.record_capture_channels,
+            dtype="float32",
+            device=dev_id,
+            mapping=mapping,
+            blocking=False,
+        )
+    else:
+        controller.seq.engine.configure_capture(
+            channels=controller.record_capture_channels,
+            input_indices=idx,
+            frames=frames,
+        )
+        if not controller.seq.engine.start_capture():
+            raise RuntimeError("Capture start failed")
     controller.record_capture_started_at = time.perf_counter()
 
 
@@ -132,23 +141,15 @@ def record_level_callback(controller, indata, frames, time_info, status):
 
 
 def record_capture_callback(controller, indata, frames, time_info, status):
-    """Unused with blocking-free `sd.rec` capture mode."""
+    """Unused with duplex-engine capture mode."""
     return
 
 
 def stop_record_monitor(controller):
     """Stop and dispose current input monitor stream."""
-    if controller._record_stream is not None:
-        try:
-            controller._record_stream.stop()
-        except Exception:
-            pass
-        try:
-            controller._record_stream.close()
-        except Exception:
-            pass
     controller._record_stream = None
     controller.record_monitor_running = False
+    controller.seq.engine.set_input_monitoring(False)
 
 
 def start_record_monitor(controller):
@@ -158,37 +159,31 @@ def start_record_monitor(controller):
         controller.record_level_db = -60.0
         controller.record_monitor_running = False
         return
-    if not controller.record_device_ids:
+    if not controller.seq.engine.input_available:
         controller.record_level_db = -60.0
         return
-    dev_id = controller.record_device_ids[controller.record_device_index]
-    dev_sr = controller.record_device_sample_rates[controller.record_device_index]
-    channels = max(1, int(controller.record_device_channels[controller.record_device_index]))
-    try:
-        idx = controller._current_record_input_indices()
-        channels_needed = max(1, (max(idx) + 1) if idx else 1)
-        controller._record_stream = sd.InputStream(
-            device=dev_id,
-            channels=min(channels, channels_needed),
-            samplerate=dev_sr,
-            callback=controller._record_level_callback,
-            blocksize=controller.record_stream_blocksize,
-        )
-        controller._record_stream.start()
-        controller.record_monitor_running = True
-        controller.record_capture_sr = int(dev_sr)
-    except Exception as exc:
-        controller.record_monitor_running = False
-        controller.status_message = f"Record monitor failed: {exc}"
+    controller.record_monitor_running = True
+    controller.record_capture_sr = int(controller.seq.engine.sr)
+    controller.seq.engine.set_input_monitoring(True)
+    controller.record_level_db = controller.seq.engine.get_input_level_db()
 
 
 def start_record_capture_stream(controller):
-    """Prepare input capture settings for `sd.rec` capture mode."""
+    """Prepare capture settings for engine duplex capture mode."""
     controller._stop_record_monitor()
-    if not controller.record_device_ids:
-        controller.status_message = "No input device"
-        return False
-    controller.record_capture_sr = int(controller.record_device_sample_rates[controller.record_device_index])
+    if controller.seq.engine.input_available:
+        controller.record_use_external_capture = False
+        controller.record_capture_sr = int(controller.seq.engine.sr)
+    else:
+        if not controller.record_device_ids:
+            controller.status_message = "No input device"
+            return False
+        if controller.seq.playing:
+            controller.status_message = "Recording while playing requires duplex input device."
+            return False
+        controller.record_use_external_capture = True
+        controller.record_capture_sr = int(controller.seq.engine.sr)
+        controller.status_message = "Recording fallback mode (non-duplex device)"
     controller.record_monitor_running = False
     return True
 
@@ -224,16 +219,24 @@ def cancel_record_capture(controller, reason="Recording canceled"):
         controller.record_capture_buffer = None
         controller.record_capture_write = 0
         controller.record_capture_capacity = 0
-        controller.record_capture_array = None
         controller.record_capture_duration_seconds = 0.0
         controller.record_capture_started_at = 0.0
         controller.record_capture_controls_transport = True
         controller.record_capture_end_time = 0.0
-        try:
-            sd.stop()
-        except Exception:
-            pass
+        controller.record_capture_started_playback = False
+        controller.seq.engine.stop_capture()
+        if controller.record_use_external_capture:
+            # Do not call `sd.stop()` here; it can stop the engine output stream too.
+            controller._record_stream = None
+            controller.seq.engine.restart_output_stream()
+            controller.record_use_external_capture = False
         controller._stop_record_monitor()
+        with controller.seq.transport_lock:
+            controller.seq.pending_events.clear()
+            if controller.seq.pending_midi_off:
+                controller.seq.midi.all_notes_off()
+                controller.seq.pending_midi_off.clear()
+            controller.seq.transport_resync = True
         controller.status_message = reason
 
 
@@ -242,30 +245,43 @@ def finish_record_capture(controller):
     controller.record_capture_active = False
     controller.record_capture_stage = "idle"
     controller.record_capture_loop_count = 0
-    try:
-        sd.wait()
-    except Exception:
-        pass
-    recorded = None
-    if controller.record_capture_array is not None:
-        recorded = np.asarray(controller.record_capture_array, dtype=np.float32)
+    if controller.record_use_external_capture:
+        try:
+            sd.wait()
+        except Exception:
+            pass
+        recorded = np.asarray(controller._record_stream, dtype=np.float32) if controller._record_stream is not None else None
+        controller._record_stream = None
+        controller.seq.engine.restart_output_stream()
+    else:
+        controller.seq.engine.stop_capture()
+        recorded = controller.seq.engine.consume_capture()
+    if recorded is not None:
+        recorded = np.asarray(recorded, dtype=np.float32)
     controller.record_capture_chunks = []
     controller.record_capture_buffer = None
     controller.record_capture_write = 0
     controller.record_capture_capacity = 0
-    controller.record_capture_array = None
     controller.record_capture_duration_seconds = 0.0
     controller.record_capture_started_at = 0.0
     controller.record_capture_controls_transport = True
     controller.record_capture_end_time = 0.0
+    controller.record_use_external_capture = False
+    controller.record_capture_started_playback = False
     controller._stop_record_monitor()
+    with controller.seq.transport_lock:
+        controller.seq.pending_events.clear()
+        if controller.seq.pending_midi_off:
+            controller.seq.midi.all_notes_off()
+            controller.seq.pending_midi_off.clear()
+        controller.seq.transport_resync = True
     if recorded is None:
         controller.status_message = "Record failed: no audio captured"
         return
     if recorded.size <= 1:
         controller.status_message = "Record failed: no audio captured"
         return
-    src_sr = int(controller.record_capture_sr) if controller.record_capture_sr > 0 else int(controller.seq.engine.sr)
+    src_sr = int(controller.seq.engine.sr)
     dst_sr = int(controller.seq.engine.sr)
     channels = 2 if (recorded.ndim == 2 and recorded.shape[1] >= 2) else 1
     if channels == 2:
@@ -330,10 +346,10 @@ def arm_record_capture(controller):
     controller.record_capture_capacity = 0
     controller.record_capture_write = 0
     controller.record_capture_duration_seconds = max(0.05, float(take_seconds))
-    controller.record_capture_array = None
     controller.record_capture_started_at = 0.0
-    controller.record_capture_controls_transport = (not was_playing)
+    controller.record_capture_controls_transport = False
     controller.record_capture_end_time = 0.0
+    controller.record_capture_started_playback = False
 
     if not controller._start_record_capture_stream():
         return
@@ -353,111 +369,33 @@ def arm_record_capture(controller):
     controller.record_capture_chunks = []
     controller.record_level_db = -60.0
 
-    if not controller.record_capture_controls_transport:
-        try:
-            _start_take_capture(controller)
-        except Exception as exc:
-            controller._cancel_record_capture(f"Record failed: {exc}")
-            return
-        controller.record_capture_end_time = time.perf_counter() + controller.record_capture_duration_seconds
-        controller.status_message = "Recording..."
-        return
-
+    # Always isolate recording from transport for stability.
     with controller.seq.transport_lock:
-        if controller.record_capture_controls_transport:
-            if controller.seq.playing:
-                controller.seq.toggle_playback()
-
-            if controller.record_capture_stage == "preroll":
-                controller.seq.chain_enabled = False
-                controller.seq.select_pattern(precount_pattern)
-            else:
-                if scope == "song":
-                    controller.seq.chain_enabled = True
-                    if not controller.seq.chain:
-                        controller.seq.chain = [0]
-                    controller.seq.chain_pos = 0
-                    controller.seq.pattern = controller.seq.chain[0]
-                    controller.seq.view_pattern = controller.seq.pattern
-                else:
-                    controller.seq.chain_enabled = False
-                    controller.seq.select_pattern(controller.record_capture_pattern)
-
-            controller.seq.step = 0
-            controller.seq.next_pattern = None
-            controller.seq.pending_events.clear()
-            controller.seq.pending_midi_off.clear()
-            controller.seq.transport_resync = True
+        if controller.seq.playing:
             controller.seq.toggle_playback()
+        controller.seq.step = 0
+        controller.seq.next_pattern = None
+        controller.seq.pending_events.clear()
+        controller.seq.pending_midi_off.clear()
+        controller.seq.transport_resync = True
         controller.record_capture_last_step = controller.seq.step
-    if controller.record_capture_stage == "recording":
-        try:
-            _start_take_capture(controller)
-        except Exception as exc:
-            controller._cancel_record_capture(f"Record failed: {exc}")
-            return
-    scope_text = "song" if scope == "song" else "pattern"
-    if controller.record_capture_stage == "preroll":
-        controller.status_message = f"Record armed: precount pattern {precount_pattern + 1}, then {scope_text} capture"
+
+    try:
+        _start_take_capture(controller)
+    except Exception as exc:
+        controller._cancel_record_capture(f"Record failed: {exc}")
+        return
+    controller.record_capture_end_time = time.perf_counter() + controller.record_capture_duration_seconds
+    if was_playing:
+        controller.status_message = "Recording (playback paused for stability)"
     else:
         controller.status_message = "Recording..."
 
 
 def tick_record_capture(controller):
     """Advance recording state machine at loop boundaries."""
+    controller.record_level_db = controller.seq.engine.get_input_level_db()
     if not controller.record_capture_active:
         return
-    if not controller.record_capture_controls_transport:
-        if controller.record_capture_end_time > 0.0 and time.perf_counter() >= controller.record_capture_end_time:
-            controller._finish_record_capture()
-        return
-    if not controller.seq.playing:
-        controller._cancel_record_capture("Recording canceled (playback stopped)")
-        return
-    current_step = int(controller.seq.step)
-    wrapped = controller.record_capture_last_step > current_step
-    controller.record_capture_last_step = current_step
-    if not wrapped:
-        return
-
-    controller.record_capture_loop_count += 1
-
-    if controller.record_capture_stage == "preroll":
-        if controller.record_capture_loop_count < controller.record_capture_precount_loops:
-            return
-        controller.record_capture_stage = "recording"
-        controller.record_capture_loop_count = 0
-        controller.record_capture_chunks = []
-        controller.record_capture_write = 0
-        # Start capture with no Python audio callback (avoids GIL jitter).
-        try:
-            _start_take_capture(controller)
-        except Exception as exc:
-            controller._cancel_record_capture(f"Record failed: {exc}")
-            return
-        with controller.seq.transport_lock:
-            if controller.record_capture_controls_transport:
-                if controller.record_capture_scope == "song":
-                    controller.seq.chain_enabled = True
-                    if not controller.seq.chain:
-                        controller.seq.chain = [0]
-                    controller.seq.chain_pos = 0
-                    controller.seq.pattern = controller.seq.chain[0]
-                    controller.seq.view_pattern = controller.seq.pattern
-                else:
-                    controller.seq.chain_enabled = False
-                    controller.seq.select_pattern(controller.record_capture_pattern)
-                controller.seq.step = 0
-                controller.seq.next_pattern = None
-                controller.seq.pending_events.clear()
-                controller.seq.pending_midi_off.clear()
-                controller.seq.transport_resync = True
-            controller.record_capture_last_step = int(controller.seq.step)
-        controller.status_message = "Recording..."
-        return
-
-    if controller.record_capture_loop_count >= controller.record_capture_take_loops:
-        with controller.seq.transport_lock:
-            if controller.record_capture_controls_transport and controller.seq.playing:
-                controller.seq.toggle_playback()
+    if controller.record_capture_end_time > 0.0 and time.perf_counter() >= controller.record_capture_end_time:
         controller._finish_record_capture()

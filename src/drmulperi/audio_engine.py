@@ -1,4 +1,5 @@
 import os
+import threading
 import warnings
 
 import numpy as np
@@ -88,7 +89,7 @@ class MidiOut:
 # ---------- AUDIO ENGINE ----------
 class AudioEngine:
     """Real-time sample engine: buffering trigger events and rendering stereo audio."""
-    def __init__(self, kit_path, samplerate=44100, blocksize=1024):
+    def __init__(self, kit_path, samplerate=44100, blocksize=512):
         self.sr = samplerate
         self.blocksize = blocksize
         self.kit_path = kit_path
@@ -99,17 +100,48 @@ class AudioEngine:
         self.event_buffer = [None] * 1024
         self.event_write = 0
         self.event_read = 0
+        self.event_lock = threading.Lock()
+
+        # Shared input/capture state (used when full-duplex stream is available).
+        self.input_available = False
+        self.input_level_db = -60.0
+        self.monitor_input_level = False
+        self.capture_lock = threading.Lock()
+        self.capture_active = False
+        self.capture_channels = 1
+        self.capture_indices = [0]
+        self.capture_buffer = None
+        self.capture_write = 0
+        self.capture_capacity = 0
+        self.capture_done = False
 
         self.samples, self.sample_names, self.sample_paths = self.load_samples()
 
+        self.stream = None
+        self._open_output_stream()
+        self.input_available = False
+
+    def _open_output_stream(self):
+        """Create and start the output stream."""
         self.stream = sd.OutputStream(
             samplerate=self.sr,
             blocksize=self.blocksize,
             channels=2,
             callback=self.audio_callback,
-            latency='high'
+            latency="high",
         )
         self.stream.start()
+
+    def restart_output_stream(self):
+        """Hard-restart output stream after external recorder use."""
+        try:
+            if self.stream is not None:
+                self.stream.stop()
+                self.stream.close()
+        except Exception:
+            pass
+        self.stream = None
+        self._open_output_stream()
 
     def load_samples(self):
         """Load first 8 alphabetic WAV files from current kit path."""
@@ -264,10 +296,6 @@ class AudioEngine:
         for v in self.voices:
             v.active = False
             v.track = -1
-        try:
-            sd.stop()
-        except Exception:
-            pass
 
     def choke_group(self, group_id, track_groups):
         """Stop active voices belonging to a choke/mute group."""
@@ -287,9 +315,10 @@ class AudioEngine:
         left_gain = float(np.cos(pan_pos * (np.pi / 2)))
         right_gain = float(np.sin(pan_pos * (np.pi / 2)))
 
-        idx = self.event_write % len(self.event_buffer)
-        self.event_buffer[idx] = ("slot", track, velocity, left_gain, right_gain, float(rate))
-        self.event_write += 1
+        with self.event_lock:
+            idx = self.event_write % len(self.event_buffer)
+            self.event_buffer[idx] = ("slot", track, velocity, left_gain, right_gain, float(rate))
+            self.event_write += 1
 
     def trigger_buffer(self, sample, velocity, pan, rate=1.0, track=-1, replace=False):
         """Queue an arbitrary mono sample buffer trigger event.
@@ -302,47 +331,192 @@ class AudioEngine:
         pan_pos = (pan - 1) / 8.0
         left_gain = float(np.cos(pan_pos * (np.pi / 2)))
         right_gain = float(np.sin(pan_pos * (np.pi / 2)))
-        idx = self.event_write % len(self.event_buffer)
-        self.event_buffer[idx] = ("buf", sample, velocity, left_gain, right_gain, float(rate), int(track), bool(replace))
-        self.event_write += 1
+        with self.event_lock:
+            idx = self.event_write % len(self.event_buffer)
+            self.event_buffer[idx] = ("buf", sample, velocity, left_gain, right_gain, float(rate), int(track), bool(replace))
+            self.event_write += 1
+
+    def configure_capture(self, channels=1, input_indices=None, frames=0):
+        """Allocate capture buffer and input mapping for upcoming take."""
+        ch = 2 if int(channels) >= 2 else 1
+        idx = input_indices if isinstance(input_indices, list) and input_indices else [0]
+        idx = [max(0, int(v)) for v in idx]
+        cap = max(1, int(frames))
+        with self.capture_lock:
+            if ch >= 2:
+                self.capture_buffer = np.zeros((cap, 2), dtype=np.float32)
+            else:
+                self.capture_buffer = np.zeros((cap,), dtype=np.float32)
+            self.capture_channels = ch
+            self.capture_indices = idx
+            self.capture_write = 0
+            self.capture_capacity = cap
+            self.capture_done = False
+            self.capture_active = False
+
+    def start_capture(self):
+        """Arm capture in duplex callback."""
+        with self.capture_lock:
+            if self.capture_buffer is None or self.capture_capacity <= 0:
+                return False
+            self.capture_write = 0
+            self.capture_done = False
+            self.capture_active = True
+            return True
+
+    def stop_capture(self):
+        """Stop capture immediately."""
+        with self.capture_lock:
+            self.capture_active = False
+            self.capture_done = False
+
+    def set_input_monitoring(self, enabled):
+        """Enable/disable input level metering in duplex callback."""
+        self.monitor_input_level = bool(enabled)
+
+    def is_capture_done(self):
+        """Return True when configured capture filled its buffer."""
+        with self.capture_lock:
+            return bool(self.capture_done)
+
+    def consume_capture(self):
+        """Return captured audio copy and clear capture state."""
+        with self.capture_lock:
+            if self.capture_buffer is None or self.capture_write <= 0:
+                self.capture_active = False
+                self.capture_done = False
+                return None
+            out = np.copy(self.capture_buffer[: self.capture_write])
+            self.capture_active = False
+            self.capture_done = False
+            return out
+
+    def get_input_level_db(self):
+        """Current input RMS level in dBFS from duplex callback."""
+        return float(self.input_level_db)
+
+    def _render_output(self, frames):
+        """Consume events and mix voices into internal stereo mix buffer."""
+        mix = self.mix
+        if frames != mix.shape[0]:
+            mix = np.zeros((frames, 2), dtype=np.float32)
+            self.mix = mix
+        mix[:, :] = 0.0
+
+        with self.event_lock:
+            while self.event_read != self.event_write:
+                idx = self.event_read % len(self.event_buffer)
+                event = self.event_buffer[idx]
+
+                if event:
+                    kind = event[0] if isinstance(event, tuple) and len(event) > 0 else "slot"
+                    if kind == "buf":
+                        _, sample, vel, pan_l, pan_r, rate, track, replace = event
+                        if replace and track >= 0:
+                            for v in self.voices:
+                                if v.active and v.track == track:
+                                    v.active = False
+                                    v.track = -1
+                    else:
+                        _, track, vel, pan_l, pan_r, rate = event
+                        sample = self.samples[track]
+
+                    if sample is not None:
+                        for v in self.voices:
+                            if not v.active:
+                                v.active = True
+                                v.data = sample
+                                v.track = track
+                                v.pos = 0.0
+                                v.rate = max(0.01, float(rate))
+                                v.vel = vel
+                                v.pan_l = pan_l
+                                v.pan_r = pan_r
+                                break
+
+                self.event_read += 1
+
+        return mix
 
     def audio_callback(self, outdata, frames, time_info, status):
         """PortAudio callback: consume trigger queue, mix voices, write to `outdata`."""
-        mix = self.mix
-        mix[:, :] = 0.0
+        mix = self._render_output(frames)
 
-        while self.event_read != self.event_write:
-            idx = self.event_read % len(self.event_buffer)
-            event = self.event_buffer[idx]
+        for v in self.voices:
+            if not v.active:
+                continue
 
-            if event:
-                kind = event[0] if isinstance(event, tuple) and len(event) > 0 else "slot"
-                if kind == "buf":
-                    _, sample, vel, pan_l, pan_r, rate, track, replace = event
-                    if replace and track >= 0:
-                        for v in self.voices:
-                            if v.active and v.track == track:
-                                v.active = False
-                                v.track = -1
+            src = v.data
+            src_len = len(src)
+            if src_len < 2:
+                v.active = False
+                v.track = -1
+                continue
+
+            positions = v.pos + (np.arange(frames, dtype=np.float32) * v.rate)
+            valid = positions < (src_len - 1)
+            n = int(np.count_nonzero(valid))
+            if n > 0:
+                p = positions[:n]
+                idx0 = p.astype(np.int32)
+                frac = p - idx0
+                idx1 = idx0 + 1
+                chunk = ((1.0 - frac) * src[idx0]) + (frac * src[idx1])
+                scaled = chunk * v.vel
+                mix[:n, 0] += scaled * v.pan_l
+                mix[:n, 1] += scaled * v.pan_r
+
+            v.pos += frames * v.rate
+            if v.pos >= (src_len - 1):
+                v.active = False
+                v.track = -1
+
+        outdata[:] = mix * 0.25
+
+    def audio_callback_duplex(self, indata, outdata, frames, time_info, status):
+        """Full-duplex callback: handles input metering/capture and output render."""
+        need_input = self.monitor_input_level
+        with self.capture_lock:
+            need_input = need_input or self.capture_active
+        arr = None
+        if need_input:
+            arr = np.asarray(indata, dtype=np.float32)
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 1)
+            if self.monitor_input_level and arr.size > 0:
+                mono = arr.mean(axis=1) if arr.shape[1] > 1 else arr[:, 0]
+                rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size > 0 else 0.0
+                if rms <= 1e-9:
+                    self.input_level_db = -60.0
                 else:
-                    _, track, vel, pan_l, pan_r, rate = event
-                    sample = self.samples[track]
+                    self.input_level_db = max(-60.0, min(0.0, 20.0 * np.log10(rms)))
 
-                if sample is not None:
-                    for v in self.voices:
-                        if not v.active:
-                            v.active = True
-                            v.data = sample
-                            v.track = track
-                            v.pos = 0.0
-                            v.rate = max(0.01, float(rate))
-                            v.vel = vel
-                            v.pan_l = pan_l
-                            v.pan_r = pan_r
-                            break
+        with self.capture_lock:
+            if self.capture_active and self.capture_buffer is not None and arr is not None and arr.size > 0:
+                ncols = arr.shape[1]
+                idx = self.capture_indices if self.capture_indices else [0]
+                if self.capture_channels >= 2:
+                    li = max(0, min(ncols - 1, int(idx[0] if len(idx) > 0 else 0)))
+                    ri = max(0, min(ncols - 1, int(idx[1] if len(idx) > 1 else li)))
+                    chunk = np.empty((arr.shape[0], 2), dtype=np.float32)
+                    chunk[:, 0] = arr[:, li]
+                    chunk[:, 1] = arr[:, ri]
+                else:
+                    mi = max(0, min(ncols - 1, int(idx[0] if len(idx) > 0 else 0)))
+                    chunk = arr[:, mi]
+                avail = int(self.capture_capacity - self.capture_write)
+                if avail > 0:
+                    n = min(int(chunk.shape[0]), avail)
+                    if self.capture_channels >= 2:
+                        self.capture_buffer[self.capture_write:self.capture_write + n, :] = chunk[:n, :]
+                    else:
+                        self.capture_buffer[self.capture_write:self.capture_write + n] = chunk[:n]
+                    self.capture_write += n
+                if self.capture_write >= self.capture_capacity:
+                    self.capture_active = False
+                    self.capture_done = True
 
-            self.event_read += 1
-
+        mix = self._render_output(frames)
         for v in self.voices:
             if not v.active:
                 continue

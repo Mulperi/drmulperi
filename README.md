@@ -54,6 +54,23 @@ Compatibility launcher:
 python3 main.py --pattern examplekit/patterns.json
 ```
 
+## Audio Sample Rate
+
+`settings.ini` is created automatically on first run:
+
+```ini
+[audio]
+sample_rate = 44100
+```
+
+Set this to your interface rate (for example `48000`) to avoid pitch/timing issues from rate mismatch.
+
+You can also override at startup:
+
+```bash
+PYTHONPATH=src python -m drmulperi --samplerate 48000
+```
+
 ## Top Bar
 
 Top bar is navigable and contains:

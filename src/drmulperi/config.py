@@ -15,6 +15,7 @@ PATTERNS = 4
 DEFAULT_KIT_PATH = ""
 DEFAULT_PATTERN_NAME = "patterns"
 KEYMAP_PATH = "keymap.ini"
+SETTINGS_PATH = "settings.ini"
 
 ACCENT_TRACK = 8
 ACCENT_BOOST = 0.35
@@ -49,6 +50,10 @@ DEFAULT_KEYMAP = {
     "pattern_2": "W",
     "pattern_3": "E",
     "pattern_4": "R",
+}
+
+DEFAULT_SETTINGS = {
+    "sample_rate": "48000",
 }
 
 FILE_MENU_ITEMS = [

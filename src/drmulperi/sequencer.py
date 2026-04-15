@@ -23,11 +23,11 @@ from .config import (
 
 class Sequencer:
     """Pattern sequencer state, persistence, scheduling, and high-level actions."""
-    def __init__(self, kit_path, pattern_path):
+    def __init__(self, kit_path, pattern_path, samplerate=44100):
         self.kit_path = kit_path
         self.pattern_path = pattern_path
         self.pattern_name = os.path.basename(pattern_path)
-        self.engine = AudioEngine(kit_path=self.kit_path)
+        self.engine = AudioEngine(kit_path=self.kit_path, samplerate=int(samplerate))
 
         self.grid = [self._new_pattern_grid() for _ in range(PATTERNS)]
         self.ratchet_grid = [self._new_pattern_ratchet() for _ in range(PATTERNS)]
@@ -1434,8 +1434,6 @@ class Sequencer:
                 if self.playing:
                     if now >= next_time:
                         step_time = self._step_duration_for(self.pattern, self.step, base_step_time)
-                        if (now - next_time) > (step_time * 2.0):
-                            next_time = now
                         current_length = self.pattern_length[self.pattern]
 
                         if self.step == 0 and not self.midi_out_enabled:
@@ -1507,7 +1505,7 @@ class Sequencer:
                 self.dirty = False
                 self.last_save_time = time.time()
 
-            time.sleep(0.001)
+            time.sleep(0.0005)
 
     def toggle_playback(self):
         """Start/stop playback and clear queued/pending events on stop."""

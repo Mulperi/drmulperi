@@ -1092,11 +1092,12 @@ class Controller:
         self.record_capture_buffer = None
         self.record_capture_write = 0
         self.record_capture_capacity = 0
-        self.record_capture_array = None
         self.record_capture_duration_seconds = 0.0
         self.record_capture_started_at = 0.0
         self.record_capture_controls_transport = True
         self.record_capture_end_time = 0.0
+        self.record_use_external_capture = False
+        self.record_capture_started_playback = False
         self.clear_audio_confirm_active = False
         self.clear_audio_force_confirm_active = False
         self.clear_audio_confirm_pattern = 0
