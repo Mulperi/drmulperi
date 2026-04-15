@@ -321,8 +321,23 @@ class Sequencer:
         val = max(50, min(75, int(internal_value)))
         return max(0, min(10, int(round((val - 50) / 2.5))))
 
-    def _serialize(self):
+    @staticmethod
+    def _path_for_save(path, base_dir):
+        """Return path saved relative to base_dir when possible."""
+        if not isinstance(path, str) or not path.strip():
+            return None
+        src = path
+        try:
+            if base_dir:
+                return os.path.relpath(src, base_dir)
+        except Exception:
+            pass
+        return src
+
+    def _serialize(self, base_dir=None):
         """Return JSON-serializable project state."""
+        if base_dir is None:
+            base_dir = os.path.dirname(self.pattern_path) if self.pattern_path else os.getcwd()
         audio_tracks = []
         for t in range(TRACKS - 1):
             audio_tracks.append(
@@ -331,19 +346,29 @@ class Sequencer:
                     "slot": {
                         "pan": [self.audio_track_slot_pan[p][t] for p in range(self.pattern_count())],
                         "volume": [self.audio_track_slot_volume[p][t] for p in range(self.pattern_count())],
-                        "sample_paths": [self.audio_track_slot_sample_paths[p][t] for p in range(self.pattern_count())],
+                        "sample_paths": [
+                            self._path_for_save(self.audio_track_slot_sample_paths[p][t], base_dir)
+                            for p in range(self.pattern_count())
+                        ],
                         "sample_names": [self.audio_track_slot_sample_names[p][t] for p in range(self.pattern_count())],
                         "channels": [self.audio_track_slot_channels[p][t] for p in range(self.pattern_count())],
                     },
                     "free": {
                         "pan": self.audio_track_free_pan[t],
                         "volume": self.audio_track_free_volume[t],
-                        "sample_path": self.audio_track_free_sample_paths[t],
+                        "sample_path": self._path_for_save(self.audio_track_free_sample_paths[t], base_dir),
                         "sample_name": self.audio_track_free_sample_names[t],
                         "channels": self.audio_track_free_channels[t],
                     },
                 }
             )
+        seq_sample_paths = []
+        seq_sample_names = []
+        for t in range(TRACKS - 1):
+            src = self.engine.sample_paths[t] if t < len(self.engine.sample_paths) else None
+            name = self.engine.sample_names[t] if t < len(self.engine.sample_names) else "-"
+            seq_sample_paths.append(self._path_for_save(src, base_dir))
+            seq_sample_names.append(name if isinstance(name, str) and name.strip() else "-")
         return {
             "pattern_count": self.pattern_count(),
             "bpm": self.bpm,
@@ -351,6 +376,10 @@ class Sequencer:
             "pattern": self.pattern,
             "view_pattern": self.view_pattern,
             "grid": self.grid,
+            "seq_samples": {
+                "sample_paths": seq_sample_paths,
+                "sample_names": seq_sample_names,
+            },
             "track_pan": self.seq_track_pan,
             "track_humanize": self.seq_track_humanize,
             "track_probability": self.seq_track_probability,
@@ -478,6 +507,35 @@ class Sequencer:
         normalized_track_pitch[ACCENT_TRACK] = 0
         self.seq_track_pitch = normalized_track_pitch
 
+        base_dir = os.path.dirname(self.pattern_path) if self.pattern_path else os.getcwd()
+        loaded_seq_samples = data.get("seq_samples", {})
+        if isinstance(loaded_seq_samples, dict) and isinstance(loaded_seq_samples.get("sample_paths"), list):
+            raw_paths = loaded_seq_samples.get("sample_paths", [])
+            raw_names = loaded_seq_samples.get("sample_names", [])
+            # When embedded sample paths exist, project should restore those exact sequencer samples.
+            for t in range(TRACKS - 1):
+                self.engine.samples[t] = None
+                self.engine.sample_paths[t] = None
+                self.engine.sample_names[t] = "-"
+                raw_name = raw_names[t] if (isinstance(raw_names, list) and t < len(raw_names)) else "-"
+                if isinstance(raw_name, str) and raw_name.strip():
+                    self.engine.sample_names[t] = raw_name
+            for t in range(min(TRACKS - 1, len(raw_paths))):
+                raw_path = raw_paths[t]
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    continue
+                path = raw_path if os.path.isabs(raw_path) else os.path.join(base_dir, raw_path)
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    mono = self._read_wav_mono(path)
+                except Exception:
+                    continue
+                self.engine.samples[t] = mono
+                self.engine.sample_paths[t] = path
+                if self.engine.sample_names[t] == "-":
+                    self.engine.sample_names[t] = os.path.basename(path)
+
         loaded_tracks = data.get("audio_tracks", [])
         normalized_audio_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
         normalized_audio_vol = [[9 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
@@ -491,7 +549,6 @@ class Sequencer:
         normalized_free_names = ["-" for _ in range(TRACKS - 1)]
         normalized_free_channels = [1 for _ in range(TRACKS - 1)]
 
-        base_dir = os.path.dirname(self.pattern_path) if self.pattern_path else os.getcwd()
         if isinstance(loaded_tracks, list):
             for t in range(min(TRACKS - 1, len(loaded_tracks))):
                 track_obj = loaded_tracks[t] if isinstance(loaded_tracks[t], dict) else {}
@@ -662,7 +719,8 @@ class Sequencer:
 
     def save(self):
         """Save current pattern bank to `self.pattern_path`."""
-        data = self._serialize()
+        base_dir = os.path.dirname(self.pattern_path) if self.pattern_path else os.getcwd()
+        data = self._serialize(base_dir=base_dir)
 
         with open(self.pattern_path, "w") as f:
             json.dump(data, f)
@@ -709,6 +767,69 @@ class Sequencer:
         self._sync_chain_pos_to_pattern()
         return True, f"Loaded {self.pattern_name}"
 
+    def new_project(self, filename="new_project.json"):
+        """Reset to a fresh project state and save it to a new JSON file."""
+        target = str(filename or "").strip()
+        if not target:
+            target = "new_project.json"
+        if not target.lower().endswith(".json"):
+            target = f"{target}.json"
+        path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+
+        self.playing = False
+        self.engine.stop_all()
+        self.pending_events.clear()
+        self.pending_midi_off.clear()
+        self.step = 0
+
+        self.grid = [self._new_pattern_grid() for _ in range(PATTERNS)]
+        self.ratchet_grid = [self._new_pattern_ratchet() for _ in range(PATTERNS)]
+        self.pattern = 0
+        self.view_pattern = 0
+        self.next_pattern = None
+        self.chain_enabled = False
+        self.chain = [0]
+        self.chain_pos = 0
+
+        self.bpm = 120
+        self.last_velocity = 5
+        self.seq_track_pan = [5 for _ in range(TRACKS)]
+        self.seq_track_humanize = [0 for _ in range(TRACKS)]
+        self.seq_track_probability = [100 for _ in range(TRACKS)]
+        self.seq_track_group = [0 for _ in range(TRACKS)]
+        self.seq_track_pitch = [0 for _ in range(TRACKS)]
+        self.pattern_length = [STEPS for _ in range(PATTERNS)]
+        self.pattern_swing = [50 for _ in range(PATTERNS)]
+        self.muted_rows = [False for _ in range(TRACKS)]
+        self.pattern_clipboard = None
+        self.pitch_semitones = 0
+
+        self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_slot_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_slot_sample_paths = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_slot_sample_names = [["-" for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_slot_samples = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_slot_channels = [[1 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_mode = [0 for _ in range(TRACKS - 1)]
+        self.audio_track_free_pan = [5 for _ in range(TRACKS - 1)]
+        self.audio_track_free_volume = [9 for _ in range(TRACKS - 1)]
+        self.audio_track_free_sample_paths = [None for _ in range(TRACKS - 1)]
+        self.audio_track_free_sample_names = ["-" for _ in range(TRACKS - 1)]
+        self.audio_track_free_samples = [None for _ in range(TRACKS - 1)]
+        self.audio_track_free_channels = [1 for _ in range(TRACKS - 1)]
+        self.seq_track_trigger_until = [0.0 for _ in range(TRACKS)]
+        self.audio_track_trigger_until = [0.0 for _ in range(TRACKS)]
+
+        self.pattern_path = path
+        self.pattern_name = os.path.basename(path)
+        self.dirty = False
+        self.last_save_time = time.time()
+        try:
+            self.save()
+        except Exception as exc:
+            return False, f"New project failed: {exc}"
+        return True, f"New project: {self.pattern_name}"
+
     def save_project_file(self, filename):
         """Save pattern bank JSON to a user-provided filename."""
         target = filename.strip()
@@ -719,9 +840,10 @@ class Sequencer:
             target = f"{target}.json"
 
         path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        base_dir = os.path.dirname(path) if path else os.getcwd()
         try:
             with open(path, "w") as f:
-                json.dump(self._serialize(), f)
+                json.dump(self._serialize(base_dir=base_dir), f)
         except Exception as exc:
             return False, f"Save failed: {exc}"
 
@@ -920,7 +1042,17 @@ class Sequencer:
                 continue
 
         pattern_path = os.path.join(pack_dir, "pattern_bank.json")
-        pack_data = self._serialize()
+        pack_data = self._serialize(base_dir=pack_dir)
+        # Rewrite embedded sequencer sample paths to local copied kit sample files.
+        if "seq_samples" in pack_data and isinstance(pack_data["seq_samples"], dict):
+            seq_paths = [None for _ in range(TRACKS - 1)]
+            seq_names = [self.engine.sample_names[t] if t < len(self.engine.sample_names) else "-" for t in range(TRACKS - 1)]
+            for t in range(TRACKS - 1):
+                src = self.engine.sample_paths[t] if t < len(self.engine.sample_paths) else None
+                if src and os.path.isfile(src):
+                    seq_paths[t] = f"{t+1:02d}_{self.engine.sample_names[t]}"
+            pack_data["seq_samples"]["sample_paths"] = seq_paths
+            pack_data["seq_samples"]["sample_names"] = seq_names
         # Rewrite track-view sample paths to local pack-relative names when available.
         if "audio_tracks" in pack_data and isinstance(pack_data["audio_tracks"], list):
             for t in range(min(TRACKS - 1, len(pack_data["audio_tracks"]))):
@@ -947,6 +1079,66 @@ class Sequencer:
             return False, f"Pattern save failed: {exc}"
 
         return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 kit + {track_audio_count} track samples + pattern_bank.json)"
+
+    def export_current_kit(self, foldername, options=None):
+        """Export current sequencer kit samples into a folder with format options."""
+        target = str(foldername or "").strip()
+        if not target:
+            return False, "Kit export canceled"
+
+        out_dir = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as exc:
+            return False, f"Kit export failed: {exc}"
+
+        opts = options or {}
+        try:
+            bit_depth = int(opts.get("bit_depth", 16))
+        except (TypeError, ValueError):
+            bit_depth = 16
+        bit_depth = 8 if bit_depth == 8 else 16
+
+        try:
+            target_sr = int(opts.get("sample_rate", self.engine.sr))
+        except (TypeError, ValueError):
+            target_sr = self.engine.sr
+        target_sr = max(8000, min(192000, target_sr))
+
+        try:
+            channels = int(opts.get("channels", 1))
+        except (TypeError, ValueError):
+            channels = 1
+        channels = 2 if channels == 2 else 1
+
+        exported = 0
+        for t in range(TRACKS - 1):
+            sample = self.engine.samples[t] if t < len(self.engine.samples) else None
+            if sample is None or len(sample) <= 0:
+                continue
+            out = np.asarray(sample, dtype=np.float32)
+            if target_sr != self.engine.sr:
+                out = self._resample_audio_mono(out, self.engine.sr, target_sr)
+            if channels == 2:
+                out = np.column_stack((out, out))
+            name = self.engine.sample_names[t] if t < len(self.engine.sample_names) else f"track_{t+1:02d}.wav"
+            if not str(name).lower().endswith(".wav"):
+                name = f"{name}.wav"
+            dst = os.path.join(out_dir, f"{t+1:02d}_{os.path.basename(name)}")
+            try:
+                if bit_depth == 8:
+                    wav_data = np.clip(((out + 1.0) * 127.5), 0, 255).astype(np.uint8)
+                else:
+                    wav_data = np.clip(out * 32767.0, -32768, 32767).astype(np.int16)
+                wavfile.write(dst, target_sr, wav_data)
+                exported += 1
+            except Exception:
+                continue
+
+        if exported <= 0:
+            return False, "No kit samples to export"
+        chan_label = "stereo" if channels == 2 else "mono"
+        return True, f"Kit exported: {os.path.basename(out_dir)} ({exported} samples, {target_sr}Hz, {bit_depth}-bit, {chan_label})"
 
     def export_current_pattern_audio(self, filename, options=None):
         """Offline-render the viewed pattern as one-loop WAV with export options.
@@ -1611,6 +1803,7 @@ class Sequencer:
             "grid": [row[:] for row in self.grid[self.view_pattern]],
             "ratchet_grid": [row[:] for row in self.ratchet_grid[self.view_pattern]],
             "length": self.pattern_length[self.view_pattern],
+            "swing": self.pattern_swing[self.view_pattern],
         }
         return True, f"Copied pattern {self.view_pattern + 1}"
 
@@ -1622,6 +1815,7 @@ class Sequencer:
         self.grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["grid"]]
         self.ratchet_grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["ratchet_grid"]]
         self.pattern_length[self.view_pattern] = max(1, min(STEPS, int(self.pattern_clipboard["length"])))
+        self.pattern_swing[self.view_pattern] = max(50, min(75, int(self.pattern_clipboard.get("swing", 50))))
         self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
 
         if self.step >= self.pattern_length[self.view_pattern]:

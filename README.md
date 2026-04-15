@@ -83,7 +83,7 @@ python3 main.py --kit examplekit --pattern examplekit/patterns.json
 ## Run With Kit/Pattern
 
 ```bash
-PYTHONPATH=src python -m drmulperi --kit kit1 --pattern patterns
+PYTHONPATH=src python -m drmulperi --pattern patterns
 ```
 
 - `--kit`: folder containing `.wav` samples (first 8 alphabetical files are used)

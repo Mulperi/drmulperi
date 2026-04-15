@@ -12,7 +12,7 @@ def main():
     parser.add_argument(
         "--kit",
         default=DEFAULT_KIT_PATH,
-        help="Sample kit directory (default: kit1)",
+        help="Sample kit directory (optional; if omitted, project JSON/sample loads define kit content)",
     )
     parser.add_argument(
         "--pattern",

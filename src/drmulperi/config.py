@@ -12,7 +12,7 @@ GROUP_COL = STEPS + 5
 TRACK_PITCH_COL = STEPS + 6
 GRID_COLS = STEPS + 7
 PATTERNS = 4
-DEFAULT_KIT_PATH = "kit1"
+DEFAULT_KIT_PATH = ""
 DEFAULT_PATTERN_NAME = "patterns"
 KEYMAP_PATH = "keymap.ini"
 
@@ -21,7 +21,9 @@ ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
     "help_menu": "H,F1",
-    "pattern_menu": "F2",
+    "pattern_menu": "F,F2",
+    "pattern_menu_open": "P",
+    "sequencer_menu": "S",
     "patterns_overlay": "Q,O",
     "mode_toggle": "T",
     "clear_pattern": "N",
@@ -32,8 +34,8 @@ DEFAULT_KEYMAP = {
     "tempo_dec": "J",
     "chain_toggle": "G",
     "chain_edit": "C",
-    "pattern_length_dec": "[",
-    "pattern_length_inc": "]",
+    "pattern_length_dec": "CODE:-1",
+    "pattern_length_inc": "CODE:-1",
     "pattern_export": "X",
     "pattern_load": "L",
     "kit_load": "K",
@@ -45,18 +47,23 @@ DEFAULT_KEYMAP = {
     "pattern_4": "R",
 }
 
+FILE_MENU_ITEMS = [
+    "1. New Project",
+    "2. Load Project",
+    "3. Save Project",
+    "4. Export",
+]
+
 PATTERN_MENU_ITEMS = [
-    "1. Copy Pattern",
-    "2. Paste Pattern",
-    "3. Clear Pattern",
-    "4. Save Pattern As",
-    "5. Load Pattern",
-    "6. Load Sample Kit",
-    "7. Toggle Song Mode",
-    "8. Set Swing",
-    "9. Save Pack",
-    "10. Toggle MIDI OUT",
-    "11. Export Pattern Audio",
+    "1. Patterns Overlay",
+    "2. Clear Pattern",
+    "3. Copy Pattern",
+    "4. Paste Pattern",
+]
+
+SEQUENCER_MENU_ITEMS = [
+    "1. Save Kit",
+    "2. Load Kit",
 ]
 
 MIDI_NOTES = [36, 37, 38, 39, 40, 41, 42, 43]
