@@ -2,10 +2,6 @@ import curses
 import os
 import time
 
-import numpy as np
-import sounddevice as sd
-from scipy.io import wavfile
-
 from .config import (
     ACCENT_TRACK,
     FILE_MENU_ITEMS,
@@ -24,6 +20,7 @@ from .config import (
     TRACKS,
 )
 from .keymap import Keymap, _event_tokens
+from . import recorder
 
 def draw(
     stdscr,
@@ -49,6 +46,7 @@ def draw(
     import_overlay_active,
     import_overlay_index,
     import_overlay_path,
+    import_overlay_can_delete_source,
     import_target_drum_track,
     import_target_audio_track,
     chop_overlay_active,
@@ -61,6 +59,7 @@ def draw(
     record_overlay_index,
     record_action_index,
     record_channels,
+    record_precount_enabled,
     record_precount_pattern,
     record_level_db,
     record_monitor_running,
@@ -549,7 +548,7 @@ def draw(
         prompt_line = help_line
 
     if prompt_line:
-        prompt_y = min(row_start + visible_rows, grid_bottom - 1)
+        prompt_y = min(row_start + visible_rows + (1 if active_tab in [1, 2] else 0), grid_bottom - 1)
         safe_add(prompt_y, grid_content_x, prompt_line[:grid_right - grid_content_x], theme["hint"])
 
     # Always-visible current sample label at bottom-right of sequencer area.
@@ -705,8 +704,10 @@ def draw(
             f"Import to audio track: {import_target_audio_track + 1} ({audio_mode_label})",
             "[ Cancel ]",
         ]
+        if import_overlay_can_delete_source:
+            rows.append("[ Cancel + Delete Recording ]")
         box_width = min(w - 8, 78)
-        box_height = min(h - 4, 10)
+        box_height = min(h - 4, 11 if import_overlay_can_delete_source else 10)
         box_left = max(1, (w - box_width) // 2)
         box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
@@ -765,10 +766,17 @@ def draw(
         safe_add(box_top + 5, box_left + 4, source_text[: box_width - 6], theme["text"])
         draw_options_line(
             box_top + 6,
+            "Precount: ",
+            [("Off", 0), ("On", 1)],
+            1 if record_precount_enabled else 0,
+            record_overlay_index == 3,
+        )
+        draw_options_line(
+            box_top + 7,
             "Precount pattern: ",
             [(str(i + 1), i) for i in range(max(1, min(16, seq.pattern_count())))],
             max(0, min(seq.pattern_count() - 1, int(record_precount_pattern))),
-            record_overlay_index == 3,
+            record_overlay_index == 4,
         )
 
         meter_y = box_bottom - 2
@@ -781,7 +789,7 @@ def draw(
         safe_add(meter_y, meter_left, f"IN [{meter}] {db_text}"[: box_width - 4], theme["hint"])
         btn_y = box_bottom - 1
         record_label = "[ Stop ]" if record_capture_active else "[ Record ]"
-        action_row = (record_overlay_index == 4)
+        action_row = (record_overlay_index == 5)
         cancel_attr = theme["text"] if (action_row and record_action_index == 0) else theme["muted"]
         record_attr = theme["record"] if (action_row and record_action_index == 1) else theme["muted"]
         safe_add(btn_y, box_left + 2, "[ Cancel ]", cancel_attr)
@@ -1037,6 +1045,7 @@ class Controller:
         self.import_overlay_active = False
         self.import_overlay_index = 0
         self.import_overlay_path = None
+        self.import_overlay_can_delete_source = False
         self.import_target_drum_track = 0
         self.import_target_audio_track = 0
         self.chop_overlay_active = False
@@ -1055,6 +1064,7 @@ class Controller:
         self.record_overlay_index = 0
         self.record_action_index = 1
         self.record_channels = 1
+        self.record_precount_enabled = True
         self.record_precount_pattern = 0
         self.record_level_db = -60.0
         self.record_monitor_running = False
@@ -1066,12 +1076,32 @@ class Controller:
         self.record_capture_phase_start = 0.0
         self.record_capture_precount_seconds = 0.0
         self.record_capture_take_seconds = 0.0
+        self.record_capture_precount_loops = 0
+        self.record_capture_take_loops = 1
+        self.record_capture_loop_count = 0
         self.record_capture_context_track = None
         self.record_capture_context_audio = False
         self.record_capture_track = 0
         self.record_capture_last_step = 0
         self.record_capture_chunks = []
         self.record_capture_sr = 0
+        self.record_level_tick = 0
+        self.record_capture_input_indices = [0]
+        self.record_capture_channels = 1
+        self.record_stream_blocksize = 2048
+        self.record_capture_buffer = None
+        self.record_capture_write = 0
+        self.record_capture_capacity = 0
+        self.record_capture_array = None
+        self.record_capture_duration_seconds = 0.0
+        self.record_capture_started_at = 0.0
+        self.record_capture_controls_transport = True
+        self.record_capture_end_time = 0.0
+        self.clear_audio_confirm_active = False
+        self.clear_audio_force_confirm_active = False
+        self.clear_audio_confirm_pattern = 0
+        self.clear_audio_confirm_track = 0
+        self.clear_audio_confirm_path = None
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
 
@@ -1200,8 +1230,9 @@ class Controller:
         self.import_overlay_active = False
         self.import_overlay_index = 0
         self.import_overlay_path = None
+        self.import_overlay_can_delete_source = False
 
-    def _open_import_overlay(self, path):
+    def _open_import_overlay(self, path, can_delete_source=False):
         """Open import action overlay for a dropped/pasted WAV path."""
         src = os.path.expanduser(path.strip())
         if not os.path.isfile(src) or not src.lower().endswith(".wav"):
@@ -1210,6 +1241,7 @@ class Controller:
         self.import_overlay_active = True
         self.import_overlay_index = 0
         self.import_overlay_path = src
+        self.import_overlay_can_delete_source = bool(can_delete_source)
         self.drop_path_active = False
         self.drop_path_input = ""
         if self.active_tab == 1:
@@ -1222,294 +1254,46 @@ class Controller:
         return True
 
     def _refresh_record_devices(self):
-        """Load available input devices for record overlay selection."""
-        names = []
-        ids = []
-        sample_rates = []
-        channels = []
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            devices = []
-        for idx, dev in enumerate(devices):
-            try:
-                max_in = int(dev.get("max_input_channels", 0))
-                if max_in > 0:
-                    names.append(str(dev.get("name", "Input")))
-                    ids.append(idx)
-                    sample_rates.append(int(round(float(dev.get("default_samplerate", self.seq.engine.sr)))))
-                    channels.append(max_in)
-            except Exception:
-                continue
-        self.record_device_names = names
-        self.record_device_ids = ids
-        self.record_device_sample_rates = sample_rates
-        self.record_device_channels = channels
-        if self.record_device_index >= len(ids):
-            self.record_device_index = max(0, len(ids) - 1)
-        self._refresh_record_input_sources()
+        recorder.refresh_record_devices(self)
 
     def _refresh_record_input_sources(self):
-        """Rebuild selectable input channel sources for selected device/channels mode."""
-        sources = []
-        if self.record_device_ids and 0 <= self.record_device_index < len(self.record_device_channels):
-            max_in = max(1, int(self.record_device_channels[self.record_device_index]))
-            if int(self.record_channels) >= 2:
-                for i in range(max(0, max_in - 1)):
-                    sources.append({"label": f"In {i+1}/{i+2}", "indices": [i, i + 1]})
-            else:
-                for i in range(max_in):
-                    sources.append({"label": f"In {i+1}", "indices": [i]})
-        if not sources:
-            sources = [{"label": "Default", "indices": [0]}]
-        self.record_input_sources = sources
-        if self.record_input_source_index >= len(sources):
-            self.record_input_source_index = 0
+        recorder.refresh_record_input_sources(self)
 
     def _current_record_input_indices(self):
-        """Return currently selected input channel indices (0-based)."""
-        if not self.record_input_sources:
-            self._refresh_record_input_sources()
-        if not self.record_input_sources:
-            return [0]
-        idx = max(0, min(len(self.record_input_sources) - 1, int(self.record_input_source_index)))
-        indices = self.record_input_sources[idx].get("indices", [0])
-        if not isinstance(indices, list) or not indices:
-            return [0]
-        return [max(0, int(v)) for v in indices]
+        return recorder.current_record_input_indices(self)
 
     def _extract_record_input(self, indata):
-        """Extract selected input source channels from raw device input frames."""
-        arr = np.asarray(indata, dtype=np.float32)
-        if arr.ndim == 1:
-            arr = arr.reshape(-1, 1)
-        if arr.size <= 0:
-            return np.zeros((0,), dtype=np.float32)
-        idx = self._current_record_input_indices()
-        ncols = arr.shape[1]
-        if int(self.record_channels) >= 2:
-            left_i = idx[0] if len(idx) > 0 else 0
-            right_i = idx[1] if len(idx) > 1 else left_i
-            left_i = max(0, min(ncols - 1, left_i))
-            right_i = max(0, min(ncols - 1, right_i))
-            left = arr[:, left_i]
-            right = arr[:, right_i]
-            return np.column_stack((left, right)).astype(np.float32)
-        mono_i = idx[0] if len(idx) > 0 else 0
-        mono_i = max(0, min(ncols - 1, mono_i))
-        return np.asarray(arr[:, mono_i], dtype=np.float32)
+        return recorder.extract_record_input(self, indata)
 
     def _record_level_callback(self, indata, frames, time_info, status):
-        """Input stream callback: compute current dBFS level for UI meter."""
-        try:
-            selected = self._extract_record_input(indata)
-            mono = selected.mean(axis=1) if np.asarray(selected).ndim == 2 else np.asarray(selected, dtype=np.float32)
-            rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size > 0 else 0.0
-            if rms <= 1e-9:
-                db = -60.0
-            else:
-                db = max(-60.0, min(0.0, 20.0 * np.log10(rms)))
-            self.record_level_db = db
-        except Exception:
-            self.record_level_db = -60.0
+        recorder.record_level_callback(self, indata, frames, time_info, status)
 
     def _record_capture_callback(self, indata, frames, time_info, status):
-        """Input callback for loop capture: update meter and collect pass-2 audio."""
-        self._record_level_callback(indata, frames, time_info, status)
-        if not self.record_capture_active or self.record_capture_stage != "recording":
-            return
-        try:
-            chunk = self._extract_record_input(indata)
-            if chunk.size > 0:
-                self.record_capture_chunks.append(np.copy(chunk))
-        except Exception:
-            pass
+        recorder.record_capture_callback(self, indata, frames, time_info, status)
 
     def _stop_record_monitor(self):
-        """Stop and dispose current input monitor stream."""
-        if self._record_stream is not None:
-            try:
-                self._record_stream.stop()
-            except Exception:
-                pass
-            try:
-                self._record_stream.close()
-            except Exception:
-                pass
-        self._record_stream = None
-        self.record_monitor_running = False
+        recorder.stop_record_monitor(self)
 
     def _start_record_monitor(self):
-        """Start input monitor stream for currently selected device."""
-        self._stop_record_monitor()
-        if not self.record_device_ids:
-            self.record_level_db = -60.0
-            return
-        dev_id = self.record_device_ids[self.record_device_index]
-        dev_sr = self.record_device_sample_rates[self.record_device_index]
-        channels = max(1, int(self.record_device_channels[self.record_device_index]))
-        try:
-            self._record_stream = sd.InputStream(
-                device=dev_id,
-                channels=channels,
-                samplerate=dev_sr,
-                callback=self._record_level_callback,
-                blocksize=512,
-            )
-            self._record_stream.start()
-            self.record_monitor_running = True
-            self.record_capture_sr = int(dev_sr)
-        except Exception as exc:
-            self.record_monitor_running = False
-            self.status_message = f"Record monitor failed: {exc}"
+        recorder.start_record_monitor(self)
 
     def _start_record_capture_stream(self):
-        """Start input stream for capture mode on selected device."""
-        self._stop_record_monitor()
-        if not self.record_device_ids:
-            self.status_message = "No input device"
-            return False
-        dev_id = self.record_device_ids[self.record_device_index]
-        dev_sr = self.record_device_sample_rates[self.record_device_index]
-        channels = max(1, int(self.record_device_channels[self.record_device_index]))
-        try:
-            self._record_stream = sd.InputStream(
-                device=dev_id,
-                channels=channels,
-                samplerate=dev_sr,
-                callback=self._record_capture_callback,
-                blocksize=512,
-            )
-            self._record_stream.start()
-            self.record_monitor_running = True
-            self.record_capture_sr = int(dev_sr)
-            return True
-        except Exception as exc:
-            self.record_monitor_running = False
-            self.status_message = f"Record failed: {exc}"
-            return False
+        return recorder.start_record_capture_stream(self)
 
     def _open_record_overlay(self, target_track=None, from_audio_view=False):
-        """Open record device overlay and start live input level monitoring."""
-        self._refresh_record_devices()
-        self.record_overlay_active = True
-        self.record_overlay_index = 0
-        self.record_action_index = 1
-        self.record_precount_pattern = max(0, min(self.seq.pattern_count() - 1, int(self.seq.view_pattern)))
-        self.record_capture_context_track = target_track if isinstance(target_track, int) else None
-        self.record_capture_context_audio = bool(from_audio_view)
-        self.record_level_db = -60.0
-        self._start_record_monitor()
+        recorder.open_record_overlay(self, target_track=target_track, from_audio_view=from_audio_view)
 
     def _close_record_overlay(self):
-        """Close record overlay and stop input monitor."""
-        self.record_overlay_active = False
-        self._stop_record_monitor()
+        recorder.close_record_overlay(self)
 
     def _cancel_record_capture(self, reason="Recording canceled"):
-        """Abort any active two-pass recording session."""
-        if self.record_capture_active:
-            self.record_capture_active = False
-            self.record_capture_stage = "idle"
-            self.record_capture_chunks = []
-            self._stop_record_monitor()
-            self.status_message = reason
+        recorder.cancel_record_capture(self, reason=reason)
 
     def _finish_record_capture(self):
-        """Finalize capture, write WAV, then open import overlay for routing."""
-        self.record_capture_active = False
-        self.record_capture_stage = "idle"
-        chunks = self.record_capture_chunks
-        self.record_capture_chunks = []
-        self._stop_record_monitor()
-        if not chunks:
-            self.status_message = "Record failed: no audio captured"
-            return
-        recorded = np.concatenate(chunks).astype(np.float32)
-        if recorded.size <= 1:
-            self.status_message = "Record failed: no audio captured"
-            return
-        src_sr = int(self.record_capture_sr) if self.record_capture_sr > 0 else int(self.seq.engine.sr)
-        dst_sr = int(self.seq.engine.sr)
-        channels = 2 if (recorded.ndim == 2 and recorded.shape[1] >= 2) else 1
-        if channels == 2:
-            if src_sr != dst_sr:
-                left = self.seq._resample_mono_linear(recorded[:, 0], src_sr, dst_sr)
-                right = self.seq._resample_mono_linear(recorded[:, 1], src_sr, dst_sr)
-                n = min(len(left), len(right))
-                recorded = np.column_stack((left[:n], right[:n])).astype(np.float32)
-            mono = recorded.mean(axis=1).astype(np.float32)
-        else:
-            mono = recorded.reshape(-1).astype(np.float32)
-            if src_sr != dst_sr:
-                mono = self.seq._resample_mono_linear(mono, src_sr, dst_sr)
-        rec_dir = os.path.join(os.getcwd(), "recordings")
-        os.makedirs(rec_dir, exist_ok=True)
-        base = os.path.splitext(os.path.basename(self.seq.pattern_name))[0] or "pattern"
-        rec_idx = 1
-        while True:
-            name = f"{base}_rec{rec_idx}.wav"
-            out_path = os.path.join(rec_dir, name)
-            if not os.path.exists(out_path):
-                break
-            rec_idx += 1
-        out_src = recorded if channels == 2 else mono
-        out = np.clip(out_src * 32767.0, -32768, 32767).astype(np.int16)
-        wavfile.write(out_path, dst_sr, out)
-        sr_hint = f" (SR {src_sr}->{dst_sr})" if src_sr != dst_sr else ""
-        self.status_message = f"Recorded {name}{sr_hint}"
-        self._close_record_overlay()
-        self._open_import_overlay(out_path)
-        if self.record_capture_context_track is not None:
-            track = max(0, min(TRACKS - 2, int(self.record_capture_context_track)))
-            self.import_target_drum_track = track
-            self.import_target_audio_track = track
-            if self.record_capture_context_audio:
-                self.import_overlay_index = 2
+        recorder.finish_record_capture(self)
 
     def _arm_record_capture(self):
-        """Start recording with selected precount and scope."""
-        track = self.record_capture_context_track
-        if track is None and self.active_tab == 1 and self.cursor_y < (TRACKS - 1):
-            track = self._track_for_row(self.cursor_y)
-        if track is None:
-            track = max(0, min(TRACKS - 2, int(self.cursor_y)))
-
-        precount_pattern = max(0, min(self.seq.pattern_count() - 1, int(self.record_precount_pattern)))
-        take_pattern = self.seq.view_pattern
-        scope = "song" if (0 <= track < (TRACKS - 1) and self.seq.audio_track_mode[track] == 1) else "pattern"
-        precount_seconds = self.seq.pattern_duration_seconds(precount_pattern)
-        take_seconds = self.seq.chain_duration_seconds() if scope == "song" else self.seq.pattern_duration_seconds(take_pattern)
-        if take_seconds <= 0.0:
-            self.status_message = "Nothing to record"
-            return
-
-        self._cancel_record_capture("")
-        if not self._start_record_capture_stream():
-            return
-        self.record_capture_active = True
-        self.record_capture_stage = "preroll"
-        self.record_capture_pattern = take_pattern
-        self.record_capture_scope = scope
-        self.record_capture_precount_seconds = max(0.0, precount_seconds)
-        self.record_capture_take_seconds = max(0.0, take_seconds)
-        self.record_capture_phase_start = time.perf_counter()
-        self.record_capture_context_track = track
-        self.record_capture_track = track
-        self.record_capture_last_step = self.seq.step
-        self.record_capture_chunks = []
-
-        if self.seq.playing:
-            self.seq.toggle_playback()
-        if self.seq.chain_enabled:
-            self.seq.toggle_chain()
-        self.seq.select_pattern(precount_pattern)
-        self.seq.step = 0
-        self.seq.next_pattern = None
-        self.seq.pending_events.clear()
-        self.seq.toggle_playback()
-        scope_text = "song" if scope == "song" else "pattern"
-        self.status_message = f"Record armed: precount pattern {precount_pattern + 1}, then {scope_text} capture"
+        recorder.arm_record_capture(self)
 
     def _try_open_chop_overlay(self, path):
         """Prepare chops from a dropped/pasted path and open chop overlay."""
@@ -1681,45 +1465,7 @@ class Controller:
             return
 
     def _tick_record_capture(self):
-        """Advance recording state machine using elapsed loop durations."""
-        if not self.record_capture_active:
-            return
-        if not self.seq.playing:
-            self._cancel_record_capture("Recording canceled (playback stopped)")
-            return
-        now = time.perf_counter()
-        elapsed = now - self.record_capture_phase_start
-        if self.record_capture_stage == "preroll":
-            if elapsed < self.record_capture_precount_seconds:
-                return
-            self.record_capture_stage = "recording"
-            self.record_capture_chunks = []
-            if self.seq.playing:
-                self.seq.toggle_playback()
-            if self.record_capture_scope == "song":
-                if not self.seq.chain_enabled:
-                    self.seq.toggle_chain()
-                self.seq.chain_pos = 0
-                if not self.seq.chain:
-                    self.seq.chain = [0]
-                self.seq.pattern = self.seq.chain[0]
-                self.seq.view_pattern = self.seq.pattern
-            else:
-                if self.seq.chain_enabled:
-                    self.seq.toggle_chain()
-                self.seq.select_pattern(self.record_capture_pattern)
-            self.seq.step = 0
-            self.seq.next_pattern = None
-            self.seq.pending_events.clear()
-            self.seq.pending_midi_off.clear()
-            self.seq.toggle_playback()
-            self.record_capture_phase_start = time.perf_counter()
-            self.status_message = "Recording..."
-            return
-        if elapsed >= self.record_capture_take_seconds:
-            if self.seq.playing:
-                self.seq.toggle_playback()
-            self._finish_record_capture()
+        recorder.tick_record_capture(self)
 
     def _close_swing_dialog(self):
         self.swing_edit_active = False
@@ -1728,6 +1474,14 @@ class Controller:
     def _close_track_rename_dialog(self):
         self.track_rename_active = False
         self.track_rename_input = ""
+
+    def _open_clear_audio_confirm(self, pattern_index, track):
+        """Open Y/N confirmation prompt for clearing an audio track sample."""
+        self.clear_audio_confirm_active = True
+        self.clear_audio_force_confirm_active = False
+        self.clear_audio_confirm_pattern = int(pattern_index)
+        self.clear_audio_confirm_track = int(track)
+        self.clear_audio_confirm_path = self.seq.get_audio_track_path(pattern_index, track)
 
     def _menu_items(self):
         """Return currently active top-menu item list."""
@@ -1865,6 +1619,39 @@ class Controller:
         if self.active_tab in [1, 2] and self.cursor_y >= (TRACKS - 1):
             self.cursor_y = TRACKS - 2
 
+        if self.clear_audio_confirm_active:
+            if key_code == 27:
+                self.clear_audio_confirm_active = False
+                self.clear_audio_force_confirm_active = False
+                self.status_message = "Clear canceled"
+                return True
+            if self.clear_audio_force_confirm_active:
+                if isinstance(key, str) and key.lower() in ["y", "n"]:
+                    if key.lower() == "y":
+                        ok, message = self.seq.force_delete_audio_path(self.clear_audio_confirm_path)
+                        self.status_message = message
+                    else:
+                        self.status_message = "Force delete canceled (file kept)"
+                    self.clear_audio_confirm_active = False
+                    self.clear_audio_force_confirm_active = False
+                    return True
+            else:
+                if isinstance(key, str) and key.lower() in ["y", "n"]:
+                    delete_file = (key.lower() == "y")
+                    ok, message, needs_force = self.seq.clear_audio_track_sample(
+                        self.clear_audio_confirm_pattern,
+                        self.clear_audio_confirm_track,
+                        delete_file=delete_file,
+                    )
+                    self.status_message = message
+                    if needs_force:
+                        self.clear_audio_force_confirm_active = True
+                    else:
+                        self.clear_audio_confirm_active = False
+                        self.clear_audio_force_confirm_active = False
+                    return True
+            return True
+
         if self.help_active:
             if key_code == 27 or self.keymap.matches("help_menu", event_tokens):
                 self.help_active = False
@@ -1880,7 +1667,7 @@ class Controller:
                     self._close_record_overlay()
                     self.status_message = "Record menu closed"
                 return True
-            row_count = 5
+            row_count = 6
             if key_code == 27:
                 self._close_record_overlay()
                 return True
@@ -1917,13 +1704,15 @@ class Controller:
                         self.record_input_source_index = (self.record_input_source_index + direction) % len(self.record_input_sources)
                     self._start_record_monitor()
                 elif self.record_overlay_index == 3:
+                    self.record_precount_enabled = not self.record_precount_enabled
+                elif self.record_overlay_index == 4:
                     count = max(1, self.seq.pattern_count())
                     self.record_precount_pattern = (self.record_precount_pattern + direction) % count
-                elif self.record_overlay_index == 4:
+                elif self.record_overlay_index == 5:
                     self.record_action_index = 0 if self.record_action_index == 1 else 1
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
-                if self.record_overlay_index == 4:
+                if self.record_overlay_index == 5:
                     if self.record_action_index == 0:
                         self._close_record_overlay()
                         self.status_message = "Record menu closed"
@@ -1940,7 +1729,7 @@ class Controller:
             return True
 
         if self.import_overlay_active:
-            max_index = 3
+            max_index = 4 if self.import_overlay_can_delete_source else 3
             if key_code == 27:
                 self._close_import_overlay()
                 self.status_message = "Import canceled"
@@ -2000,6 +1789,18 @@ class Controller:
                     )
                     self.status_message = message
                     self._close_import_overlay()
+                    return True
+                if self.import_overlay_can_delete_source and self.import_overlay_index == 4:
+                    delete_path = path
+                    self._close_import_overlay()
+                    try:
+                        if delete_path and os.path.isfile(delete_path):
+                            os.remove(delete_path)
+                            self.status_message = "Import canceled and recording deleted"
+                        else:
+                            self.status_message = "Recording file was already missing"
+                    except Exception as exc:
+                        self.status_message = f"Delete failed: {exc}"
                     return True
                 self._close_import_overlay()
                 self.status_message = "Import canceled"
@@ -3177,8 +2978,7 @@ class Controller:
                 elif self.cursor_x == PROB_COL:
                     self._open_record_overlay(target_track=track_idx, from_audio_view=True)
                 elif self.cursor_x == GROUP_COL:
-                    ok, message = self.seq.clear_audio_track_sample(self.seq.view_pattern, track_idx)
-                    self.status_message = message
+                    self._open_clear_audio_confirm(self.seq.view_pattern, track_idx)
                 elif self.cursor_x == TRACK_PITCH_COL:
                     self.track_rename_active = True
                     self.track_rename_input = ""
@@ -3328,6 +3128,14 @@ def ui_loop(stdscr, seq):
                 should_draw = True
 
         controller._tick_record_capture()
+        if (
+            controller.record_overlay_active
+            and controller.record_monitor_running
+            and not controller.record_capture_active
+            and seq.playing
+        ):
+            controller._stop_record_monitor()
+            controller.record_level_db = -60.0
 
         ui_state = (
             controller.cursor_x,
@@ -3362,6 +3170,8 @@ def ui_loop(stdscr, seq):
             controller.track_rename_active,
             controller.chain_edit_active,
             controller.swing_edit_active,
+            controller.clear_audio_confirm_active,
+            controller.clear_audio_force_confirm_active,
             controller.pattern_menu_active,
             controller.pattern_menu_kind,
             controller.pattern_menu_index,
@@ -3371,6 +3181,7 @@ def ui_loop(stdscr, seq):
             controller.import_overlay_active,
             controller.import_overlay_index,
             controller.import_overlay_path,
+            controller.import_overlay_can_delete_source,
             controller.import_target_drum_track,
             controller.import_target_audio_track,
             controller.chop_overlay_active,
@@ -3383,6 +3194,7 @@ def ui_loop(stdscr, seq):
             controller.record_overlay_index,
             controller.record_action_index,
             controller.record_channels,
+            controller.record_precount_enabled,
             controller.record_precount_pattern,
             round(controller.record_level_db, 1),
             controller.record_monitor_running,
@@ -3465,6 +3277,12 @@ def ui_loop(stdscr, seq):
                 prompt_text = f"Rename track sample (Esc cancels): {controller.track_rename_input}"
             elif controller.swing_edit_active:
                 prompt_text = f"Swing 0-10 (Esc cancels): {controller.swing_edit_input}"
+            elif controller.clear_audio_confirm_active:
+                path_name = os.path.basename(controller.clear_audio_confirm_path) if controller.clear_audio_confirm_path else "(no file)"
+                if controller.clear_audio_force_confirm_active:
+                    prompt_text = f"File used elsewhere. Force delete everywhere? Y/N (Esc cancels): {path_name}"
+                else:
+                    prompt_text = f"Delete sample file too? Y/N (Esc cancels): {path_name}"
             else:
                 prompt_text = ""
 
@@ -3482,7 +3300,7 @@ def ui_loop(stdscr, seq):
                 controller.clear_confirm,
                 controller.esc_confirm,
                 prompt_text,
-                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.kit_export_active and not controller.kit_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active else "",
+                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.kit_export_active and not controller.kit_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active and not controller.clear_audio_confirm_active else "",
                 controller.pattern_menu_active,
                 controller.pattern_menu_kind,
                 controller.pattern_menu_index,
@@ -3492,6 +3310,7 @@ def ui_loop(stdscr, seq):
                 controller.import_overlay_active,
                 controller.import_overlay_index,
                 controller.import_overlay_path,
+                controller.import_overlay_can_delete_source,
                 controller.import_target_drum_track,
                 controller.import_target_audio_track,
                 controller.chop_overlay_active,
@@ -3504,6 +3323,7 @@ def ui_loop(stdscr, seq):
                 controller.record_overlay_index,
                 controller.record_action_index,
                 controller.record_channels,
+                controller.record_precount_enabled,
                 controller.record_precount_pattern,
                 controller.record_level_db,
                 controller.record_monitor_running,

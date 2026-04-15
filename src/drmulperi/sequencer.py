@@ -46,6 +46,8 @@ class Sequencer:
         self.playing = False
         self.bpm = 120
         self.steps_per_beat = 4
+        self.transport_resync = True
+        self.transport_lock = threading.RLock()
 
         self.last_velocity = 5
         self.seq_track_pan = [5 for _ in range(TRACKS)]
@@ -834,6 +836,10 @@ class Sequencer:
         self.seq_track_trigger_until = [0.0 for _ in range(TRACKS)]
         self.audio_track_trigger_until = [0.0 for _ in range(TRACKS)]
 
+        # Start truly empty: clear currently loaded sequencer kit samples.
+        self.kit_path = ""
+        self.engine.reload_kit(self.kit_path)
+
         self.pattern_path = path
         self.pattern_name = os.path.basename(path)
         self.dirty = False
@@ -932,10 +938,72 @@ class Sequencer:
             msg = f"{msg} (SR {src_sr}->{dst_sr})"
         return True, msg
 
-    def clear_audio_track_sample(self, pattern_index, track):
-        """Clear assigned audio-track sample from one pattern/track slot."""
+    def _is_audio_path_used_elsewhere(self, path, exclude_pattern_index=None, exclude_track=None):
+        """Return True when an audio-track sample path is referenced by another audio slot."""
+        if not path:
+            return False
+        for p in range(self.pattern_count()):
+            for t in range(TRACKS - 1):
+                if p == exclude_pattern_index and t == exclude_track:
+                    continue
+                if self.audio_track_slot_sample_paths[p][t] == path:
+                    return True
+        for t in range(TRACKS - 1):
+            if exclude_pattern_index is None and t == exclude_track:
+                continue
+            if self.audio_track_free_sample_paths[t] == path:
+                return True
+        return False
+
+    def _remove_audio_path_references(self, path):
+        """Clear every audio-track reference that points to `path`."""
+        if not path:
+            return 0
+        removed = 0
+        for p in range(self.pattern_count()):
+            for t in range(TRACKS - 1):
+                if self.audio_track_slot_sample_paths[p][t] == path:
+                    self.audio_track_slot_sample_paths[p][t] = None
+                    self.audio_track_slot_sample_names[p][t] = "-"
+                    self.audio_track_slot_samples[p][t] = None
+                    self.audio_track_slot_channels[p][t] = 1
+                    self.audio_track_slot_pan[p][t] = 5
+                    self.audio_track_slot_volume[p][t] = 9
+                    removed += 1
+        for t in range(TRACKS - 1):
+            if self.audio_track_free_sample_paths[t] == path:
+                self.audio_track_free_sample_paths[t] = None
+                self.audio_track_free_sample_names[t] = "-"
+                self.audio_track_free_samples[t] = None
+                self.audio_track_free_channels[t] = 1
+                self.audio_track_free_pan[t] = 5
+                self.audio_track_free_volume[t] = 9
+                removed += 1
+        return removed
+
+    def force_delete_audio_path(self, path):
+        """Delete a sample file and remove all audio-track references to it."""
+        target = str(path or "").strip()
+        if not target:
+            return False, "No file selected for force delete"
+        removed = self._remove_audio_path_references(target)
+        self.dirty = True
+        if os.path.isfile(target):
+            try:
+                os.remove(target)
+                return True, f"Force deleted file and removed {removed} references"
+            except Exception as exc:
+                return True, f"Removed {removed} references (file delete failed: {exc})"
+        return True, f"Removed {removed} references (file already missing)"
+
+    def clear_audio_track_sample(self, pattern_index, track, delete_file=False):
+        """Clear assigned audio-track sample from one pattern/track slot.
+
+        If `delete_file` is True, the source WAV is removed from disk when safe.
+        """
         if track < 0 or track >= TRACKS - 1:
             return False, "Invalid track"
+        old_path = self.get_audio_track_path(pattern_index, track)
         if self.audio_track_mode[track] == 1:
             self.audio_track_free_sample_paths[track] = None
             self.audio_track_free_sample_names[track] = "-"
@@ -949,7 +1017,20 @@ class Sequencer:
             self.audio_track_slot_samples[pattern_index][track] = None
             self.audio_track_slot_channels[pattern_index][track] = 1
         self.dirty = True
-        return True, f"Cleared track sample on track {track + 1}"
+        if delete_file and old_path and os.path.isfile(old_path):
+            used_elsewhere = self._is_audio_path_used_elsewhere(
+                old_path,
+                exclude_pattern_index=(None if self.audio_track_mode[track] == 1 else pattern_index),
+                exclude_track=track,
+            )
+            if used_elsewhere:
+                return True, f"Cleared track sample on track {track + 1} (file kept: used elsewhere)", True
+            try:
+                os.remove(old_path)
+                return True, f"Cleared track sample on track {track + 1} (file deleted)", False
+            except Exception as exc:
+                return True, f"Cleared track sample on track {track + 1} (delete failed: {exc})", False
+        return True, f"Cleared track sample on track {track + 1}", False
 
     def preview_audio_track_file(self, path, pattern_index=None, track=None):
         """Preview any sample file with track-view pan/volume when track is provided."""
@@ -1327,92 +1408,98 @@ class Sequencer:
         next_time = time.perf_counter()
 
         while True:
-            base_step_time = (60.0 / self.bpm) / self.steps_per_beat
-            now = time.perf_counter()
+            with self.transport_lock:
+                base_step_time = (60.0 / self.bpm) / self.steps_per_beat
+                now = time.perf_counter()
+                if self.transport_resync:
+                    next_time = now
+                    self.transport_resync = False
 
-            while self.pending_events and self.pending_events[0][0] <= now:
-                _, track, vel = heapq.heappop(self.pending_events)
-                self._mark_track_trigger(track, source="seq")
-                if self.midi_out_enabled:
-                    self._trigger_midi(track, vel, 0.05)
-                else:
-                    group_id = self.seq_track_group[track] if 0 <= track < len(self.seq_track_group) else 0
-                    if group_id > 0:
-                        self.engine.choke_group(group_id, self.seq_track_group)
-                    vol = self.seq_track_volume[track] / 9.0 if 0 <= track < len(self.seq_track_volume) else 1.0
-                    self.engine.trigger(track, vel * vol, self.seq_track_pan[track], rate=self.pitch_rate(track))
+                while self.pending_events and self.pending_events[0][0] <= now:
+                    _, track, vel = heapq.heappop(self.pending_events)
+                    self._mark_track_trigger(track, source="seq")
+                    if self.midi_out_enabled:
+                        self._trigger_midi(track, vel, 0.05)
+                    else:
+                        group_id = self.seq_track_group[track] if 0 <= track < len(self.seq_track_group) else 0
+                        if group_id > 0:
+                            self.engine.choke_group(group_id, self.seq_track_group)
+                        vol = self.seq_track_volume[track] / 9.0 if 0 <= track < len(self.seq_track_volume) else 1.0
+                        self.engine.trigger(track, vel * vol, self.seq_track_pan[track], rate=self.pitch_rate(track))
 
-            while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
-                _, channel, note = heapq.heappop(self.pending_midi_off)
-                self.midi.send_note_off(channel, note)
+                while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
+                    _, channel, note = heapq.heappop(self.pending_midi_off)
+                    self.midi.send_note_off(channel, note)
 
-            if self.playing:
-                if now >= next_time:
-                    step_time = self._step_duration_for(self.pattern, self.step, base_step_time)
-                    current_length = self.pattern_length[self.pattern]
+                if self.playing:
+                    if now >= next_time:
+                        step_time = self._step_duration_for(self.pattern, self.step, base_step_time)
+                        if (now - next_time) > (step_time * 2.0):
+                            next_time = now
+                        current_length = self.pattern_length[self.pattern]
 
-                    if self.step == 0 and not self.midi_out_enabled:
-                        self._trigger_audio_tracks_for_pattern(self.pattern)
+                        if self.step == 0 and not self.midi_out_enabled:
+                            self._trigger_audio_tracks_for_pattern(self.pattern)
 
-                    accent_on = (
-                        not self.muted_rows[ACCENT_TRACK]
-                        and self.grid[self.pattern][ACCENT_TRACK][self.step] > 0
-                    )
+                        accent_on = (
+                            not self.muted_rows[ACCENT_TRACK]
+                            and self.grid[self.pattern][ACCENT_TRACK][self.step] > 0
+                        )
 
-                    for t in range(TRACKS - 1):
-                        if self.muted_rows[t]:
-                            continue
-
-                        vel = self.grid[self.pattern][t][self.step]
-
-                        if vel > 0:
-                            prob = self.seq_track_probability[t]
-                            if prob < 100 and (random.random() * 100.0) >= prob:
+                        for t in range(TRACKS - 1):
+                            if self.muted_rows[t]:
                                 continue
 
-                            v = vel / 9.0
+                            vel = self.grid[self.pattern][t][self.step]
 
-                            if accent_on:
-                                v = min(1.0, v + ACCENT_BOOST)
-                            v = max(0.0, min(1.0, v * (self.seq_track_volume[t] / 9.0)))
+                            if vel > 0:
+                                prob = self.seq_track_probability[t]
+                                if prob < 100 and (random.random() * 100.0) >= prob:
+                                    continue
 
-                            humanize = self.seq_track_humanize[t] / 100.0
-                            if humanize > 0.0:
-                                vel_jitter = 1.0 + (random.uniform(-0.3, 0.3) * humanize)
-                                v = max(0.0, min(1.0, v * vel_jitter))
+                                v = vel / 9.0
 
-                            ratchet = self.ratchet_grid[self.pattern][t][self.step]
-                            ratchet = max(1, min(4, ratchet))
-                            interval = step_time / ratchet
+                                if accent_on:
+                                    v = min(1.0, v + ACCENT_BOOST)
+                                v = max(0.0, min(1.0, v * (self.seq_track_volume[t] / 9.0)))
 
-                            for i in range(ratchet):
-                                fire_time = next_time + (i * interval)
+                                humanize = self.seq_track_humanize[t] / 100.0
                                 if humanize > 0.0:
-                                    jitter_max = min(step_time * 0.2, interval * 0.45) * humanize
-                                    fire_time += random.uniform(-jitter_max, jitter_max)
-                                heapq.heappush(self.pending_events, (fire_time, t, v))
+                                    vel_jitter = 1.0 + (random.uniform(-0.3, 0.3) * humanize)
+                                    v = max(0.0, min(1.0, v * vel_jitter))
 
-                    self.step += 1
+                                ratchet = self.ratchet_grid[self.pattern][t][self.step]
+                                ratchet = max(1, min(4, ratchet))
+                                interval = step_time / ratchet
 
-                    if self.step >= current_length:
-                        self.step = 0
-                        if self.chain_enabled and self.chain:
-                            self.chain_pos = (self.chain_pos + 1) % len(self.chain)
-                            self.pattern = self.chain[self.chain_pos]
-                            self.next_pattern = None
-                        elif self.next_pattern is not None:
-                            self.pattern = self.next_pattern
-                            self.view_pattern = self.pattern
-                            self.next_pattern = None
+                                for i in range(ratchet):
+                                    fire_time = next_time + (i * interval)
+                                    if humanize > 0.0:
+                                        jitter_max = min(step_time * 0.2, interval * 0.45) * humanize
+                                        fire_time += random.uniform(-jitter_max, jitter_max)
+                                    heapq.heappush(self.pending_events, (fire_time, t, v))
 
-                    next_time += step_time
-            else:
-                self.step = 0
-                self.pending_events.clear()
-                if self.pending_midi_off:
-                    self.midi.all_notes_off()
-                    self.pending_midi_off.clear()
-                next_time = time.perf_counter()
+                        self.step += 1
+
+                        if self.step >= current_length:
+                            self.step = 0
+                            if self.chain_enabled and self.chain:
+                                self.chain_pos = (self.chain_pos + 1) % len(self.chain)
+                                self.pattern = self.chain[self.chain_pos]
+                                self.next_pattern = None
+                            elif self.next_pattern is not None:
+                                self.pattern = self.next_pattern
+                                self.view_pattern = self.pattern
+                                self.next_pattern = None
+
+                        next_time += step_time
+                else:
+                    self.step = 0
+                    self.pending_events.clear()
+                    if self.pending_midi_off:
+                        self.midi.all_notes_off()
+                        self.pending_midi_off.clear()
+                    next_time = time.perf_counter()
 
             # ---------- AUTO SAVE (debounce) ----------
             if self.dirty and (time.time() - self.last_save_time > 1.5):
@@ -1424,33 +1511,35 @@ class Sequencer:
 
     def toggle_playback(self):
         """Start/stop playback and clear queued/pending events on stop."""
-        if not self.playing:
-            if self.chain_enabled:
-                if not self.chain:
-                    self.chain = [0]
-                self.chain_pos = 0
-                self.pattern = self.chain[0]
-                self.next_pattern = None
+        with self.transport_lock:
+            if not self.playing:
+                if self.chain_enabled:
+                    if not self.chain:
+                        self.chain = [0]
+                    self.chain_pos = 0
+                    self.pattern = self.chain[0]
+                    self.next_pattern = None
+                    self.step = 0
+                    self.pending_events.clear()
+                    self.pending_midi_off.clear()
+                else:
+                    self.pattern = self.view_pattern
+                    self.next_pattern = None
+            self.playing = not self.playing
+            self.transport_resync = True
+            if not self.playing:
                 self.step = 0
-                self.pending_events.clear()
-                self.pending_midi_off.clear()
-            else:
-                self.pattern = self.view_pattern
                 self.next_pattern = None
-        self.playing = not self.playing
-        if not self.playing:
-            self.step = 0
-            self.next_pattern = None
-            if self.chain_enabled:
-                self.chain_pos = 0
-                if not self.chain:
-                    self.chain = [0]
-                self.pattern = self.chain[0]
-            self.pending_events.clear()
-            self.engine.stop_all()
-            if self.pending_midi_off:
-                self.midi.all_notes_off()
-                self.pending_midi_off.clear()
+                if self.chain_enabled:
+                    self.chain_pos = 0
+                    if not self.chain:
+                        self.chain = [0]
+                    self.pattern = self.chain[0]
+                self.pending_events.clear()
+                self.engine.stop_all()
+                if self.pending_midi_off:
+                    self.midi.all_notes_off()
+                    self.pending_midi_off.clear()
 
     def _sync_chain_pos_to_pattern(self):
         if not self.chain:
@@ -1464,26 +1553,27 @@ class Sequencer:
 
     def toggle_chain(self):
         """Toggle chain mode and reset playback position at mode boundaries."""
-        self.chain_enabled = not self.chain_enabled
-        if self.chain_enabled:
-            if not self.chain:
-                self.chain = [0]
-            self.chain_pos = 0
-            self.pattern = self.chain[0]
+        with self.transport_lock:
+            self.chain_enabled = not self.chain_enabled
+            if self.chain_enabled:
+                if not self.chain:
+                    self.chain = [0]
+                self.chain_pos = 0
+                self.pattern = self.chain[0]
+                self.next_pattern = None
+                self.step = 0
+                self.pending_events.clear()
+                self.pending_midi_off.clear()
+                self.dirty = True
+                return True, "Song ON"
+            self.pattern = self.view_pattern
             self.next_pattern = None
             self.step = 0
             self.pending_events.clear()
             self.pending_midi_off.clear()
+            self._sync_chain_pos_to_pattern()
             self.dirty = True
-            return True, "Song ON"
-        self.pattern = self.view_pattern
-        self.next_pattern = None
-        self.step = 0
-        self.pending_events.clear()
-        self.pending_midi_off.clear()
-        self._sync_chain_pos_to_pattern()
-        self.dirty = True
-        return True, "Song OFF"
+            return True, "Song OFF"
 
     def _set_midi_out_enabled(self, enabled):
         if enabled == self.midi_out_enabled and not (enabled and self.midi.port is None):
@@ -1554,7 +1644,8 @@ class Sequencer:
             if vol <= 0.0:
                 continue
             self._mark_track_trigger(t, source="audio")
-            self.engine.trigger_buffer(sample, vol, pan, rate=self.pitch_rate())
+            # Replace previous voice on this audio lane to keep long loops stable.
+            self.engine.trigger_buffer(sample, vol, pan, rate=self.pitch_rate(), track=100 + t, replace=True)
 
     def _mark_track_trigger(self, track, source="seq"):
         """Mark a track flash indicator for seq/audio lanes independently."""
@@ -1567,47 +1658,48 @@ class Sequencer:
 
     def set_chain_from_text(self, text):
         """Parse text chain input (e.g. `1 2 3 2`) and store it."""
-        src = text.strip()
-        if not src:
-            return False, "Song canceled"
+        with self.transport_lock:
+            src = text.strip()
+            if not src:
+                return False, "Song canceled"
 
-        values = []
-        max_patterns = self.pattern_count()
-        src_norm = src.replace(">", " ").replace("-", " ").replace(",", " ")
-        parts = [p for p in src_norm.split() if p]
-        if not parts:
-            # Back-compat compact format like "1232"
-            parts = list(src)
-        for part in parts:
-            if not part.isdigit():
-                return False, f"Invalid chain (use pattern numbers 1-{max_patterns})"
-            n = int(part)
-            if n < 1 or n > max_patterns:
-                return False, f"Invalid chain (pattern range 1-{max_patterns})"
-            values.append(n - 1)
+            values = []
+            max_patterns = self.pattern_count()
+            src_norm = src.replace(">", " ").replace("-", " ").replace(",", " ")
+            parts = [p for p in src_norm.split() if p]
+            if not parts:
+                # Back-compat compact format like "1232"
+                parts = list(src)
+            for part in parts:
+                if not part.isdigit():
+                    return False, f"Invalid chain (use pattern numbers 1-{max_patterns})"
+                n = int(part)
+                if n < 1 or n > max_patterns:
+                    return False, f"Invalid chain (pattern range 1-{max_patterns})"
+                values.append(n - 1)
 
-        if not values:
-            return False, "Invalid chain (empty)"
+            if not values:
+                return False, "Invalid chain (empty)"
 
-        if len(values) > CHAIN_MAX_STEPS:
-            values = values[:CHAIN_MAX_STEPS]
-            clipped = True
-        else:
-            clipped = False
+            if len(values) > CHAIN_MAX_STEPS:
+                values = values[:CHAIN_MAX_STEPS]
+                clipped = True
+            else:
+                clipped = False
 
-        self.chain = values
-        self.chain_enabled = True
-        # Always restart chain from first slot when user sets a new sequence.
-        self.chain_pos = 0
-        self.pattern = self.chain[0]
-        self.next_pattern = None
-        self.step = 0
-        self.pending_events.clear()
-        self.pending_midi_off.clear()
-        self.dirty = True
-        if clipped:
-            return True, f"Song set (max {CHAIN_MAX_STEPS} steps)"
-        return True, "Song set"
+            self.chain = values
+            self.chain_enabled = True
+            # Always restart chain from first slot when user sets a new sequence.
+            self.chain_pos = 0
+            self.pattern = self.chain[0]
+            self.next_pattern = None
+            self.step = 0
+            self.pending_events.clear()
+            self.pending_midi_off.clear()
+            self.dirty = True
+            if clipped:
+                return True, f"Song set (max {CHAIN_MAX_STEPS} steps)"
+            return True, "Song set"
 
     def chain_display(self):
         if not self.chain_enabled:
@@ -1903,22 +1995,23 @@ class Sequencer:
 
     def select_pattern(self, pattern_index):
         """Select/queue pattern depending on chain/playback mode."""
-        if self.pattern_count() <= 0:
-            return
-        pattern_index = max(0, min(self.pattern_count() - 1, int(pattern_index)))
-        prev_pattern = self.pattern
-        prev_view = self.view_pattern
-        prev_next = self.next_pattern
-        if self.chain_enabled:
-            self.view_pattern = pattern_index
-        elif self.playing:
-            self.next_pattern = pattern_index
-        else:
-            self.pattern = pattern_index
-            self.view_pattern = pattern_index
-            self._sync_chain_pos_to_pattern()
-        if self.pattern != prev_pattern or self.view_pattern != prev_view or self.next_pattern != prev_next:
-            self.dirty = True
+        with self.transport_lock:
+            if self.pattern_count() <= 0:
+                return
+            pattern_index = max(0, min(self.pattern_count() - 1, int(pattern_index)))
+            prev_pattern = self.pattern
+            prev_view = self.view_pattern
+            prev_next = self.next_pattern
+            if self.chain_enabled:
+                self.view_pattern = pattern_index
+            elif self.playing:
+                self.next_pattern = pattern_index
+            else:
+                self.pattern = pattern_index
+                self.view_pattern = pattern_index
+                self._sync_chain_pos_to_pattern()
+            if self.pattern != prev_pattern or self.view_pattern != prev_view or self.next_pattern != prev_next:
+                self.dirty = True
 
     def toggle_mute_row(self, track):
         self.muted_rows[track] = not self.muted_rows[track]

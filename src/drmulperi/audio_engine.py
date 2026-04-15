@@ -88,7 +88,7 @@ class MidiOut:
 # ---------- AUDIO ENGINE ----------
 class AudioEngine:
     """Real-time sample engine: buffering trigger events and rendering stereo audio."""
-    def __init__(self, kit_path, samplerate=44100, blocksize=512):
+    def __init__(self, kit_path, samplerate=44100, blocksize=1024):
         self.sr = samplerate
         self.blocksize = blocksize
         self.kit_path = kit_path
@@ -197,18 +197,17 @@ class AudioEngine:
         else:
             mono = data
 
+        mono = np.asarray(mono, dtype=np.float32)
+        if mono.size <= 1:
+            return False, "Preview failed: sample is empty"
+        if int(sr) > 0 and int(sr) != int(self.sr):
+            ratio = float(self.sr) / float(sr)
+            out_len = max(1, int(round(mono.size * ratio)))
+            src_idx = np.arange(mono.size, dtype=np.float32)
+            dst_idx = np.linspace(0.0, float(mono.size - 1), num=out_len, dtype=np.float32)
+            mono = np.interp(dst_idx, src_idx, mono).astype(np.float32)
         velocity = max(0.0, min(1.0, float(velocity)))
-        pan_pos = (max(1, min(9, int(pan))) - 1) / 8.0
-        left_gain = float(np.cos(pan_pos * (np.pi / 2)))
-        right_gain = float(np.sin(pan_pos * (np.pi / 2)))
-        stereo = np.zeros((len(mono), 2), dtype=np.float32)
-        stereo[:, 0] = mono * velocity * left_gain
-        stereo[:, 1] = mono * velocity * right_gain
-
-        try:
-            sd.play(stereo, sr, blocking=False)
-        except Exception as exc:
-            return False, f"Preview failed: {exc}"
+        self.trigger_buffer(mono, velocity, pan, rate=1.0)
         return True, f"Preview: {os.path.basename(path)}"
 
     def preview_mono_buffer(self, mono, sr, velocity=1.0, pan=5, name="preview"):
@@ -218,18 +217,14 @@ class AudioEngine:
         mono = np.asarray(mono, dtype=np.float32)
         if mono.size <= 1:
             return False, "Nothing to preview"
-
+        if int(sr) > 0 and int(sr) != int(self.sr):
+            ratio = float(self.sr) / float(sr)
+            out_len = max(1, int(round(mono.size * ratio)))
+            src_idx = np.arange(mono.size, dtype=np.float32)
+            dst_idx = np.linspace(0.0, float(mono.size - 1), num=out_len, dtype=np.float32)
+            mono = np.interp(dst_idx, src_idx, mono).astype(np.float32)
         velocity = max(0.0, min(1.0, float(velocity)))
-        pan_pos = (max(1, min(9, int(pan))) - 1) / 8.0
-        left_gain = float(np.cos(pan_pos * (np.pi / 2)))
-        right_gain = float(np.sin(pan_pos * (np.pi / 2)))
-        stereo = np.zeros((len(mono), 2), dtype=np.float32)
-        stereo[:, 0] = mono * velocity * left_gain
-        stereo[:, 1] = mono * velocity * right_gain
-        try:
-            sd.play(stereo, int(sr), blocking=False)
-        except Exception as exc:
-            return False, f"Preview failed: {exc}"
+        self.trigger_buffer(mono, velocity, pan, rate=1.0)
         return True, f"Preview: {name}"
 
     def load_single_sample(self, track, path):
@@ -296,15 +291,19 @@ class AudioEngine:
         self.event_buffer[idx] = ("slot", track, velocity, left_gain, right_gain, float(rate))
         self.event_write += 1
 
-    def trigger_buffer(self, sample, velocity, pan, rate=1.0):
-        """Queue an arbitrary mono sample buffer trigger event."""
+    def trigger_buffer(self, sample, velocity, pan, rate=1.0, track=-1, replace=False):
+        """Queue an arbitrary mono sample buffer trigger event.
+
+        Optional `track` tagging allows replacing currently active voices on that
+        logical lane when `replace=True` (useful for long-loop tracks).
+        """
         if sample is None:
             return
         pan_pos = (pan - 1) / 8.0
         left_gain = float(np.cos(pan_pos * (np.pi / 2)))
         right_gain = float(np.sin(pan_pos * (np.pi / 2)))
         idx = self.event_write % len(self.event_buffer)
-        self.event_buffer[idx] = ("buf", sample, velocity, left_gain, right_gain, float(rate))
+        self.event_buffer[idx] = ("buf", sample, velocity, left_gain, right_gain, float(rate), int(track), bool(replace))
         self.event_write += 1
 
     def audio_callback(self, outdata, frames, time_info, status):
@@ -319,8 +318,12 @@ class AudioEngine:
             if event:
                 kind = event[0] if isinstance(event, tuple) and len(event) > 0 else "slot"
                 if kind == "buf":
-                    _, sample, vel, pan_l, pan_r, rate = event
-                    track = -1
+                    _, sample, vel, pan_l, pan_r, rate, track, replace = event
+                    if replace and track >= 0:
+                        for v in self.voices:
+                            if v.active and v.track == track:
+                                v.active = False
+                                v.track = -1
                 else:
                     _, track, vel, pan_l, pan_r, rate = event
                     sample = self.samples[track]
