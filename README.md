@@ -1,6 +1,6 @@
 # DR. MULPERI
 
-Terminal step sequencer built with Python + `curses`.
+AI-assisted terminal groovebox / step sequencer built with Python + `curses`.
 
 ## Disclaimer
 
@@ -9,220 +9,183 @@ This program was created with help from AI tools.
 ## Requirements
 
 - Python 3.10+ (tested with 3.13)
-- Audio output device working on your system
+- Working audio output device
 - `pip`
 
-## Dependency Purpose
+Optional:
 
-- `numpy`: fast array math for audio buffers and mixing.
-- `scipy` (`scipy.io.wavfile`): reads `.wav` sample files.
-- `sounddevice`: real-time audio output stream (plays the sequencer audio).
-- `mido` (optional): MIDI message API used for MIDI OUT mode.
-- `python-rtmidi` (optional): backend driver used by `mido` to access system MIDI ports.
-- `curses` (Python stdlib): terminal UI drawing and keyboard input.
+- `mido` + `python-rtmidi` for MIDI OUT
+- `portaudio` system library (if `sounddevice` install needs it)
 
-Optional (helps if `sounddevice` build/install fails):
+## Dependencies
 
-- macOS: `brew install portaudio`
-- MIDI out (optional): `pip install mido python-rtmidi`
+- `numpy`: audio buffer math and signal handling
+- `scipy` (`scipy.io.wavfile`): WAV read/write
+- `sounddevice`: real-time audio I/O
+- `mido` (optional): MIDI API
+- `python-rtmidi` (optional): MIDI backend for `mido`
+- `curses` (stdlib): terminal UI rendering and keyboard input
 
-## Quick Start
-
-1. Create local virtual environment:
+## Setup
 
 ```bash
 python3 -m venv .venv
-```
-
-2. Activate virtual environment:
-
-- macOS/Linux:
-
-```bash
 source .venv/bin/activate
-```
-
-- Windows (PowerShell):
-
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-3. Install dependencies:
-
-Minimal install (audio sequencer only):
-
-```bash
 pip install numpy scipy sounddevice
+# optional MIDI support:
+# pip install mido python-rtmidi
 ```
 
-With MIDI OUT support:
-
-```bash
-pip install numpy scipy sounddevice mido python-rtmidi
-```
-
-4. Run:
-
-```bash
-PYTHONPATH=src python -m drmulperi
-```
-
-Quick start with bundled example kit:
-
-```bash
-PYTHONPATH=src python -m drmulperi --kit examplekit --pattern examplekit/patterns.json
-```
-
-Compatibility launcher (still works):
-
-```bash
-python3 main.py --kit examplekit --pattern examplekit/patterns.json
-```
-
-## Run With Kit/Pattern
+## Run
 
 ```bash
 PYTHONPATH=src python -m drmulperi --pattern patterns
 ```
 
-- `--kit`: folder containing `.wav` samples (first 8 alphabetical files are used)
-- `--pattern`: pattern bank JSON name/path (`.json` is added automatically if missing)
+Example project:
 
-## Project Layout
+```bash
+PYTHONPATH=src python -m drmulperi --pattern examplekit/patterns.json
+```
 
-- Source package: `src/drmulperi/`
-- Compatibility launcher: `main.py`
+Compatibility launcher:
 
-## Project Data
+```bash
+python3 main.py --pattern examplekit/patterns.json
+```
 
-Pattern bank JSON stores:
+## Top Bar
 
-- BPM
-- active/visible pattern (`pattern`, `view_pattern`)
-- dynamic patterns (`grid`, `pattern_count`)
-- ratchets (`ratchet_grid`)
-- per-track pan (`track_pan`, accent row fixed center)
-- per-track humanize/probability/group (`track_humanize`, `track_probability`, `track_group`)
-- per-pattern length (`pattern_length`)
-- per-pattern swing (`pattern_swing`) stored as `0..10`
-- per-pattern Tracks-view lanes (`audio_track_pan`, `audio_track_volume`, `audio_track_sample_paths`, `audio_track_sample_names`)
-- chain mode + chain sequence (`chain_enabled`, `chain`)
-- MIDI out state (`midi_out_enabled`)
-- global pitch transpose in semitones (`pitch_semitones`)
+Top bar is navigable and contains:
 
-## Core Controls
+- `FILE`
+- `PATTERN`
+- `SEQUENCER`
+- `SONG`
+- `RECORD`
+- `BPM`
+- `LEN`
+- `SW`
+- `PITCH`
+- `VELOCITY` / `RATCHET`
+- `MIDI OUT`
+- `HELP`
+
+Menus open anchored from their button (desktop-style dropdowns).
+
+## Main Hotkeys
 
 - `Space`: play/stop
-- Arrow keys: move cursor
-- `Up` from top row enters header/tabs focus (`Sequencer`, `Tracks`, `Mixer`)
-- `Tab` / `Shift+Tab`: jump next/previous edit column group
-- `0..9`: set velocity in step cells (`0` clears step, `1..9` sets velocity)
-- `Enter`: toggle step on/off (or reset pan to center when cursor is on pan column)
-- `P`: preview current track sample
-- `M`: mute/unmute current row
+- `F1` / `F2` / `F3`: switch tabs (`Sequencer`, `Audio`, `Mixer`)
+- `F`: open/close File menu
+- `P`: open/close Pattern menu
+- `S`: open/close Sequencer menu
+- `R`: open/close Record menu
 - `Q`: open/close Patterns overlay
-- `W` / `E`: previous/next pattern quickly
-- `Enter` on `▶` column: preview current track sample
-- `Enter` on `↓` column: open sample browser and load one `.wav` into current track
-- In Tracks view, `Enter` on `●` opens Record Input overlay (select input device + live dBFS level bar)
+- `W` / `E`: previous/next pattern
+- `M`: mute sequencer row (Sequencer view)
+- `H`: help overlay
 
-## Modes And Editing
+## Menus
 
-- `mode_toggle` (default `T`): toggle velocity/ratchet mode
-- Ratchet mode: `1..4` sets ratchet count for selected step
-- Quick ratchet shortcuts: `Shift+1..4` (plus layout fallbacks) and `F1..F4`
-- Right-side parameter columns after 16 steps: preview (`▶`), sample load (`↓`), pan (`P1..P9`), humanize (`H0..H100`), probability (`%0..%100`), mute group (`0..9`), track pitch (`0..24`)
-- Humanize and probability can be edited directly by typing digits in their cells (no Enter required)
-- Track pitch column uses `0..24` where `12` is no shift (`-12..+12` semitone mapping)
+### File
+
+- New project
+- Load project
+- Save project (pack folder: samples + JSON)
+- Export (audio export overlay)
+
+### Pattern
+
+- Patterns overlay
+- Clear pattern
+- Copy pattern
+- Paste pattern
+
+Pattern copy/paste includes:
+
+- step grid
+- ratchets
+- length
+- swing
+- per-pattern audio track data for that pattern
+
+### Sequencer
+
+- Save kit (kit export options + output folder)
+- Load kit
 
 ## Views
 
-- `Sequencer`: step grid + drum sequencing workflow
-- `Tracks`: 8 per-pattern audio lanes with columns `Preview`, `Load`, `Pan`, `Volume`, `Record`; sample name shown in row area
-- `Mixer`: placeholder tab (UI shell only for now)
+### Sequencer
 
-## Patterns Overlay
+Classic 16-step sequencer with per-track parameters.
 
-- Open with `Q` (or header `PATTERNS` button + Enter)
-- `Enter`: select/queue highlighted pattern
-- `Space`: play/stop transport (starts from selected pattern if stopped)
-- `A`: add new empty pattern
-- `D`: duplicate current view pattern into a new one
-- `X`: delete selected pattern (double-press confirm required)
-- Rows show `EMPTY`, `LEN`, `SW`, and `HITS` summary
+### Audio
 
-## Import Chops From Dropped WAV
+Audio tracks with mode toggle (`Pattern` / `Song`) and columns for preview/load/pan/volume/record/clear/rename.
 
-- Drag a `.wav` file path into terminal (or paste an absolute path starting with `/` or `~`)
-- App opens `IMPORT CHOPS` overlay with 8 candidate slices
-- In `IMPORT CHOPS` overlay:
-  - `Up/Down`: move selection
-  - `Space`: preview selected chop
-  - `Enter` on `[ Use Samples ]`: replace current kit with chopped samples
-  - `Enter` on `[ Cancel ]` or `Esc`: cancel
-- Accepted chops are saved into `generated_kits/<name>_chop_<timestamp>/` and loaded as active kit
+Ownership transfer behavior when toggling mode:
 
-## Load/Save Dialogs
+- Pattern -> Song: moves current viewed pattern's audio into song ownership
+- Song -> Pattern: moves song audio into current viewed pattern ownership
 
-- `pattern_export` (default `X`): save pattern bank to filename
-- `pattern_load` (default `L`): open pattern bank browser overlay (`.json`)
-- `kit_load` (default `K`): open kit folder browser overlay
-- Browser navigation: `Up/Down` select, `Enter` open/select, `Left/Right` or `Backspace` go up/down folders
-- Sample browser: `Space` previews highlighted `.wav`
-- `Esc` cancels any open dialog
-- Filename prompts auto-add `.json` if omitted
-- Pattern menu includes `Save Pack`: creates a folder with `pattern_bank.json` and current track samples
-- Pattern menu includes `Toggle MIDI OUT` (tracks 1-8 send note triggers on channels 1-8)
-- Pattern menu includes `Export Pattern Audio`: renders current pattern to a `.wav` file
-- When MIDI OUT is enabled, internal sample playback is muted
+### Mixer
 
-## Chain
+Horizontal mixer page:
 
-- `chain_toggle` (default `G`): toggle chain mode on/off
-- `chain_edit` (default `C`): edit chain sequence (max 16 steps, values `1..4`)
-- Example inputs: `1 2 3 2`, `1,2,3,2`, `1232`
-- Chain status is shown in header as `CHAIN:...`
+- left section: Sequencer tracks (`Pan`, `Vol`)
+- right section: Audio tracks (`Pan`, `Vol`)
 
-## Pattern Length
+Edit by typing numeric values directly.
 
-- Per-pattern length is supported (`1..16`)
-- Out-of-range steps are visually dimmed
-- Length controls:
-  - `pattern_length_dec` (default `[`)
-  - `pattern_length_inc` (default `]`)
+## Recording
 
-## Header Focus
+Record overlay (top `RECORD` or `R`) uses selection-style rows:
 
-- From grid top row, press `Up` to enter header focus.
-- In header focus, `Tab` / `Shift+Tab` cycles parameters: `PATTERN BANK`, `KIT`, `BPM`, `LEN`, `SW`, `PITCH`.
-- `Enter` on `PATTERN BANK`/`KIT` opens their browser dialogs.
-- `Left/Right` adjusts numeric header params (`BPM`, `LEN`, `SW`, `PITCH`).
-- `Down` returns from header focus to the grid.
+- Channels (`Mono` / `Stereo`)
+- Input Device
+- Input Source (e.g. `In 1`, `In 2`, `In 1/2`, ...)
+- Precount pattern
+- Action row (`Cancel` / `Record` or `Stop`)
+
+Behavior:
+
+- Recording starts without closing overlay
+- Top bar `RECORD` label changes to `STOP` while capture is active
+- Borders turn red during active recording
+- After recording finishes, Import Audio overlay opens automatically for routing
+- If target track is `Song` mode, recording captures one full song-chain pass
+
+## Import Overlay
+
+Import options for any recorded/dropped WAV:
+
+- Chop audio to 8 drum tracks
+- Import to single drum track
+- Import to audio track
+
+Audio-track import row shows context:
+
+- `(Song)` for song-owned track
+- `(Pattern N)` for pattern-owned track
+
+## Project Data
+
+Project JSON stores (high level):
+
+- sequencer grid / ratchets / BPM / swing / length
+- current and view pattern indexes
+- chain data + song mode
+- global pitch and MIDI state
+- sequencer per-track params (`track_pan`, `track_volume`, etc.)
+- embedded sequencer sample paths (`seq_samples`) resolved relative to project JSON
+- audio track data under `audio_tracks`
+
+Save project writes `<project_folder_name>_data.json` inside the saved folder.
 
 ## Keymap
 
-On first run, `keymap.ini` is created in project root.
+`keymap.ini` is loaded once at startup.
 
-You can customize these keys there:
-
-- `help_menu`
-- `pattern_menu`
-- `mode_toggle`
-- `clear_pattern`
-- `mute_row`
-- `tempo_inc`
-- `tempo_dec`
-- `chain_toggle`
-- `chain_edit`
-- `pattern_length_dec`
-- `pattern_length_inc`
-- `pattern_export`
-- `pattern_load`
-- `kit_load`
-- `pattern_1`
-- `pattern_2`
-- `pattern_3`
-- `pattern_4`
-
-`keymap.ini` is loaded once at app start, so restart the app after editing it.
+You can customize bindings there (restart app after editing).

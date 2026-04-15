@@ -49,6 +49,7 @@ class Sequencer:
 
         self.last_velocity = 5
         self.seq_track_pan = [5 for _ in range(TRACKS)]
+        self.seq_track_volume = [9 for _ in range(TRACKS)]
         self.seq_track_humanize = [0 for _ in range(TRACKS)]
         self.seq_track_probability = [100 for _ in range(TRACKS)]
         self.seq_track_group = [0 for _ in range(TRACKS)]
@@ -381,6 +382,7 @@ class Sequencer:
                 "sample_names": seq_sample_names,
             },
             "track_pan": self.seq_track_pan,
+            "track_volume": self.seq_track_volume,
             "track_humanize": self.seq_track_humanize,
             "track_probability": self.seq_track_probability,
             "track_group": self.seq_track_group,
@@ -462,6 +464,17 @@ class Sequencer:
                     normalized_pan[i] = 5
         normalized_pan[ACCENT_TRACK] = 5
         self.seq_track_pan = normalized_pan
+
+        loaded_vol = data.get("track_volume", self.seq_track_volume)
+        normalized_vol = [9 for _ in range(TRACKS)]
+        if isinstance(loaded_vol, list):
+            for i in range(min(TRACKS, len(loaded_vol))):
+                try:
+                    normalized_vol[i] = max(0, min(9, int(loaded_vol[i])))
+                except (ValueError, TypeError):
+                    normalized_vol[i] = 9
+        normalized_vol[ACCENT_TRACK] = 9
+        self.seq_track_volume = normalized_vol
 
         loaded_humanize = data.get("track_humanize", self.seq_track_humanize)
         normalized_humanize = [0 for _ in range(TRACKS)]
@@ -794,6 +807,7 @@ class Sequencer:
         self.bpm = 120
         self.last_velocity = 5
         self.seq_track_pan = [5 for _ in range(TRACKS)]
+        self.seq_track_volume = [9 for _ in range(TRACKS)]
         self.seq_track_humanize = [0 for _ in range(TRACKS)]
         self.seq_track_probability = [100 for _ in range(TRACKS)]
         self.seq_track_group = [0 for _ in range(TRACKS)]
@@ -1041,7 +1055,9 @@ class Sequencer:
             except Exception:
                 continue
 
-        pattern_path = os.path.join(pack_dir, "pattern_bank.json")
+        pack_name = os.path.basename(os.path.normpath(pack_dir)) or "project"
+        pattern_filename = f"{pack_name}_data.json"
+        pattern_path = os.path.join(pack_dir, pattern_filename)
         pack_data = self._serialize(base_dir=pack_dir)
         # Rewrite embedded sequencer sample paths to local copied kit sample files.
         if "seq_samples" in pack_data and isinstance(pack_data["seq_samples"], dict):
@@ -1078,7 +1094,7 @@ class Sequencer:
         except Exception as exc:
             return False, f"Pattern save failed: {exc}"
 
-        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 kit + {track_audio_count} track samples + pattern_bank.json)"
+        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 kit + {track_audio_count} track samples + {pattern_filename})"
 
     def export_current_kit(self, foldername, options=None):
         """Export current sequencer kit samples into a folder with format options."""
@@ -1238,6 +1254,7 @@ class Sequencer:
                 v = vel / 9.0
                 if accent_on:
                     v = min(1.0, v + ACCENT_BOOST)
+                v = max(0.0, min(1.0, v * (self.seq_track_volume[t] / 9.0)))
 
                 pan_pos = (self.seq_track_pan[t] - 1) / 8.0
                 pan_l = float(np.cos(pan_pos * (np.pi / 2)))
@@ -1322,7 +1339,8 @@ class Sequencer:
                     group_id = self.seq_track_group[track] if 0 <= track < len(self.seq_track_group) else 0
                     if group_id > 0:
                         self.engine.choke_group(group_id, self.seq_track_group)
-                    self.engine.trigger(track, vel, self.seq_track_pan[track], rate=self.pitch_rate(track))
+                    vol = self.seq_track_volume[track] / 9.0 if 0 <= track < len(self.seq_track_volume) else 1.0
+                    self.engine.trigger(track, vel * vol, self.seq_track_pan[track], rate=self.pitch_rate(track))
 
             while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
                 _, channel, note = heapq.heappop(self.pending_midi_off)
@@ -1356,6 +1374,7 @@ class Sequencer:
 
                             if accent_on:
                                 v = min(1.0, v + ACCENT_BOOST)
+                            v = max(0.0, min(1.0, v * (self.seq_track_volume[t] / 9.0)))
 
                             humanize = self.seq_track_humanize[t] / 100.0
                             if humanize > 0.0:
@@ -1624,6 +1643,28 @@ class Sequencer:
         odd_duration = pair_total - even_duration
         return even_duration if (step_index % 2 == 0) else odd_duration
 
+    def pattern_duration_seconds(self, pattern_index):
+        """Return one loop duration in seconds for a pattern index."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return 0.0
+        base_step_time = (60.0 / self.bpm) / self.steps_per_beat
+        total = 0.0
+        length = self.pattern_length[pattern_index]
+        for s in range(length):
+            total += self._step_duration_for(pattern_index, s, base_step_time)
+        return max(0.0, total)
+
+    def chain_duration_seconds(self):
+        """Return one full song-chain duration in seconds."""
+        if not self.chain:
+            return self.pattern_duration_seconds(self.pattern)
+        total = 0.0
+        max_idx = max(0, self.pattern_count() - 1)
+        for p in self.chain:
+            idx = max(0, min(max_idx, int(p)))
+            total += self.pattern_duration_seconds(idx)
+        return max(0.0, total)
+
     def current_pattern_swing_ui(self):
         """Return user-facing swing value in 0..10 scale."""
         internal = self.pattern_swing[self.view_pattern]
@@ -1799,11 +1840,23 @@ class Sequencer:
 
     def copy_current_pattern(self):
         """Copy viewed pattern into internal clipboard."""
+        slot_samples = []
+        for sample in self.audio_track_slot_samples[self.view_pattern]:
+            if sample is None:
+                slot_samples.append(None)
+            else:
+                slot_samples.append(np.copy(sample))
         self.pattern_clipboard = {
             "grid": [row[:] for row in self.grid[self.view_pattern]],
             "ratchet_grid": [row[:] for row in self.ratchet_grid[self.view_pattern]],
             "length": self.pattern_length[self.view_pattern],
             "swing": self.pattern_swing[self.view_pattern],
+            "audio_slot_pan": self.audio_track_slot_pan[self.view_pattern][:],
+            "audio_slot_volume": self.audio_track_slot_volume[self.view_pattern][:],
+            "audio_slot_sample_paths": self.audio_track_slot_sample_paths[self.view_pattern][:],
+            "audio_slot_sample_names": self.audio_track_slot_sample_names[self.view_pattern][:],
+            "audio_slot_samples": slot_samples,
+            "audio_slot_channels": self.audio_track_slot_channels[self.view_pattern][:],
         }
         return True, f"Copied pattern {self.view_pattern + 1}"
 
@@ -1816,6 +1869,21 @@ class Sequencer:
         self.ratchet_grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["ratchet_grid"]]
         self.pattern_length[self.view_pattern] = max(1, min(STEPS, int(self.pattern_clipboard["length"])))
         self.pattern_swing[self.view_pattern] = max(50, min(75, int(self.pattern_clipboard.get("swing", 50))))
+        if "audio_slot_pan" in self.pattern_clipboard:
+            self.audio_track_slot_pan[self.view_pattern] = self.pattern_clipboard["audio_slot_pan"][:]
+        if "audio_slot_volume" in self.pattern_clipboard:
+            self.audio_track_slot_volume[self.view_pattern] = self.pattern_clipboard["audio_slot_volume"][:]
+        if "audio_slot_sample_paths" in self.pattern_clipboard:
+            self.audio_track_slot_sample_paths[self.view_pattern] = self.pattern_clipboard["audio_slot_sample_paths"][:]
+        if "audio_slot_sample_names" in self.pattern_clipboard:
+            self.audio_track_slot_sample_names[self.view_pattern] = self.pattern_clipboard["audio_slot_sample_names"][:]
+        if "audio_slot_samples" in self.pattern_clipboard:
+            restored = []
+            for sample in self.pattern_clipboard["audio_slot_samples"]:
+                restored.append(None if sample is None else np.copy(sample))
+            self.audio_track_slot_samples[self.view_pattern] = restored
+        if "audio_slot_channels" in self.pattern_clipboard:
+            self.audio_track_slot_channels[self.view_pattern] = self.pattern_clipboard["audio_slot_channels"][:]
         self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
 
         if self.step >= self.pattern_length[self.view_pattern]:
@@ -1861,6 +1929,13 @@ class Sequencer:
         self.seq_track_pan[track] = max(1, min(9, pan))
         self.dirty = True
 
+    def set_track_volume(self, track, volume):
+        """Set sequencer track volume (0..9)."""
+        if track == ACCENT_TRACK:
+            return
+        self.seq_track_volume[track] = max(0, min(9, int(volume)))
+        self.dirty = True
+
     def set_audio_track_pan(self, pattern_index, track, pan):
         """Set pan (1..9) for one track-view lane."""
         if track < 0 or track >= TRACKS - 1:
@@ -1895,23 +1970,51 @@ class Sequencer:
         """Toggle one tracks-view lane between Pattern and Song modes."""
         if track < 0 or track >= TRACKS - 1:
             return False, "Invalid track"
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            pattern_index = max(0, min(self.pattern_count() - 1, int(pattern_index)))
         current = self.audio_track_mode[track]
         next_mode = 0 if current == 1 else 1
-        self.audio_track_mode[track] = next_mode
+
+        # Ownership transfer rule:
+        # - pattern -> song: take current viewed pattern payload as song payload
+        # - song -> pattern: take current song payload and write it to viewed pattern
+        # This makes the toggle target the explicit owner context.
         if next_mode == 1:
-            if (
-                0 <= pattern_index < self.pattern_count()
-                and self.audio_track_free_samples[track] is None
-                and self.audio_track_slot_samples[pattern_index][track] is not None
-            ):
-                self.audio_track_free_samples[track] = self.audio_track_slot_samples[pattern_index][track]
-                self.audio_track_free_sample_paths[track] = self.audio_track_slot_sample_paths[pattern_index][track]
-                self.audio_track_free_sample_names[track] = self.audio_track_slot_sample_names[pattern_index][track]
-                self.audio_track_free_pan[track] = self.audio_track_slot_pan[pattern_index][track]
-                self.audio_track_free_volume[track] = self.audio_track_slot_volume[pattern_index][track]
-                self.audio_track_free_channels[track] = self.audio_track_slot_channels[pattern_index][track]
+            # Move ownership from current pattern slot into song payload.
+            self.audio_track_free_samples[track] = self.audio_track_slot_samples[pattern_index][track]
+            self.audio_track_free_sample_paths[track] = self.audio_track_slot_sample_paths[pattern_index][track]
+            self.audio_track_free_sample_names[track] = self.audio_track_slot_sample_names[pattern_index][track]
+            self.audio_track_free_pan[track] = self.audio_track_slot_pan[pattern_index][track]
+            self.audio_track_free_volume[track] = self.audio_track_slot_volume[pattern_index][track]
+            self.audio_track_free_channels[track] = self.audio_track_slot_channels[pattern_index][track]
+            # Clear source pattern slot so this is a true move, not copy.
+            self.audio_track_slot_samples[pattern_index][track] = None
+            self.audio_track_slot_sample_paths[pattern_index][track] = None
+            self.audio_track_slot_sample_names[pattern_index][track] = "-"
+            self.audio_track_slot_pan[pattern_index][track] = 5
+            self.audio_track_slot_volume[pattern_index][track] = 9
+            self.audio_track_slot_channels[pattern_index][track] = 1
+        else:
+            # Move ownership from song payload into current pattern slot.
+            self.audio_track_slot_samples[pattern_index][track] = self.audio_track_free_samples[track]
+            self.audio_track_slot_sample_paths[pattern_index][track] = self.audio_track_free_sample_paths[track]
+            self.audio_track_slot_sample_names[pattern_index][track] = self.audio_track_free_sample_names[track]
+            self.audio_track_slot_pan[pattern_index][track] = self.audio_track_free_pan[track]
+            self.audio_track_slot_volume[pattern_index][track] = self.audio_track_free_volume[track]
+            self.audio_track_slot_channels[pattern_index][track] = self.audio_track_free_channels[track]
+            # Clear song payload after moving back to pattern ownership.
+            self.audio_track_free_samples[track] = None
+            self.audio_track_free_sample_paths[track] = None
+            self.audio_track_free_sample_names[track] = "-"
+            self.audio_track_free_pan[track] = 5
+            self.audio_track_free_volume[track] = 9
+            self.audio_track_free_channels[track] = 1
+
+        self.audio_track_mode[track] = next_mode
         self.dirty = True
-        return True, f"Track {track + 1} mode: {'Song' if next_mode == 1 else 'Pattern'}"
+        if next_mode == 1:
+            return True, f"Track {track + 1} mode: Song (from Pattern {pattern_index + 1})"
+        return True, f"Track {track + 1} mode: Pattern {pattern_index + 1}"
 
     def get_audio_track_name(self, pattern_index, track):
         """Return displayed sample name for a tracks-view lane."""
@@ -2049,7 +2152,8 @@ class Sequencer:
             group_id = self.seq_track_group[track]
             if group_id > 0:
                 self.engine.choke_group(group_id, self.seq_track_group)
-            self.engine.trigger(track, self.last_velocity / 9.0, self.seq_track_pan[track], rate=self.pitch_rate(track))
+            vol = self.seq_track_volume[track] / 9.0
+            self.engine.trigger(track, (self.last_velocity / 9.0) * vol, self.seq_track_pan[track], rate=self.pitch_rate(track))
 
     def _preview_note_if_idle(self, track, velocity):
         if self.playing or track >= TRACKS - 1 or velocity <= 0:
@@ -2061,4 +2165,5 @@ class Sequencer:
             group_id = self.seq_track_group[track]
             if group_id > 0:
                 self.engine.choke_group(group_id, self.seq_track_group)
-            self.engine.trigger(track, velocity / 9.0, self.seq_track_pan[track], rate=self.pitch_rate(track))
+            vol = self.seq_track_volume[track] / 9.0
+            self.engine.trigger(track, (velocity / 9.0) * vol, self.seq_track_pan[track], rate=self.pitch_rate(track))

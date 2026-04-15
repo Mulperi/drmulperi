@@ -20,10 +20,14 @@ ACCENT_TRACK = 8
 ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
-    "help_menu": "H,F1",
-    "pattern_menu": "F,F2",
+    "help_menu": "H",
+    "pattern_menu": "F",
     "pattern_menu_open": "P",
     "sequencer_menu": "S",
+    "record_menu": "R",
+    "tab_1": "F1",
+    "tab_2": "F2",
+    "tab_3": "F3",
     "patterns_overlay": "Q,O",
     "mode_toggle": "T",
     "clear_pattern": "N",
