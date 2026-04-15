@@ -54,6 +54,7 @@ DEFAULT_KEYMAP = {
 
 DEFAULT_SETTINGS = {
     "sample_rate": "48000",
+    "duplex": "off",
 }
 
 FILE_MENU_ITEMS = [

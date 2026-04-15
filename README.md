@@ -60,16 +60,45 @@ python3 main.py --pattern examplekit/patterns.json
 
 ```ini
 [audio]
-sample_rate = 44100
+sample_rate = 48000
+duplex = off
 ```
 
 Set this to your interface rate (for example `48000`) to avoid pitch/timing issues from rate mismatch.
+Set `duplex = on` (or `auto`) to enable record-while-playing on duplex-capable devices.
 
 You can also override at startup:
 
 ```bash
 PYTHONPATH=src python -m drmulperi --samplerate 48000
 ```
+
+Duplex override:
+
+```bash
+PYTHONPATH=src python -m drmulperi --duplex on
+```
+
+## Playback And Duplex Notes
+
+Lessons learned during development:
+
+- Normal playback timing is very sensitive to stream churn. Starting/stopping or swapping audio streams while transport is running can cause immediate tempo instability.
+- Calling global audio stop functions (`sounddevice` global stop paths) can also interrupt the output stream and leave playback in a laggy state.
+- Running extra input callbacks during playback (metering/capture on a separate stream) can add enough callback pressure to make sequencer timing unstable.
+- Sample-rate mismatch (`44.1k` app vs `48k` device) can cause pitch drift and timing artifacts. Keep app and device at the same rate.
+
+Why duplex recording is hard:
+
+- Duplex needs one device/driver path that supports synchronized input+output at the exact same sample rate/buffer settings.
+- If CoreAudio/driver cannot keep that duplex path stable (or another app changes device settings), live record-while-playing will jitter.
+- Python callback overhead is workable for many systems, but low-latency duplex with heavy UI/control updates can still hit timing limits.
+
+Practical guidance:
+
+- For best stability, use one fixed sample rate (recommended `48000`) and avoid changing audio device settings while the app is running.
+- Close DAWs (or ensure they do not reconfigure the same device) when testing live duplex recording.
+- If duplex is unstable on your setup, use non-duplex fallback recording (playback paused during capture) as the reliable mode.
 
 ## Top Bar
 

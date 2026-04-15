@@ -23,11 +23,11 @@ from .config import (
 
 class Sequencer:
     """Pattern sequencer state, persistence, scheduling, and high-level actions."""
-    def __init__(self, kit_path, pattern_path, samplerate=44100):
+    def __init__(self, kit_path, pattern_path, samplerate=44100, duplex_mode="off"):
         self.kit_path = kit_path
         self.pattern_path = pattern_path
         self.pattern_name = os.path.basename(pattern_path)
-        self.engine = AudioEngine(kit_path=self.kit_path, samplerate=int(samplerate))
+        self.engine = AudioEngine(kit_path=self.kit_path, samplerate=int(samplerate), duplex_mode=duplex_mode)
 
         self.grid = [self._new_pattern_grid() for _ in range(PATTERNS)]
         self.ratchet_grid = [self._new_pattern_ratchet() for _ in range(PATTERNS)]

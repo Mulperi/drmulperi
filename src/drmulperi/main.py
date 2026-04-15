@@ -8,8 +8,8 @@ from .sequencer import Sequencer
 from .ui import ui_loop
 
 
-def _load_settings_sample_rate(path=SETTINGS_PATH):
-    """Load sample rate from settings.ini, creating defaults when needed."""
+def _load_audio_settings(path=SETTINGS_PATH):
+    """Load audio settings from settings.ini, creating defaults when needed."""
     parser = configparser.ConfigParser()
     if not os.path.exists(path):
         parser["audio"] = DEFAULT_SETTINGS
@@ -20,11 +20,14 @@ def _load_settings_sample_rate(path=SETTINGS_PATH):
     raw = section.get("sample_rate", DEFAULT_SETTINGS["sample_rate"])
     try:
         val = int(str(raw).strip())
-        if val > 0:
-            return val
+        sample_rate = val if val > 0 else int(DEFAULT_SETTINGS["sample_rate"])
     except Exception:
-        pass
-    return int(DEFAULT_SETTINGS["sample_rate"])
+        sample_rate = int(DEFAULT_SETTINGS["sample_rate"])
+
+    duplex_raw = str(section.get("duplex", DEFAULT_SETTINGS.get("duplex", "off"))).strip().lower()
+    if duplex_raw not in {"off", "on", "auto"}:
+        duplex_raw = "off"
+    return sample_rate, duplex_raw
 
 
 def main():
@@ -46,14 +49,22 @@ def main():
         default=None,
         help="Audio sample rate override in Hz (e.g. 44100 or 48000). Overrides settings.ini",
     )
+    parser.add_argument(
+        "--duplex",
+        choices=["off", "on", "auto"],
+        default=None,
+        help="Duplex audio mode: off=output only, on=require duplex, auto=try duplex then fallback",
+    )
     args = parser.parse_args()
 
     pattern_path = args.pattern
     if not pattern_path.lower().endswith(".json"):
         pattern_path = f"{pattern_path}.json"
 
-    sample_rate = args.samplerate if isinstance(args.samplerate, int) and args.samplerate > 0 else _load_settings_sample_rate()
-    seq = Sequencer(kit_path=args.kit, pattern_path=pattern_path, samplerate=sample_rate)
+    settings_sr, settings_duplex = _load_audio_settings()
+    sample_rate = args.samplerate if isinstance(args.samplerate, int) and args.samplerate > 0 else settings_sr
+    duplex_mode = args.duplex if isinstance(args.duplex, str) and args.duplex.strip() else settings_duplex
+    seq = Sequencer(kit_path=args.kit, pattern_path=pattern_path, samplerate=sample_rate, duplex_mode=duplex_mode)
     curses.wrapper(ui_loop, seq)
 
 

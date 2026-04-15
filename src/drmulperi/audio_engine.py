@@ -89,10 +89,13 @@ class MidiOut:
 # ---------- AUDIO ENGINE ----------
 class AudioEngine:
     """Real-time sample engine: buffering trigger events and rendering stereo audio."""
-    def __init__(self, kit_path, samplerate=44100, blocksize=512):
+    def __init__(self, kit_path, samplerate=44100, blocksize=512, duplex_mode="off"):
         self.sr = samplerate
         self.blocksize = blocksize
         self.kit_path = kit_path
+        mode = str(duplex_mode or "off").strip().lower()
+        self.duplex_mode = mode if mode in {"off", "on", "auto"} else "off"
+        self.using_duplex = False
 
         self.mix = np.zeros((blocksize, 2), dtype=np.float32)
         self.voices = [Voice() for _ in range(32)]
@@ -118,11 +121,12 @@ class AudioEngine:
         self.samples, self.sample_names, self.sample_paths = self.load_samples()
 
         self.stream = None
+        # Keep normal playback on output-only stream by default.
+        # Duplex is enabled only for active recording, then switched back.
         self._open_output_stream()
-        self.input_available = False
-
+        
     def _open_output_stream(self):
-        """Create and start the output stream."""
+        """Create and start output-only stream (stable default)."""
         self.stream = sd.OutputStream(
             samplerate=self.sr,
             blocksize=self.blocksize,
@@ -131,6 +135,22 @@ class AudioEngine:
             latency="high",
         )
         self.stream.start()
+        self.input_available = False
+        self.using_duplex = False
+
+    def _open_duplex_stream(self):
+        """Create and start duplex stream for live recording path."""
+        self.stream = sd.Stream(
+            samplerate=self.sr,
+            blocksize=self.blocksize,
+            channels=(2, 2),
+            callback=self.audio_callback_duplex,
+            latency="high",
+            dtype="float32",
+        )
+        self.stream.start()
+        self.input_available = True
+        self.using_duplex = True
 
     def restart_output_stream(self):
         """Hard-restart output stream after external recorder use."""
@@ -142,6 +162,32 @@ class AudioEngine:
             pass
         self.stream = None
         self._open_output_stream()
+
+    def enable_duplex_for_recording(self):
+        """Switch to duplex stream when mode allows it."""
+        if self.duplex_mode not in {"on", "auto"}:
+            return False
+        if self.using_duplex and self.input_available:
+            return True
+        try:
+            if self.stream is not None:
+                self.stream.stop()
+                self.stream.close()
+        except Exception:
+            pass
+        self.stream = None
+        try:
+            self._open_duplex_stream()
+            return True
+        except Exception:
+            self.stream = None
+            self._open_output_stream()
+            return False
+
+    def disable_duplex_after_recording(self):
+        """Return to output-only stream after live recording path."""
+        if self.using_duplex:
+            self.restart_output_stream()
 
     def load_samples(self):
         """Load first 8 alphabetic WAV files from current kit path."""

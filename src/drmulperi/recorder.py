@@ -171,10 +171,21 @@ def start_record_monitor(controller):
 def start_record_capture_stream(controller):
     """Prepare capture settings for engine duplex capture mode."""
     controller._stop_record_monitor()
-    if controller.seq.engine.input_available:
+    engine = controller.seq.engine
+    # Try enabling duplex only when recording starts (keeps normal playback stable).
+    if engine.duplex_mode in {"on", "auto"} and not engine.using_duplex:
+        try:
+            engine.enable_duplex_for_recording()
+        except Exception:
+            pass
+
+    if engine.using_duplex and engine.input_available:
         controller.record_use_external_capture = False
-        controller.record_capture_sr = int(controller.seq.engine.sr)
+        controller.record_capture_sr = int(engine.sr)
     else:
+        if engine.duplex_mode == "on":
+            controller.status_message = "Duplex mode requested but unavailable. Restart with a duplex-capable device."
+            return False
         if not controller.record_device_ids:
             controller.status_message = "No input device"
             return False
@@ -182,7 +193,7 @@ def start_record_capture_stream(controller):
             controller.status_message = "Recording while playing requires duplex input device."
             return False
         controller.record_use_external_capture = True
-        controller.record_capture_sr = int(controller.seq.engine.sr)
+        controller.record_capture_sr = int(engine.sr)
         controller.status_message = "Recording fallback mode (non-duplex device)"
     controller.record_monitor_running = False
     return True
@@ -230,6 +241,8 @@ def cancel_record_capture(controller, reason="Recording canceled"):
             controller._record_stream = None
             controller.seq.engine.restart_output_stream()
             controller.record_use_external_capture = False
+        else:
+            controller.seq.engine.disable_duplex_after_recording()
         controller._stop_record_monitor()
         with controller.seq.transport_lock:
             controller.seq.pending_events.clear()
@@ -256,6 +269,7 @@ def finish_record_capture(controller):
     else:
         controller.seq.engine.stop_capture()
         recorded = controller.seq.engine.consume_capture()
+        controller.seq.engine.disable_duplex_after_recording()
     if recorded is not None:
         recorded = np.asarray(recorded, dtype=np.float32)
     controller.record_capture_chunks = []
@@ -353,6 +367,8 @@ def arm_record_capture(controller):
 
     if not controller._start_record_capture_stream():
         return
+    live_duplex = bool(controller.seq.engine.using_duplex and not controller.record_use_external_capture)
+    controller.record_capture_controls_transport = live_duplex
     controller.record_capture_active = True
     controller.record_capture_stage = "preroll" if (precount_loops > 0 and controller.record_capture_controls_transport) else "recording"
     controller.record_capture_pattern = take_pattern
@@ -369,27 +385,66 @@ def arm_record_capture(controller):
     controller.record_capture_chunks = []
     controller.record_level_db = -60.0
 
-    # Always isolate recording from transport for stability.
+    # Non-duplex: isolate recording from playback for stability.
+    if not live_duplex:
+        with controller.seq.transport_lock:
+            if controller.seq.playing:
+                controller.seq.toggle_playback()
+            controller.seq.step = 0
+            controller.seq.next_pattern = None
+            controller.seq.pending_events.clear()
+            controller.seq.pending_midi_off.clear()
+            controller.seq.transport_resync = True
+            controller.record_capture_last_step = controller.seq.step
+
+        try:
+            _start_take_capture(controller)
+        except Exception as exc:
+            controller._cancel_record_capture(f"Record failed: {exc}")
+            return
+        controller.record_capture_end_time = time.perf_counter() + controller.record_capture_duration_seconds
+        if was_playing:
+            controller.status_message = "Recording (playback paused for stability)"
+        else:
+            controller.status_message = "Recording..."
+        return
+
+    # Duplex live path: keep playback running and align capture to loop boundaries.
     with controller.seq.transport_lock:
-        if controller.seq.playing:
+        if not controller.seq.playing:
+            if controller.record_capture_stage == "preroll":
+                controller.seq.chain_enabled = False
+                controller.seq.select_pattern(precount_pattern)
+            else:
+                if scope == "song":
+                    controller.seq.chain_enabled = True
+                    if not controller.seq.chain:
+                        controller.seq.chain = [0]
+                    controller.seq.chain_pos = 0
+                    controller.seq.pattern = controller.seq.chain[0]
+                    controller.seq.view_pattern = controller.seq.pattern
+                else:
+                    controller.seq.chain_enabled = False
+                    controller.seq.select_pattern(controller.record_capture_pattern)
+            controller.seq.step = 0
+            controller.seq.next_pattern = None
+            controller.seq.pending_events.clear()
+            controller.seq.pending_midi_off.clear()
+            controller.seq.transport_resync = True
             controller.seq.toggle_playback()
-        controller.seq.step = 0
-        controller.seq.next_pattern = None
-        controller.seq.pending_events.clear()
-        controller.seq.pending_midi_off.clear()
-        controller.seq.transport_resync = True
+            controller.record_capture_started_playback = True
         controller.record_capture_last_step = controller.seq.step
 
-    try:
-        _start_take_capture(controller)
-    except Exception as exc:
-        controller._cancel_record_capture(f"Record failed: {exc}")
-        return
-    controller.record_capture_end_time = time.perf_counter() + controller.record_capture_duration_seconds
-    if was_playing:
-        controller.status_message = "Recording (playback paused for stability)"
-    else:
+    if controller.record_capture_stage == "recording":
+        try:
+            _start_take_capture(controller)
+        except Exception as exc:
+            controller._cancel_record_capture(f"Record failed: {exc}")
+            return
         controller.status_message = "Recording..."
+    else:
+        scope_text = "song" if scope == "song" else "pattern"
+        controller.status_message = f"Record armed: precount pattern {precount_pattern + 1}, then {scope_text} capture"
 
 
 def tick_record_capture(controller):
@@ -397,5 +452,54 @@ def tick_record_capture(controller):
     controller.record_level_db = controller.seq.engine.get_input_level_db()
     if not controller.record_capture_active:
         return
-    if controller.record_capture_end_time > 0.0 and time.perf_counter() >= controller.record_capture_end_time:
+    if not controller.record_capture_controls_transport:
+        if controller.record_capture_end_time > 0.0 and time.perf_counter() >= controller.record_capture_end_time:
+            controller._finish_record_capture()
+        return
+
+    if not controller.seq.playing:
+        controller._cancel_record_capture("Recording canceled (playback stopped)")
+        return
+    current_step = int(controller.seq.step)
+    wrapped = controller.record_capture_last_step > current_step
+    controller.record_capture_last_step = current_step
+    if not wrapped:
+        return
+
+    controller.record_capture_loop_count += 1
+
+    if controller.record_capture_stage == "preroll":
+        if controller.record_capture_loop_count < controller.record_capture_precount_loops:
+            return
+        controller.record_capture_stage = "recording"
+        controller.record_capture_loop_count = 0
+        with controller.seq.transport_lock:
+            if controller.record_capture_scope == "song":
+                controller.seq.chain_enabled = True
+                if not controller.seq.chain:
+                    controller.seq.chain = [0]
+                controller.seq.chain_pos = 0
+                controller.seq.pattern = controller.seq.chain[0]
+                controller.seq.view_pattern = controller.seq.pattern
+            else:
+                controller.seq.chain_enabled = False
+                controller.seq.select_pattern(controller.record_capture_pattern)
+            controller.seq.step = 0
+            controller.seq.next_pattern = None
+            controller.seq.pending_events.clear()
+            controller.seq.pending_midi_off.clear()
+            controller.seq.transport_resync = True
+            controller.record_capture_last_step = controller.seq.step
+        try:
+            _start_take_capture(controller)
+        except Exception as exc:
+            controller._cancel_record_capture(f"Record failed: {exc}")
+            return
+        controller.status_message = "Recording..."
+        return
+
+    if controller.record_capture_loop_count >= controller.record_capture_take_loops:
+        with controller.seq.transport_lock:
+            if controller.record_capture_started_playback and controller.seq.playing:
+                controller.seq.toggle_playback()
         controller._finish_record_capture()
