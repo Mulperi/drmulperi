@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 import sounddevice as sd
+from scipy.io import wavfile
 
 from .config import (
     ACCENT_TRACK,
@@ -52,7 +53,9 @@ def draw(
     record_overlay_active,
     record_device_names,
     record_device_index,
+    record_overlay_index,
     record_action_index,
+    record_channels,
     record_level_db,
     record_monitor_running,
     pattern_menu_key_label,
@@ -142,7 +145,7 @@ def draw(
     grid_bottom = h - 2
     draw_box(grid_left, grid_top, grid_right, grid_bottom, theme["frame"])
 
-    tabs = ["Sequencer", "Tracks", "Mixer"]
+    tabs = ["Sequencer", "Audio", "Mixer"]
     tx = 3
     for i, label in enumerate(tabs):
         tab_text = f"┌ {label} ┐"
@@ -155,62 +158,16 @@ def draw(
         tx += len(tab_text) + 1
 
     content_x = header_left + 2
-    status = "PLAY" if seq.playing else "STOP"
-    beat = (seq.step // 4) + 1
     mode = "RATCHET" if edit_mode == "ratchet" else "VELOCITY"
 
     kit_name = os.path.basename(os.path.normpath(seq.kit_path))
-    line3_parts = [
-        ("pattern_bank", "PATTERN BANK: "),
-        ("pattern_bank", f"{seq.pattern_name}  "),
-        ("kit", "KIT: "),
-        ("kit", f"{kit_name}"),
-    ]
-    x_line3 = content_x
-    for key, text in line3_parts:
-        attr = theme["text"]
-        if header_focus and key == header_param:
-            attr = attr | curses.A_REVERSE
-        safe_add(3, x_line3, text[:max(0, header_right - x_line3)], attr)
-        x_line3 += len(text)
-        if x_line3 >= header_right:
-            break
-    midi_text = "MIDI OUT"
-    midi_attr = theme["midi_on"] if seq.midi_out_enabled else theme["midi_off"]
-    midi_x = header_right - len(midi_text) - 1
-    safe_add(3, midi_x, midi_text, midi_attr)
-    info_parts = [
-        ("bpm", f"BPM:{seq.bpm}  "),
-        ("base", f"{status}  {beat}/4  "),
-        ("length", f"LEN:{seq.pattern_length[seq.view_pattern]}  "),
-        ("swing", f"SW:{seq.current_pattern_swing_ui()}  "),
-        ("pitch", f"PITCH:{seq.pitch_semitones:+d}st  "),
-        ("mode", f"MODE:{mode}  "),
-        ("menu", "MENU  "),
-        ("help", "HELP"),
-    ]
-    x_info = content_x
-    for key, text in info_parts:
-        attr = theme["text"]
-        if header_focus and key == header_param:
-            attr = attr | curses.A_REVERSE
-        safe_add(4, x_info, text[:max(0, header_right - x_info)], attr)
-        x_info += len(text)
-        if x_info >= header_right:
-            break
-
-    patterns_btn_attr = theme["text"]
-    if header_focus and header_param == "patterns":
-        patterns_btn_attr = patterns_btn_attr | curses.A_REVERSE
-    safe_add(5, content_x, "PATTERNS", patterns_btn_attr)
-
-    pattern_line = "  "
     queue_flash_on = int(time.time() * 2) % 2 == 0
     count = seq.pattern_count()
     max_visible = min(12, max(1, count))
     start_idx = 0
     if count > max_visible:
         start_idx = max(0, min(seq.view_pattern - (max_visible // 2), count - max_visible))
+    pattern_line = "  "
     for i in range(start_idx, start_idx + max_visible):
         if seq.view_pattern == i:
             pattern_line += f"[{i+1}] "
@@ -223,19 +180,42 @@ def draw(
     if count > (start_idx + max_visible):
         pattern_line += "... "
 
-    pattern_attr = theme["pattern_manual"] if not seq.chain_enabled else theme["pattern_chain_off"]
-    pattern_x = content_x + len("PATTERNS")
-    safe_add(5, pattern_x, pattern_line[:header_right - pattern_x], pattern_attr)
+    # Always show song order text, even when song mode is off.
+    song_parts = []
+    if seq.chain:
+        for idx, pat in enumerate(seq.chain):
+            label = str(pat + 1)
+            if seq.chain_enabled and idx == seq.chain_pos:
+                song_parts.append(f"[{label}]")
+            else:
+                song_parts.append(label)
+    song_line = "-".join(song_parts) if song_parts else "-"
 
-    chain_text = f"CHAIN:{seq.chain_display()}"
-    chain_attr = theme["chain_on"] if seq.chain_enabled else theme["chain_off"]
-    chain_x = pattern_x + len(pattern_line) + 2
-    safe_add(5, chain_x, chain_text[:header_right - chain_x], chain_attr)
-    set_x = chain_x + len(chain_text) + 2
-    set_attr = theme["text"]
-    if header_focus and header_param == "chain_set":
-        set_attr = set_attr | curses.A_REVERSE
-    safe_add(5, set_x, "SET", set_attr)
+    row_parts = [
+        ("pattern_bank", f"BANK:{seq.pattern_name}"),
+        ("kit", f"KIT:{kit_name}"),
+        ("bpm", f"BPM:{seq.bpm}"),
+        ("length", f"LEN:{seq.pattern_length[seq.view_pattern]}"),
+        ("swing", f"SW:{seq.current_pattern_swing_ui()}"),
+        ("pitch", f"PITCH:{seq.pitch_semitones:+d}st"),
+        ("mode", mode),
+        ("menu", "MENU"),
+        ("help", "HELP"),
+    ]
+    x_row = content_x
+    for key, text in row_parts:
+        attr = theme["text"]
+        if header_focus and key == header_param:
+            attr = attr | curses.A_REVERSE
+        token = f"{text}  "
+        safe_add(4, x_row, token[:max(0, header_right - x_row)], attr)
+        x_row += len(token)
+        if x_row >= header_right:
+            break
+    midi_text = "MIDI OUT"
+    midi_attr = theme["midi_on"] if seq.midi_out_enabled else theme["midi_off"]
+    midi_x = header_right - len(midi_text) - 1
+    safe_add(3, midi_x, midi_text, midi_attr)
 
     grid_content_x = grid_left + 2
     playhead_y = grid_top + 1
@@ -279,28 +259,54 @@ def draw(
             safe_add(playhead_y, x, body, body_attr)
             x += len(body)
     else:
-        safe_add(playhead_y, grid_content_x + 2, "Tracks View", theme["muted"])
+        safe_add(playhead_y, grid_content_x + 2, "Pattern Audio", theme["muted"])
 
     row_start = grid_top + 2
     visible_rows = TRACKS if active_tab == 0 else (TRACKS - 1)
+    track_order = [t for t in range(TRACKS - 1)] if active_tab == 0 else (
+        [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 0]
+        + [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 1]
+    )
+    first_song_row = None
+    if active_tab == 1:
+        for idx, tr in enumerate(track_order):
+            if seq.audio_track_mode[tr] == 1:
+                first_song_row = idx
+                break
     now_pc = time.perf_counter()
-    for t in range(visible_rows):
-        y = row_start + t
+    for row_idx in range(visible_rows):
+        y = row_start + row_idx
         if y >= grid_bottom:
             continue
+        t = row_idx if active_tab == 0 else track_order[row_idx]
 
         row_attr = theme["accent"] if t == ACCENT_TRACK else theme["text"]
         if seq.muted_rows[t]:
             row_attr = theme["muted"]
+        if active_tab == 1 and seq.audio_track_mode[t] == 1:
+            row_attr = theme["chain_on"]
+        if active_tab == 1 and first_song_row is not None and row_idx == first_song_row:
+            divider_text = " Song Audio "
+            line_w = max(0, grid_right - grid_content_x - 4)
+            if line_w > len(divider_text):
+                left = "-" * ((line_w - len(divider_text)) // 2)
+                right = "-" * (line_w - len(divider_text) - len(left))
+                safe_add(y - 1, grid_content_x + 2, f"{left}{divider_text}{right}", theme["muted"])
+            else:
+                safe_add(y - 1, grid_content_x + 2, divider_text[:line_w], theme["muted"])
 
         x = grid_content_x
-        row_label = "A " if t == ACCENT_TRACK else f"{t+1} "
+        if active_tab == 1:
+            row_label = f"{t+1:>2}"
+        else:
+            row_label = "A " if t == ACCENT_TRACK else f"{t+1} "
         label_attr = row_attr
-        if (
-            t < TRACKS - 1
-            and not seq.muted_rows[t]
-            and getattr(seq, "track_trigger_until", [0.0] * TRACKS)[t] > now_pc
-        ):
+        trigger_arr = getattr(
+            seq,
+            "audio_track_trigger_until" if active_tab == 1 else "seq_track_trigger_until",
+            [0.0] * TRACKS,
+        )
+        if t < TRACKS - 1 and not seq.muted_rows[t] and trigger_arr[t] > now_pc:
             label_attr = theme["playhead"]
         safe_add(y, x, row_label, label_attr)
         x += len(row_label)
@@ -313,28 +319,30 @@ def draw(
             return theme["velocity_high"]
 
         if active_tab == 1:
-            sample_name = seq.audio_track_sample_names[seq.view_pattern][t]
+            sample_name = seq.get_audio_track_name(seq.view_pattern, t)
+            ch_tag = "◯◯" if seq.get_audio_track_channels(seq.view_pattern, t) >= 2 else "◯"
             sample_width = 30
-            sample_field = sample_name[:sample_width].ljust(sample_width)
+            sample_field = f"{ch_tag} {sample_name}"[:sample_width].ljust(sample_width)
             safe_add(y, x, "  ", theme["divider"])
             x += 2
-            body = f"[{sample_field}]" if (cursor_x < PREVIEW_COL and cursor_y == t) else f" {sample_field} "
-            attr = row_attr | (curses.A_REVERSE if (cursor_x < PREVIEW_COL and cursor_y == t) else 0)
+            body = f"[{sample_field}]" if (cursor_x == 0 and cursor_y == row_idx) else f" {sample_field} "
+            attr = row_attr | (curses.A_REVERSE if (cursor_x == 0 and cursor_y == row_idx) else 0)
             safe_add(y, x, body, attr)
             x += len(body)
             cols = [
                 (PREVIEW_COL, "▶"),
                 (LOAD_COL, "↓"),
-                (PAN_COL, f"P{seq.audio_track_pan[seq.view_pattern][t]}"),
-                (HUMANIZE_COL, f"V{seq.audio_track_volume[seq.view_pattern][t]}"),
+                (PAN_COL, f"P{seq.get_audio_track_pan(seq.view_pattern, t)}"),
+                (HUMANIZE_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
                 (PROB_COL, "●"),
                 (GROUP_COL, "X"),
+                (TRACK_PITCH_COL, "N"),
             ]
             for col, char in cols:
                 safe_add(y, x, "| ", theme["divider"])
                 x += 2
                 cell_w = col_cell_width(col)
-                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (curses.A_REVERSE if (cursor_x == col and cursor_y == t) else 0)
+                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (curses.A_REVERSE if (cursor_x == col and cursor_y == row_idx) else 0)
                 safe_add(y, x, f" {char:>{cell_w}} ", cell_attr)
                 x += cell_w + 2
         else:
@@ -349,20 +357,20 @@ def draw(
                     if t == ACCENT_TRACK:
                         char = ""
                     else:
-                        pan_val = seq.track_pan[t]
+                        pan_val = seq.seq_track_pan[t]
                         char = f"P{pan_val}"
                     cell_attr = row_attr
                 elif s == HUMANIZE_COL:
-                    char = f"{seq.track_humanize[t]}" if t != ACCENT_TRACK else ""
+                    char = f"{seq.seq_track_humanize[t]}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 elif s == PROB_COL:
-                    char = f"%{seq.track_probability[t]}" if t != ACCENT_TRACK else ""
+                    char = f"%{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 elif s == GROUP_COL:
-                    char = str(seq.track_group[t]) if t != ACCENT_TRACK else ""
+                    char = str(seq.seq_track_group[t]) if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 elif s == TRACK_PITCH_COL:
-                    char = f"{seq.track_pitch[t] + 12}" if t != ACCENT_TRACK else ""
+                    char = f"{seq.seq_track_pitch[t] + 12}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 else:
                     val = seq.grid[seq.view_pattern][t][s]
@@ -423,16 +431,18 @@ def draw(
         elif header_param == "mode":
             help_line = "Header: Left/Right select field. Enter toggles mode (velocity/ratchet). Down returns to grid."
         elif header_param == "menu":
-            help_line = "Header: Left/Right select field. Enter opens pattern menu. Down returns to grid."
+            help_line = "Header: Left/Right select field. Enter opens menu. Down returns to grid."
         elif header_param == "help":
             help_line = "Header: Left/Right select field. Enter opens help. Down returns to grid."
         elif header_param == "chain_set":
-            help_line = "Header: Left/Right select field. Enter sets chain order. Down returns to grid."
+            help_line = "Header: Left/Right select field. Enter sets song order. Down returns to grid."
         else:
             if header_edit_active:
                 help_line = "Header edit: Left/Right or Up/Down tunes pitch. Enter exits edit."
             else:
                 help_line = "Header: Left/Right select field. Enter edits pitch. Down returns to grid."
+    elif active_tab == 1 and cursor_x == 0:
+        help_line = "Toggle track mode: Pattern/Song. Song tracks play only when SONG mode is ON."
     elif active_tab == 1 and cursor_x == PREVIEW_COL:
         help_line = "Preview sample"
     elif active_tab == 1 and cursor_x == LOAD_COL:
@@ -445,8 +455,11 @@ def draw(
         help_line = "Record input device / level monitor (2-pass capture)"
     elif active_tab == 1 and cursor_x == GROUP_COL:
         help_line = "Clear current audio track sample"
+    elif active_tab == 1 and cursor_x == TRACK_PITCH_COL:
+        help_line = "Rename current track sample"
     elif active_tab == 1 and cursor_y < TRACKS - 1:
-        help_line = f"AUDIO TRACK SAMPLE: {seq.audio_track_sample_names[seq.view_pattern][cursor_y]}"
+        active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
+        help_line = f"AUDIO TRACK SAMPLE: {seq.get_audio_track_name(seq.view_pattern, active_track)}"
     elif cursor_x == PREVIEW_COL:
         help_line = "Preview sample"
     elif cursor_x == LOAD_COL:
@@ -482,8 +495,9 @@ def draw(
         safe_add(prompt_y, grid_content_x, prompt_line[:grid_right - grid_content_x], theme["hint"])
 
     # Always-visible current sample label at bottom-right of sequencer area.
-    if active_tab == 1 and cursor_y < TRACKS - 1:
-        current_sample_name = seq.audio_track_sample_names[seq.view_pattern][cursor_y]
+    if active_tab == 1 and cursor_y < TRACKS - 1 and track_order:
+        active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
+        current_sample_name = seq.get_audio_track_name(seq.view_pattern, active_track)
     elif cursor_y < TRACKS - 1:
         current_sample_name = seq.engine.sample_names[cursor_y]
     else:
@@ -648,8 +662,9 @@ def draw(
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
 
     if record_overlay_active:
-        title = "RECORD INPUT (Up/Down device, Left/Right button, Enter select, Esc close)"
+        title = "RECORD INPUT (Up/Down row, Left/Right change, Enter select)"
         devices = record_device_names if record_device_names else ["(no input devices)"]
+        selected_dev = devices[record_device_index] if devices else "(no input devices)"
         box_width = min(w - 8, 74)
         box_height = min(h - 4, 14)
         box_left = max(1, (w - box_width) // 2)
@@ -661,17 +676,16 @@ def draw(
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
 
-        max_rows = 4
-        start = 0
-        if record_device_index >= max_rows:
-            start = record_device_index - max_rows + 1
-        end = min(len(devices), start + max_rows)
-        for i in range(start, end):
-            row_y = box_top + 3 + (i - start)
-            attr = theme["text"]
-            if i == record_device_index:
-                attr = attr | curses.A_REVERSE
-            safe_add(row_y, box_left + 2, devices[i][: box_width - 4], attr)
+        dev_attr = theme["text"] | (curses.A_REVERSE if record_overlay_index == 0 else 0)
+        safe_add(box_top + 3, box_left + 2, f"Input: {selected_dev}"[: box_width - 4], dev_attr)
+
+        mode_y = box_bottom - 3
+        mode_base = theme["text"] | (curses.A_REVERSE if record_overlay_index == 1 else 0)
+        mono_attr = mode_base if record_channels == 1 else (theme["muted"] | (curses.A_REVERSE if record_overlay_index == 1 else 0))
+        stereo_attr = mode_base if record_channels == 2 else (theme["muted"] | (curses.A_REVERSE if record_overlay_index == 1 else 0))
+        safe_add(mode_y, box_left + 2, "Mode:", theme["text"])
+        safe_add(mode_y, box_left + 9, "MONO", mono_attr)
+        safe_add(mode_y, box_left + 16, "STEREO", stereo_attr)
 
         meter_y = box_bottom - 2
         meter_left = box_left + 2
@@ -682,8 +696,9 @@ def draw(
         db_text = f"{record_level_db:>5.1f} dBFS" if record_monitor_running else "stopped"
         safe_add(meter_y, meter_left, f"IN [{meter}] {db_text}"[: box_width - 4], theme["hint"])
         btn_y = box_bottom - 1
-        rec_attr = theme["record"] | (curses.A_REVERSE if record_action_index == 0 else 0)
-        cancel_attr = theme["text"] | (curses.A_REVERSE if record_action_index == 1 else 0)
+        action_hl = (record_overlay_index == 2)
+        rec_attr = theme["record"] | (curses.A_REVERSE if action_hl and record_action_index == 0 else 0)
+        cancel_attr = theme["text"] | (curses.A_REVERSE if action_hl and record_action_index == 1 else 0)
         safe_add(btn_y, box_left + 2, "[ Record ]", rec_attr)
         safe_add(btn_y, box_left + 15, "[ Cancel ]", cancel_attr)
 
@@ -783,12 +798,22 @@ def draw(
         draw_options_line(
             box_top + 7,
             "Export: ",
-            [("Current Pattern  ", "pattern"), ("Whole Chain", "chain")],
+            [("Current Pattern  ", "pattern"), ("Whole Song", "chain")],
             scope,
             audio_export_options_index == 3,
         )
         export_attr = theme["text"] | (curses.A_REVERSE if audio_export_options_index == (row_count - 1) else 0)
         safe_add(box_top + 8, box_left + 4, "[ Export -> Filename ]", export_attr)
+
+    # Bottom-left transport indicator on the outer border.
+    transport_icon = "▶" if seq.playing else "▢"
+    transport_attr = theme["frame"]
+    safe_add(outer_bottom, outer_left + 2, transport_icon, transport_attr)
+    compact_pattern_line = " ".join(pattern_line.split())
+    footer_patterns = f"PATTERNS {compact_pattern_line}"
+    footer_song = f"SONG {song_line}"
+    footer_text = f"{footer_patterns}   {footer_song}"
+    safe_add(outer_bottom, outer_left + 6, footer_text[: max(0, outer_right - (outer_left + 8))], theme["frame"])
 
     stdscr.refresh()
 
@@ -829,6 +854,8 @@ class Controller:
         self.chain_edit_input = ""
         self.swing_edit_active = False
         self.swing_edit_input = ""
+        self.track_rename_active = False
+        self.track_rename_input = ""
         self.pattern_menu_active = False
         self.pattern_menu_index = 0
         self.help_active = False
@@ -842,7 +869,7 @@ class Controller:
         self.header_section = "params"
         self.header_edit_active = False
         self.active_tab = 0
-        self.header_params = ["patterns", "pattern_bank", "kit", "bpm", "length", "swing", "pitch", "mode", "menu", "help", "chain_set"]
+        self.header_params = ["pattern_bank", "kit", "bpm", "length", "swing", "pitch", "mode", "menu", "help"]
         self.header_param_index = 0
         self.inline_value_buffer = ""
         self.inline_value_target = None  # (row, col)
@@ -866,7 +893,9 @@ class Controller:
         self.record_device_sample_rates = []
         self.record_device_channels = []
         self.record_device_index = 0
+        self.record_overlay_index = 0
         self.record_action_index = 0
+        self.record_channels = 1
         self.record_level_db = -60.0
         self.record_monitor_running = False
         self._record_stream = None
@@ -883,6 +912,30 @@ class Controller:
     def move_cursor(self, dx, dy):
         self.cursor_x = (self.cursor_x + dx) % GRID_COLS
         self.cursor_y = (self.cursor_y + dy) % TRACKS
+
+    def _tracks_order(self):
+        """Return display order for Audio view (Pattern lanes first, Song lanes after)."""
+        pattern_rows = [t for t in range(TRACKS - 1) if self.seq.audio_track_mode[t] == 0]
+        song_rows = [t for t in range(TRACKS - 1) if self.seq.audio_track_mode[t] == 1]
+        return pattern_rows + song_rows
+
+    def _track_for_row(self, row):
+        """Map current Audio-view row index to real track index."""
+        order = self._tracks_order()
+        if not order:
+            return 0
+        idx = max(0, min(len(order) - 1, int(row)))
+        return order[idx]
+
+    def _row_for_track(self, track):
+        """Map real track index back to current Audio-view row index."""
+        order = self._tracks_order()
+        if not order:
+            return 0
+        try:
+            return order.index(track)
+        except ValueError:
+            return 0
 
     def _apply_inline_track_value(self, col, digit):
         """Apply inline numeric typing for track parameter columns without Enter."""
@@ -974,7 +1027,10 @@ class Controller:
         self.import_overlay_path = src
         self.drop_path_active = False
         self.drop_path_input = ""
-        default_track = self.cursor_y if 0 <= self.cursor_y < (TRACKS - 1) else 0
+        if self.active_tab == 1:
+            default_track = self._track_for_row(self.cursor_y)
+        else:
+            default_track = self.cursor_y if 0 <= self.cursor_y < (TRACKS - 1) else 0
         self.import_target_drum_track = default_track
         self.import_target_audio_track = default_track
         self.status_message = f"Import source ready: {os.path.basename(src)}"
@@ -1028,11 +1084,18 @@ class Controller:
         if not self.record_capture_active or self.record_capture_stage != "recording":
             return
         try:
-            mono = np.asarray(indata, dtype=np.float32)
-            if mono.ndim == 2:
-                mono = mono.mean(axis=1)
-            if mono.size > 0:
-                self.record_capture_chunks.append(np.copy(mono))
+            chunk = np.asarray(indata, dtype=np.float32)
+            if chunk.ndim == 2:
+                want_channels = 2 if int(self.record_channels) >= 2 else 1
+                if want_channels == 1:
+                    chunk = chunk.mean(axis=1)
+                else:
+                    if chunk.shape[1] == 1:
+                        chunk = np.repeat(chunk, 2, axis=1)
+                    elif chunk.shape[1] > 2:
+                        chunk = chunk[:, :2]
+            if chunk.size > 0:
+                self.record_capture_chunks.append(np.copy(chunk))
         except Exception:
             pass
 
@@ -1058,7 +1121,7 @@ class Controller:
             return
         dev_id = self.record_device_ids[self.record_device_index]
         dev_sr = self.record_device_sample_rates[self.record_device_index]
-        channels = max(1, min(2, self.record_device_channels[self.record_device_index]))
+        channels = max(1, min(int(self.record_channels), self.record_device_channels[self.record_device_index]))
         try:
             self._record_stream = sd.InputStream(
                 device=dev_id,
@@ -1082,7 +1145,7 @@ class Controller:
             return False
         dev_id = self.record_device_ids[self.record_device_index]
         dev_sr = self.record_device_sample_rates[self.record_device_index]
-        channels = max(1, min(2, self.record_device_channels[self.record_device_index]))
+        channels = max(1, min(int(self.record_channels), self.record_device_channels[self.record_device_index]))
         try:
             self._record_stream = sd.InputStream(
                 device=dev_id,
@@ -1104,6 +1167,7 @@ class Controller:
         """Open record device overlay and start live input level monitoring."""
         self._refresh_record_devices()
         self.record_overlay_active = True
+        self.record_overlay_index = 0
         self.record_action_index = 0
         self.record_level_db = -60.0
         self._start_record_monitor()
@@ -1132,18 +1196,48 @@ class Controller:
         if not chunks:
             self.status_message = "Record failed: no audio captured"
             return
-        mono = np.concatenate(chunks).astype(np.float32)
-        if mono.size <= 1:
+        recorded = np.concatenate(chunks).astype(np.float32)
+        if recorded.size <= 1:
             self.status_message = "Record failed: no audio captured"
             return
         src_sr = int(self.record_capture_sr) if self.record_capture_sr > 0 else int(self.seq.engine.sr)
         dst_sr = int(self.seq.engine.sr)
-        if src_sr != dst_sr:
-            mono = self.seq._resample_mono_linear(mono, src_sr, dst_sr)
-        name = f"rec_p{self.record_capture_pattern + 1}_t{self.record_capture_track + 1}.wav"
-        self.seq.audio_track_sample_paths[self.record_capture_pattern][self.record_capture_track] = None
-        self.seq.audio_track_sample_names[self.record_capture_pattern][self.record_capture_track] = name
-        self.seq.audio_track_samples[self.record_capture_pattern][self.record_capture_track] = mono
+        channels = 2 if (recorded.ndim == 2 and recorded.shape[1] >= 2) else 1
+        if channels == 2:
+            if src_sr != dst_sr:
+                left = self.seq._resample_mono_linear(recorded[:, 0], src_sr, dst_sr)
+                right = self.seq._resample_mono_linear(recorded[:, 1], src_sr, dst_sr)
+                n = min(len(left), len(right))
+                recorded = np.column_stack((left[:n], right[:n])).astype(np.float32)
+            mono = recorded.mean(axis=1).astype(np.float32)
+        else:
+            mono = recorded.reshape(-1).astype(np.float32)
+            if src_sr != dst_sr:
+                mono = self.seq._resample_mono_linear(mono, src_sr, dst_sr)
+        rec_dir = os.path.join(os.getcwd(), "recordings")
+        os.makedirs(rec_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(self.seq.pattern_name))[0] or "pattern"
+        rec_idx = 1
+        while True:
+            name = f"{base}_rec{rec_idx}.wav"
+            out_path = os.path.join(rec_dir, name)
+            if not os.path.exists(out_path):
+                break
+            rec_idx += 1
+        out_src = recorded if channels == 2 else mono
+        out = np.clip(out_src * 32767.0, -32768, 32767).astype(np.int16)
+        wavfile.write(out_path, dst_sr, out)
+        track = self.record_capture_track
+        if self.seq.audio_track_mode[track] == 1:
+            self.seq.audio_track_free_sample_paths[track] = out_path
+            self.seq.audio_track_free_sample_names[track] = name
+            self.seq.audio_track_free_samples[track] = mono
+            self.seq.audio_track_free_channels[track] = channels
+        else:
+            self.seq.audio_track_slot_sample_paths[self.record_capture_pattern][track] = out_path
+            self.seq.audio_track_slot_sample_names[self.record_capture_pattern][track] = name
+            self.seq.audio_track_slot_samples[self.record_capture_pattern][track] = mono
+            self.seq.audio_track_slot_channels[self.record_capture_pattern][track] = channels
         self.seq.dirty = True
         sr_hint = f" (SR {src_sr}->{dst_sr})" if src_sr != dst_sr else ""
         self.status_message = f"Recorded {name}{sr_hint}"
@@ -1151,18 +1245,19 @@ class Controller:
     def _arm_record_capture(self):
         """Start two-pass recording: 1st loop pre-roll, 2nd loop capture."""
         if self.active_tab != 1 or self.cursor_y >= (TRACKS - 1):
-            self.status_message = "Recording works in Tracks view on track rows"
+            self.status_message = "Recording works in Audio view on track rows"
             return
         if self.seq.chain_enabled:
-            self.status_message = "Disable CHAIN before recording"
+            self.status_message = "Disable SONG before recording"
             return
+        track = self._track_for_row(self.cursor_y)
         self._cancel_record_capture("")
         if not self._start_record_capture_stream():
             return
         self.record_capture_active = True
         self.record_capture_stage = "preroll"
         self.record_capture_pattern = self.seq.view_pattern
-        self.record_capture_track = self.cursor_y
+        self.record_capture_track = track
         self.record_capture_last_step = self.seq.step
         self.record_capture_chunks = []
 
@@ -1368,6 +1463,10 @@ class Controller:
         self.swing_edit_active = False
         self.swing_edit_input = ""
 
+    def _close_track_rename_dialog(self):
+        self.track_rename_active = False
+        self.track_rename_input = ""
+
     def _run_pattern_menu_action(self):
         if self.pattern_menu_index == 0:
             ok, message = self.seq.copy_current_pattern()
@@ -1499,23 +1598,35 @@ class Controller:
             if key_code == 27:
                 self._close_record_overlay()
                 return True
-            if key_code == curses.KEY_LEFT:
-                self.record_action_index = 0
-                return True
-            if key_code == curses.KEY_RIGHT:
-                self.record_action_index = 1
-                return True
             if key_code == curses.KEY_UP:
-                if self.record_device_ids:
-                    self.record_device_index = (self.record_device_index - 1) % len(self.record_device_ids)
-                    self._start_record_monitor()
+                self.record_overlay_index = (self.record_overlay_index - 1) % 3
                 return True
             if key_code == curses.KEY_DOWN:
-                if self.record_device_ids:
-                    self.record_device_index = (self.record_device_index + 1) % len(self.record_device_ids)
-                    self._start_record_monitor()
+                self.record_overlay_index = (self.record_overlay_index + 1) % 3
+                return True
+            if key_code in [ord("m"), ord("M")]:
+                self.record_channels = 1
+                return True
+            if key_code in [ord("s"), ord("S")]:
+                self.record_channels = 2
+                return True
+            if key_code in [curses.KEY_LEFT, curses.KEY_RIGHT, 32]:
+                direction = -1 if key_code == curses.KEY_LEFT else 1
+                if key_code == 32:
+                    direction = 1
+                if self.record_overlay_index == 0:
+                    if self.record_device_ids:
+                        self.record_device_index = (self.record_device_index + direction) % len(self.record_device_ids)
+                        self._start_record_monitor()
+                elif self.record_overlay_index == 1:
+                    self.record_channels = 2 if self.record_channels == 1 else 1
+                else:
+                    self.record_action_index = 0 if self.record_action_index == 1 else 1
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
+                if self.record_overlay_index != 2:
+                    self.record_overlay_index = min(2, self.record_overlay_index + 1)
+                    return True
                 if self.record_action_index == 0:
                     self._close_record_overlay()
                     self._arm_record_capture()
@@ -1845,7 +1956,7 @@ class Controller:
                     self.active_tab = (self.active_tab + 1) % 3
                     if self.active_tab == 1:
                         self.cursor_y = min(self.cursor_y, TRACKS - 2)
-                        if self.cursor_x > GROUP_COL:
+                        if self.cursor_x > TRACK_PITCH_COL:
                             self.cursor_x = PREVIEW_COL
                     return True
                 if self.header_edit_active:
@@ -1864,7 +1975,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
                     nxt = cols[0]
                     for c in cols:
                         if c > self.cursor_x:
@@ -1880,7 +1991,7 @@ class Controller:
                     self.active_tab = (self.active_tab - 1) % 3
                     if self.active_tab == 1:
                         self.cursor_y = min(self.cursor_y, TRACKS - 2)
-                        if self.cursor_x > GROUP_COL:
+                        if self.cursor_x > TRACK_PITCH_COL:
                             self.cursor_x = PREVIEW_COL
                     return True
                 if self.header_edit_active:
@@ -1899,7 +2010,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
                     prev = cols[-1]
                     for c in reversed(cols):
                         if c < self.cursor_x:
@@ -1966,7 +2077,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             else:
                 cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             next_idx = 0
@@ -1986,7 +2097,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL]
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             else:
                 cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             prev_idx = len(cycle) - 1
@@ -2014,6 +2125,9 @@ class Controller:
                 return True
             if self.audio_export_active:
                 self._close_audio_export_dialog()
+                return True
+            if self.track_rename_active:
+                self._close_track_rename_dialog()
                 return True
             if self.audio_export_options_active:
                 self._close_audio_export_options_dialog()
@@ -2230,6 +2344,27 @@ class Controller:
                 return True
             return True
 
+        if self.track_rename_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                track = self._track_for_row(self.cursor_y)
+                ok, message = self.seq.rename_audio_track_sample(
+                    self.seq.view_pattern,
+                    track,
+                    self.track_rename_input,
+                )
+                self.status_message = message
+                self._close_track_rename_dialog()
+                return True
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.track_rename_input = self.track_rename_input[:-1]
+                return True
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.track_rename_input) < 120:
+                    self.track_rename_input += key
+                return True
+            return True
+
         if self.keymap.matches("clear_pattern", event_tokens):
             if self.clear_confirm:
                 self.seq.clear_current_pattern()
@@ -2411,12 +2546,13 @@ class Controller:
                 self.seq.quick_set_ratchet(self.cursor_y, self.cursor_x, quick_ratchet)
         elif key_code in range(ord('0'), ord('9') + 1):
             velocity = key_code - ord('0')
+            track_idx = self._track_for_row(self.cursor_y) if self.active_tab == 1 else self.cursor_y
             if self.active_tab == 1 and self.cursor_x == PAN_COL:
                 if self.cursor_y != ACCENT_TRACK and velocity > 0:
-                    self.seq.set_audio_track_pan(self.seq.view_pattern, self.cursor_y, velocity)
+                    self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, velocity)
             elif self.active_tab == 1 and self.cursor_x == HUMANIZE_COL:
                 if self.cursor_y != ACCENT_TRACK:
-                    self.seq.set_audio_track_volume(self.seq.view_pattern, self.cursor_y, velocity)
+                    self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
             elif self.active_tab == 1 and self.cursor_x == PROB_COL:
                 pass
             elif self.cursor_x == PREVIEW_COL:
@@ -2451,7 +2587,7 @@ class Controller:
                     if self.active_tab == 0:
                         self.status_message = "Sequencer view"
                     elif self.active_tab == 1:
-                        self.status_message = "Tracks view (coming soon)"
+                        self.status_message = "Audio view"
                     else:
                         self.status_message = "Mixer view (coming soon)"
                     return True
@@ -2518,22 +2654,31 @@ class Controller:
                     self.header_edit_active = not self.header_edit_active
                 return True
             if self.active_tab == 1:
+                track_idx = self._track_for_row(self.cursor_y)
+                if self.cursor_x == 0:
+                    ok, message = self.seq.toggle_audio_track_mode(self.seq.view_pattern, track_idx)
+                    self.status_message = message
+                    self.cursor_y = self._row_for_track(track_idx)
+                    return True
                 if self.cursor_x == PREVIEW_COL:
                     if self.cursor_y != ACCENT_TRACK:
-                        ok, message = self.seq.preview_audio_track_slot(self.seq.view_pattern, self.cursor_y)
+                        ok, message = self.seq.preview_audio_track_slot(self.seq.view_pattern, track_idx)
                         self.status_message = message
                 elif self.cursor_x == LOAD_COL:
                     if self.cursor_y != ACCENT_TRACK:
-                        self._open_file_browser("audio_track", target_track=self.cursor_y)
+                        self._open_file_browser("audio_track", target_track=track_idx)
                 elif self.cursor_x == PAN_COL:
-                    self.seq.set_audio_track_pan(self.seq.view_pattern, self.cursor_y, 5)
+                    self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, 5)
                 elif self.cursor_x == HUMANIZE_COL:
-                    self.seq.set_audio_track_volume(self.seq.view_pattern, self.cursor_y, 9)
+                    self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, 9)
                 elif self.cursor_x == PROB_COL:
                     self._open_record_overlay()
                 elif self.cursor_x == GROUP_COL:
-                    ok, message = self.seq.clear_audio_track_sample(self.seq.view_pattern, self.cursor_y)
+                    ok, message = self.seq.clear_audio_track_sample(self.seq.view_pattern, track_idx)
                     self.status_message = message
+                elif self.cursor_x == TRACK_PITCH_COL:
+                    self.track_rename_active = True
+                    self.track_rename_input = ""
                 return True
             if self.cursor_x == PREVIEW_COL:
                 if self.cursor_y != ACCENT_TRACK:
@@ -2564,7 +2709,7 @@ class Controller:
         elif key_code in [ord('p'), ord('P')]:
             if self.active_tab == 1:
                 if self.cursor_y != ACCENT_TRACK:
-                    ok, message = self.seq.preview_audio_track_slot(self.seq.view_pattern, self.cursor_y)
+                    ok, message = self.seq.preview_audio_track_slot(self.seq.view_pattern, self._track_for_row(self.cursor_y))
                     self.status_message = message
             else:
                 self.seq.preview_row(self.cursor_y)
@@ -2703,6 +2848,7 @@ def ui_loop(stdscr, seq):
             controller.audio_export_options.get("scope", "pattern"),
             controller.humanize_edit_active,
             controller.probability_edit_active,
+            controller.track_rename_active,
             controller.chain_edit_active,
             controller.swing_edit_active,
             controller.pattern_menu_active,
@@ -2720,7 +2866,9 @@ def ui_loop(stdscr, seq):
             controller.record_overlay_active,
             tuple(controller.record_device_names),
             controller.record_device_index,
+            controller.record_overlay_index,
             controller.record_action_index,
+            controller.record_channels,
             round(controller.record_level_db, 1),
             controller.record_monitor_running,
             controller.record_capture_active,
@@ -2742,6 +2890,7 @@ def ui_loop(stdscr, seq):
             controller.audio_export_input,
             controller.humanize_edit_input,
             controller.probability_edit_input,
+            controller.track_rename_input,
             controller.chain_edit_input,
             controller.swing_edit_input,
             controller.status_message,
@@ -2756,7 +2905,11 @@ def ui_loop(stdscr, seq):
             tuple(seq.chain),
             seq.chain_pos,
             tuple(
-                1 if (t < TRACKS - 1 and seq.track_trigger_until[t] > time.perf_counter()) else 0
+                1 if (t < TRACKS - 1 and seq.seq_track_trigger_until[t] > time.perf_counter()) else 0
+                for t in range(TRACKS)
+            ),
+            tuple(
+                1 if (t < TRACKS - 1 and seq.audio_track_trigger_until[t] > time.perf_counter()) else 0
                 for t in range(TRACKS)
             ),
         )
@@ -2777,7 +2930,7 @@ def ui_loop(stdscr, seq):
             elif controller.pattern_save_active:
                 prompt_text = f"Save pattern bank filename (Esc cancels): {controller.pattern_save_input}"
             elif controller.chain_edit_active:
-                prompt_text = f"Give chain sequence ({chain_edit_label}, Esc cancels): {controller.chain_edit_input}"
+                prompt_text = f"Give song sequence ({chain_edit_label}, Esc cancels): {controller.chain_edit_input}"
             elif controller.pattern_load_active:
                 prompt_text = f"Give pattern bank filename (Esc cancels): {controller.pattern_load_input}"
             elif controller.kit_load_active:
@@ -2790,6 +2943,8 @@ def ui_loop(stdscr, seq):
                 prompt_text = f"Humanize 0-100 (Esc cancels): {controller.humanize_edit_input}"
             elif controller.probability_edit_active:
                 prompt_text = f"Probability 0-100 (Esc cancels): {controller.probability_edit_input}"
+            elif controller.track_rename_active:
+                prompt_text = f"Rename track sample (Esc cancels): {controller.track_rename_input}"
             elif controller.swing_edit_active:
                 prompt_text = f"Swing 0-10 (Esc cancels): {controller.swing_edit_input}"
             else:
@@ -2809,7 +2964,7 @@ def ui_loop(stdscr, seq):
                 controller.clear_confirm,
                 controller.esc_confirm,
                 prompt_text,
-                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.swing_edit_active else "",
+                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active else "",
                 controller.pattern_menu_active,
                 controller.pattern_menu_index,
                 controller.patterns_overlay_active,
@@ -2825,7 +2980,9 @@ def ui_loop(stdscr, seq):
                 controller.record_overlay_active,
                 controller.record_device_names,
                 controller.record_device_index,
+                controller.record_overlay_index,
                 controller.record_action_index,
+                controller.record_channels,
                 controller.record_level_db,
                 controller.record_monitor_running,
                 pattern_menu_label,

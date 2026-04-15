@@ -52,7 +52,7 @@ PATTERN_MENU_ITEMS = [
     "4. Save Pattern As",
     "5. Load Pattern",
     "6. Load Sample Kit",
-    "7. Toggle Chain Mode",
+    "7. Toggle Song Mode",
     "8. Set Swing",
     "9. Save Pack",
     "10. Toggle MIDI OUT",
