@@ -205,7 +205,7 @@ def draw(
     x_row = content_x
     for key, text in row_parts:
         attr = theme["text"]
-        if header_focus and key == header_param:
+        if header_focus and header_section == "params" and key == header_param:
             attr = attr | curses.A_REVERSE
         token = f"{text}  "
         safe_add(4, x_row, token[:max(0, header_right - x_row)], attr)
@@ -259,7 +259,8 @@ def draw(
             safe_add(playhead_y, x, body, body_attr)
             x += len(body)
     else:
-        safe_add(playhead_y, grid_content_x + 2, "Pattern Audio", theme["muted"])
+        # Keep Audio rows aligned with sequencer rows; no heading on playhead line.
+        pass
 
     row_start = grid_top + 2
     visible_rows = TRACKS if active_tab == 0 else (TRACKS - 1)
@@ -285,19 +286,11 @@ def draw(
             row_attr = theme["muted"]
         if active_tab == 1 and seq.audio_track_mode[t] == 1:
             row_attr = theme["chain_on"]
-        if active_tab == 1 and first_song_row is not None and row_idx == first_song_row:
-            divider_text = " Song Audio "
-            line_w = max(0, grid_right - grid_content_x - 4)
-            if line_w > len(divider_text):
-                left = "-" * ((line_w - len(divider_text)) // 2)
-                right = "-" * (line_w - len(divider_text) - len(left))
-                safe_add(y - 1, grid_content_x + 2, f"{left}{divider_text}{right}", theme["muted"])
-            else:
-                safe_add(y - 1, grid_content_x + 2, divider_text[:line_w], theme["muted"])
+        # No extra separator line in Audio view; ordering + color indicate grouping.
 
         x = grid_content_x
         if active_tab == 1:
-            row_label = f"{t+1:>2}"
+            row_label = f"{t+1} "
         else:
             row_label = "A " if t == ACCENT_TRACK else f"{t+1} "
         label_attr = row_attr
