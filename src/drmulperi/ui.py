@@ -135,13 +135,14 @@ def draw(
 
     header_left = 2
     header_right = w - 3
-    header_top = 2
-    header_bottom = 6
+    header_top = 1
+    header_bottom = 4
     draw_box(header_left, header_top, header_right, header_bottom, theme["frame"])
 
+    tabs_y = 5
     grid_left = 2
     grid_right = w - 3
-    grid_top = 7
+    grid_top = 6
     grid_bottom = h - 2
     draw_box(grid_left, grid_top, grid_right, grid_bottom, theme["frame"])
 
@@ -154,7 +155,7 @@ def draw(
             attr = theme["title"]
         if header_focus and header_section == "tabs" and i == active_tab:
             attr = attr | curses.A_REVERSE
-        safe_add(1, tx, tab_text, attr)
+        safe_add(tabs_y, tx, tab_text, attr)
         tx += len(tab_text) + 1
 
     content_x = header_left + 2
@@ -203,19 +204,20 @@ def draw(
         ("help", "HELP"),
     ]
     x_row = content_x
+    controls_y = header_top + 1
     for key, text in row_parts:
         attr = theme["text"]
         if header_focus and header_section == "params" and key == header_param:
             attr = attr | curses.A_REVERSE
         token = f"{text}  "
-        safe_add(4, x_row, token[:max(0, header_right - x_row)], attr)
+        safe_add(controls_y, x_row, token[:max(0, header_right - x_row)], attr)
         x_row += len(token)
         if x_row >= header_right:
             break
     midi_text = "MIDI OUT"
     midi_attr = theme["midi_on"] if seq.midi_out_enabled else theme["midi_off"]
     midi_x = header_right - len(midi_text) - 1
-    safe_add(3, midi_x, midi_text, midi_attr)
+    safe_add(controls_y + 1, midi_x, midi_text, midi_attr)
 
     grid_content_x = grid_left + 2
     playhead_y = grid_top + 1
@@ -805,8 +807,15 @@ def draw(
     compact_pattern_line = " ".join(pattern_line.split())
     footer_patterns = f"PATTERNS {compact_pattern_line}"
     footer_song = f"SONG {song_line}"
-    footer_text = f"{footer_patterns}   {footer_song}"
-    safe_add(outer_bottom, outer_left + 6, footer_text[: max(0, outer_right - (outer_left + 8))], theme["frame"])
+    footer_x = outer_left + 6
+    max_w = max(0, outer_right - (outer_left + 8))
+    patterns_attr = theme["pattern_manual"] if not seq.chain_enabled else theme["pattern_chain_off"]
+    song_attr = theme["chain_on"] if seq.chain_enabled else theme["chain_off"]
+    safe_add(outer_bottom, footer_x, footer_patterns[:max_w], patterns_attr)
+    footer_x += len(footer_patterns)
+    safe_add(outer_bottom, footer_x, "   "[:max(0, max_w - len(footer_patterns))], theme["frame"])
+    footer_x += 3
+    safe_add(outer_bottom, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
 
     stdscr.refresh()
 
@@ -2025,8 +2034,8 @@ class Controller:
                         self.seq.change_current_pattern_swing(+1)
                     elif param == "pitch":
                         self.seq.change_pitch_semitones(+1)
-                elif self.header_section == "params":
-                    self.header_section = "tabs"
+                elif self.header_section == "tabs":
+                    self.header_section = "params"
                 return True
             if self.cursor_y == 0:
                 self.header_focus = True
@@ -2040,18 +2049,19 @@ class Controller:
             return True
         if key_code == curses.KEY_DOWN:
             if self.header_focus:
-                if self.header_section == "tabs":
-                    self.header_section = "params"
-                elif self.header_edit_active:
-                    param = self.header_params[self.header_param_index]
-                    if param == "bpm":
-                        self.seq.change_bpm(-1)
-                    elif param == "length":
-                        self.seq.change_current_pattern_length(-1)
-                    elif param == "swing":
-                        self.seq.change_current_pattern_swing(-1)
-                    elif param == "pitch":
-                        self.seq.change_pitch_semitones(-1)
+                if self.header_section == "params":
+                    if self.header_edit_active:
+                        param = self.header_params[self.header_param_index]
+                        if param == "bpm":
+                            self.seq.change_bpm(-1)
+                        elif param == "length":
+                            self.seq.change_current_pattern_length(-1)
+                        elif param == "swing":
+                            self.seq.change_current_pattern_swing(-1)
+                        elif param == "pitch":
+                            self.seq.change_pitch_semitones(-1)
+                    else:
+                        self.header_section = "tabs"
                 else:
                     self.header_focus = False
                     self.header_section = "params"
