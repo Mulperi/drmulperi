@@ -58,6 +58,7 @@ class Sequencer:
         self.seq_track_pitch = [0 for _ in range(TRACKS)]
         self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_slot_shift = [[12 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_sample_paths = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_sample_names = [["-" for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_samples = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
@@ -65,6 +66,7 @@ class Sequencer:
         self.audio_track_mode = [0 for _ in range(TRACKS - 1)]  # 0=Pattern, 1=Song
         self.audio_track_free_pan = [5 for _ in range(TRACKS - 1)]
         self.audio_track_free_volume = [9 for _ in range(TRACKS - 1)]
+        self.audio_track_free_shift = [12 for _ in range(TRACKS - 1)]
         self.audio_track_free_sample_paths = [None for _ in range(TRACKS - 1)]
         self.audio_track_free_sample_names = ["-" for _ in range(TRACKS - 1)]
         self.audio_track_free_samples = [None for _ in range(TRACKS - 1)]
@@ -252,6 +254,35 @@ class Sequencer:
             data = self._resample_mono_linear(data, source_sr, engine_sr)
         return data, source_sr, engine_sr, resampled, channels
 
+    def _read_wav_audio_info(self, path):
+        """Read WAV as float32, preserve stereo when present, and resample to engine SR."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", wavfile.WavFileWarning)
+            sr, data = wavfile.read(path)
+        if data.dtype == np.int16:
+            data = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            data = data.astype(np.float32) / 2147483648.0
+        else:
+            data = data.astype(np.float32)
+        channels = 2 if len(data.shape) == 2 and data.shape[1] > 1 else 1
+        source_sr = int(sr) if int(sr) > 0 else int(self.engine.sr)
+        engine_sr = int(self.engine.sr)
+        resampled = source_sr != engine_sr
+        if resampled:
+            if channels >= 2:
+                left = self._resample_mono_linear(data[:, 0], source_sr, engine_sr)
+                right = self._resample_mono_linear(data[:, 1], source_sr, engine_sr)
+                n = min(len(left), len(right))
+                data = np.column_stack((left[:n], right[:n])).astype(np.float32)
+            else:
+                data = self._resample_mono_linear(data, source_sr, engine_sr)
+        if channels >= 2:
+            data = np.asarray(data[:, :2], dtype=np.float32)
+        else:
+            data = np.asarray(data, dtype=np.float32)
+        return data, source_sr, engine_sr, resampled, channels
+
     def _read_wav_mono(self, path):
         """Read WAV as mono float32 and resample to engine sample rate."""
         data, _, _, _, _ = self._read_wav_mono_info(path)
@@ -349,6 +380,7 @@ class Sequencer:
                     "slot": {
                         "pan": [self.audio_track_slot_pan[p][t] for p in range(self.pattern_count())],
                         "volume": [self.audio_track_slot_volume[p][t] for p in range(self.pattern_count())],
+                        "shift": [self.audio_track_slot_shift[p][t] for p in range(self.pattern_count())],
                         "sample_paths": [
                             self._path_for_save(self.audio_track_slot_sample_paths[p][t], base_dir)
                             for p in range(self.pattern_count())
@@ -359,6 +391,7 @@ class Sequencer:
                     "free": {
                         "pan": self.audio_track_free_pan[t],
                         "volume": self.audio_track_free_volume[t],
+                        "shift": self.audio_track_free_shift[t],
                         "sample_path": self._path_for_save(self.audio_track_free_sample_paths[t], base_dir),
                         "sample_name": self.audio_track_free_sample_names[t],
                         "channels": self.audio_track_free_channels[t],
@@ -554,12 +587,14 @@ class Sequencer:
         loaded_tracks = data.get("audio_tracks", [])
         normalized_audio_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
         normalized_audio_vol = [[9 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
+        normalized_audio_shift = [[12 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
         normalized_audio_paths = [[None for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
         normalized_audio_names = [["-" for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
         normalized_audio_channels = [[1 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
         normalized_mode = [0 for _ in range(TRACKS - 1)]
         normalized_free_pan = [5 for _ in range(TRACKS - 1)]
         normalized_free_vol = [9 for _ in range(TRACKS - 1)]
+        normalized_free_shift = [12 for _ in range(TRACKS - 1)]
         normalized_free_paths = [None for _ in range(TRACKS - 1)]
         normalized_free_names = ["-" for _ in range(TRACKS - 1)]
         normalized_free_channels = [1 for _ in range(TRACKS - 1)]
@@ -573,6 +608,7 @@ class Sequencer:
                 pattern_obj = track_obj.get("slot", {})
                 pattern_pan = pattern_obj.get("pan", [])
                 pattern_vol = pattern_obj.get("volume", [])
+                pattern_shift = pattern_obj.get("shift", [])
                 pattern_paths = pattern_obj.get("sample_paths", [])
                 pattern_names = pattern_obj.get("sample_names", [])
                 pattern_channels = pattern_obj.get("channels", [])
@@ -585,6 +621,11 @@ class Sequencer:
                     if isinstance(pattern_vol, list) and p < len(pattern_vol):
                         try:
                             normalized_audio_vol[p][t] = max(0, min(9, int(pattern_vol[p])))
+                        except (TypeError, ValueError):
+                            pass
+                    if isinstance(pattern_shift, list) and p < len(pattern_shift):
+                        try:
+                            normalized_audio_shift[p][t] = max(0, min(50, int(pattern_shift[p])))
                         except (TypeError, ValueError):
                             pass
                     if isinstance(pattern_channels, list) and p < len(pattern_channels):
@@ -617,6 +658,10 @@ class Sequencer:
                     normalized_free_vol[t] = max(0, min(9, int(free_obj.get("volume", 9))))
                 except (TypeError, ValueError):
                     pass
+                try:
+                    normalized_free_shift[t] = max(0, min(50, int(free_obj.get("shift", 12))))
+                except (TypeError, ValueError):
+                    pass
                 name_val = free_obj.get("sample_name", "-")
                 if not isinstance(name_val, str) or not name_val.strip():
                     name_val = "-"
@@ -637,6 +682,7 @@ class Sequencer:
 
         self.audio_track_slot_pan = normalized_audio_pan
         self.audio_track_slot_volume = normalized_audio_vol
+        self.audio_track_slot_shift = normalized_audio_shift
         self.audio_track_slot_sample_paths = normalized_audio_paths
         self.audio_track_slot_sample_names = normalized_audio_names
         self.audio_track_slot_channels = normalized_audio_channels
@@ -645,10 +691,13 @@ class Sequencer:
             for t in range(TRACKS - 1):
                 path = self.audio_track_slot_sample_paths[p][t]
                 if path and os.path.isfile(path):
-                    self.audio_track_slot_samples[p][t] = self._read_wav_mono(path)
+                    sample, _, _, _, channels = self._read_wav_audio_info(path)
+                    self.audio_track_slot_samples[p][t] = sample
+                    self.audio_track_slot_channels[p][t] = 2 if channels >= 2 else 1
         self.audio_track_mode = normalized_mode
         self.audio_track_free_pan = normalized_free_pan
         self.audio_track_free_volume = normalized_free_vol
+        self.audio_track_free_shift = normalized_free_shift
         self.audio_track_free_sample_paths = normalized_free_paths
         self.audio_track_free_sample_names = normalized_free_names
         self.audio_track_free_channels = normalized_free_channels
@@ -656,7 +705,9 @@ class Sequencer:
         for t in range(TRACKS - 1):
             path = self.audio_track_free_sample_paths[t]
             if path and os.path.isfile(path):
-                self.audio_track_free_samples[t] = self._read_wav_mono(path)
+                sample, _, _, _, channels = self._read_wav_audio_info(path)
+                self.audio_track_free_samples[t] = sample
+                self.audio_track_free_channels[t] = 2 if channels >= 2 else 1
 
         loaded_lengths = data.get("pattern_length", self.pattern_length)
         normalized_lengths = [STEPS for _ in range(pattern_count)]
@@ -822,6 +873,7 @@ class Sequencer:
 
         self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_slot_shift = [[12 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_sample_paths = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_sample_names = [["-" for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_samples = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
@@ -829,6 +881,7 @@ class Sequencer:
         self.audio_track_mode = [0 for _ in range(TRACKS - 1)]
         self.audio_track_free_pan = [5 for _ in range(TRACKS - 1)]
         self.audio_track_free_volume = [9 for _ in range(TRACKS - 1)]
+        self.audio_track_free_shift = [12 for _ in range(TRACKS - 1)]
         self.audio_track_free_sample_paths = [None for _ in range(TRACKS - 1)]
         self.audio_track_free_sample_names = ["-" for _ in range(TRACKS - 1)]
         self.audio_track_free_samples = [None for _ in range(TRACKS - 1)]
@@ -915,7 +968,7 @@ class Sequencer:
         if not os.path.isfile(path) or not path.lower().endswith(".wav"):
             return False, "Select a .wav file"
         try:
-            sample, src_sr, dst_sr, resampled, channels = self._read_wav_mono_info(path)
+            sample, src_sr, dst_sr, resampled, channels = self._read_wav_audio_info(path)
         except Exception as exc:
             return False, f"Sample load failed: {exc}"
         if self.audio_track_mode[track] == 1:
@@ -969,6 +1022,7 @@ class Sequencer:
                     self.audio_track_slot_channels[p][t] = 1
                     self.audio_track_slot_pan[p][t] = 5
                     self.audio_track_slot_volume[p][t] = 9
+                    self.audio_track_slot_shift[p][t] = 12
                     removed += 1
         for t in range(TRACKS - 1):
             if self.audio_track_free_sample_paths[t] == path:
@@ -978,6 +1032,7 @@ class Sequencer:
                 self.audio_track_free_channels[t] = 1
                 self.audio_track_free_pan[t] = 5
                 self.audio_track_free_volume[t] = 9
+                self.audio_track_free_shift[t] = 12
                 removed += 1
         return removed
 
@@ -1009,6 +1064,7 @@ class Sequencer:
             self.audio_track_free_sample_names[track] = "-"
             self.audio_track_free_samples[track] = None
             self.audio_track_free_channels[track] = 1
+            self.audio_track_free_shift[track] = 12
         else:
             if pattern_index < 0 or pattern_index >= self.pattern_count():
                 return False, "Invalid pattern"
@@ -1016,6 +1072,7 @@ class Sequencer:
             self.audio_track_slot_sample_names[pattern_index][track] = "-"
             self.audio_track_slot_samples[pattern_index][track] = None
             self.audio_track_slot_channels[pattern_index][track] = 1
+            self.audio_track_slot_shift[pattern_index][track] = 12
         self.dirty = True
         if delete_file and old_path and os.path.isfile(old_path):
             used_elsewhere = self._is_audio_path_used_elsewhere(
@@ -1284,15 +1341,23 @@ class Sequencer:
                 return None
             if abs(rate - 1.0) < 1e-6:
                 return sample
-            src_len = len(sample)
+            arr = np.asarray(sample, dtype=np.float32)
+            if arr.ndim == 2 and arr.shape[1] >= 2:
+                left = pitch_sample(arr[:, 0], rate)
+                right = pitch_sample(arr[:, 1], rate)
+                if left is None or right is None:
+                    return None
+                n = min(len(left), len(right))
+                return np.column_stack((left[:n], right[:n])).astype(np.float32)
+            src_len = len(arr)
             if src_len < 2:
-                return sample
+                return arr
             out_len = max(1, int(((src_len - 1) / rate) + 1))
             pos = np.arange(out_len, dtype=np.float32) * rate
             idx0 = np.minimum(pos.astype(np.int32), src_len - 2)
             frac = pos - idx0
             idx1 = idx0 + 1
-            return ((1.0 - frac) * sample[idx0]) + (frac * sample[idx1])
+            return ((1.0 - frac) * arr[idx0]) + (frac * arr[idx1])
 
         pitched_samples = [pitch_sample(self.engine.samples[t], self.pitch_rate(t)) for t in range(TRACKS - 1)]
 
@@ -1443,15 +1508,23 @@ class Sequencer:
                 return None
             if abs(rate - 1.0) < 1e-6:
                 return sample
-            src_len = len(sample)
+            arr = np.asarray(sample, dtype=np.float32)
+            if arr.ndim == 2 and arr.shape[1] >= 2:
+                left = pitch_sample(arr[:, 0], rate)
+                right = pitch_sample(arr[:, 1], rate)
+                if left is None or right is None:
+                    return None
+                n = min(len(left), len(right))
+                return np.column_stack((left[:n], right[:n])).astype(np.float32)
+            src_len = len(arr)
             if src_len < 2:
-                return sample
+                return arr
             out_len = max(1, int(((src_len - 1) / rate) + 1))
             pos = np.arange(out_len, dtype=np.float32) * rate
             idx0 = np.minimum(pos.astype(np.int32), src_len - 2)
             frac = pos - idx0
             idx1 = idx0 + 1
-            return ((1.0 - frac) * sample[idx0]) + (frac * sample[idx1])
+            return ((1.0 - frac) * arr[idx0]) + (frac * arr[idx1])
 
         pitched_seq_samples = [pitch_sample(self.engine.samples[t], self.pitch_rate(t)) for t in range(TRACKS - 1)]
 
@@ -1468,13 +1541,16 @@ class Sequencer:
                     sample = self.audio_track_free_samples[t]
                     vol = max(0.0, min(1.0, self.audio_track_free_volume[t] / 9.0))
                     pan = self.audio_track_free_pan[t]
+                    shift_ui = self.audio_track_free_shift[t]
                 else:
                     sample = self.audio_track_slot_samples[pattern][t]
                     vol = max(0.0, min(1.0, self.audio_track_slot_volume[pattern][t] / 9.0))
                     pan = self.audio_track_slot_pan[pattern][t]
+                    shift_ui = self.audio_track_slot_shift[pattern][t]
                 if sample is None or vol <= 0.0:
                     continue
                 pitched = pitch_sample(sample, self.pitch_rate())
+                pitched = self._apply_audio_track_start_shift(pitched, shift_ui)
                 if pitched is None:
                     continue
                 n = min(len(pitched), total_samples - start)
@@ -1484,8 +1560,12 @@ class Sequencer:
                 pan_l = float(np.cos(pan_pos * (np.pi / 2)))
                 pan_r = float(np.sin(pan_pos * (np.pi / 2)))
                 chunk = pitched[:n] * vol
-                mix[start:start + n, 0] += chunk * pan_l
-                mix[start:start + n, 1] += chunk * pan_r
+                if np.asarray(chunk).ndim == 2 and chunk.shape[1] >= 2:
+                    mix[start:start + n, 0] += chunk[:, 0] * pan_l
+                    mix[start:start + n, 1] += chunk[:, 1] * pan_r
+                else:
+                    mix[start:start + n, 0] += chunk * pan_l
+                    mix[start:start + n, 1] += chunk * pan_r
 
         # Sequencer track events.
         for pattern, s, step_start, step_time in timeline:
@@ -1777,17 +1857,47 @@ class Sequencer:
                 sample = self.audio_track_free_samples[t]
                 vol = max(0.0, min(1.0, self.audio_track_free_volume[t] / 9.0))
                 pan = self.audio_track_free_pan[t]
+                shift_ui = self.audio_track_free_shift[t]
             else:
                 sample = self.audio_track_slot_samples[pattern_index][t]
                 vol = max(0.0, min(1.0, self.audio_track_slot_volume[pattern_index][t] / 9.0))
                 pan = self.audio_track_slot_pan[pattern_index][t]
+                shift_ui = self.audio_track_slot_shift[pattern_index][t]
             if sample is None:
                 continue
             if vol <= 0.0:
                 continue
+            sample = self._apply_audio_track_start_shift(sample, shift_ui)
+            if sample is None or len(sample) <= 1:
+                continue
             self._mark_track_trigger(t, source="audio")
             # Replace previous voice on this audio lane to keep long loops stable.
             self.engine.trigger_buffer(sample, vol, pan, rate=self.pitch_rate(), track=100 + t, replace=True)
+
+    def _apply_audio_track_start_shift(self, sample, shift_ui):
+        """Apply audio-track start shift to sample data.
+
+        UI scale is 0..50 where 12 is neutral:
+        - >12 trims sample start (earlier perceived hit)
+        - <12 adds silence before sample (later perceived hit)
+        """
+        if sample is None:
+            return None
+        ms = self.audio_shift_ui_to_ms(shift_ui)
+        if ms == 0:
+            return sample
+        n = int(round(abs(ms) * self.engine.sr / 1000.0))
+        if n <= 0:
+            return sample
+        if ms > 0:
+            if n >= len(sample):
+                return None
+            return sample[n:]
+        arr = np.asarray(sample, dtype=np.float32)
+        if arr.ndim == 2 and arr.shape[1] >= 2:
+            pad = np.zeros((n, arr.shape[1]), dtype=np.float32)
+            return np.concatenate((pad, arr), axis=0)
+        return np.concatenate((np.zeros((n,), dtype=np.float32), arr))
 
     def _mark_track_trigger(self, track, source="seq"):
         """Mark a track flash indicator for seq/audio lanes independently."""
@@ -2008,6 +2118,7 @@ class Sequencer:
             self.pattern_swing.append(int(self.pattern_swing[self.view_pattern]))
             self.audio_track_slot_pan.append(self.audio_track_slot_pan[self.view_pattern][:])
             self.audio_track_slot_volume.append(self.audio_track_slot_volume[self.view_pattern][:])
+            self.audio_track_slot_shift.append(self.audio_track_slot_shift[self.view_pattern][:])
             self.audio_track_slot_sample_paths.append(self.audio_track_slot_sample_paths[self.view_pattern][:])
             self.audio_track_slot_sample_names.append(self.audio_track_slot_sample_names[self.view_pattern][:])
             self.audio_track_slot_samples.append(self.audio_track_slot_samples[self.view_pattern][:])
@@ -2019,6 +2130,7 @@ class Sequencer:
             self.pattern_swing.append(50)
             self.audio_track_slot_pan.append([5 for _ in range(TRACKS - 1)])
             self.audio_track_slot_volume.append([9 for _ in range(TRACKS - 1)])
+            self.audio_track_slot_shift.append([12 for _ in range(TRACKS - 1)])
             self.audio_track_slot_sample_paths.append([None for _ in range(TRACKS - 1)])
             self.audio_track_slot_sample_names.append(["-" for _ in range(TRACKS - 1)])
             self.audio_track_slot_samples.append([None for _ in range(TRACKS - 1)])
@@ -2040,6 +2152,7 @@ class Sequencer:
         del self.pattern_swing[idx]
         del self.audio_track_slot_pan[idx]
         del self.audio_track_slot_volume[idx]
+        del self.audio_track_slot_shift[idx]
         del self.audio_track_slot_sample_paths[idx]
         del self.audio_track_slot_sample_names[idx]
         del self.audio_track_slot_samples[idx]
@@ -2087,6 +2200,7 @@ class Sequencer:
             "swing": self.pattern_swing[self.view_pattern],
             "audio_slot_pan": self.audio_track_slot_pan[self.view_pattern][:],
             "audio_slot_volume": self.audio_track_slot_volume[self.view_pattern][:],
+            "audio_slot_shift": self.audio_track_slot_shift[self.view_pattern][:],
             "audio_slot_sample_paths": self.audio_track_slot_sample_paths[self.view_pattern][:],
             "audio_slot_sample_names": self.audio_track_slot_sample_names[self.view_pattern][:],
             "audio_slot_samples": slot_samples,
@@ -2107,6 +2221,8 @@ class Sequencer:
             self.audio_track_slot_pan[self.view_pattern] = self.pattern_clipboard["audio_slot_pan"][:]
         if "audio_slot_volume" in self.pattern_clipboard:
             self.audio_track_slot_volume[self.view_pattern] = self.pattern_clipboard["audio_slot_volume"][:]
+        if "audio_slot_shift" in self.pattern_clipboard:
+            self.audio_track_slot_shift[self.view_pattern] = self.pattern_clipboard["audio_slot_shift"][:]
         if "audio_slot_sample_paths" in self.pattern_clipboard:
             self.audio_track_slot_sample_paths[self.view_pattern] = self.pattern_clipboard["audio_slot_sample_paths"][:]
         if "audio_slot_sample_names" in self.pattern_clipboard:
@@ -2221,6 +2337,7 @@ class Sequencer:
             self.audio_track_free_sample_names[track] = self.audio_track_slot_sample_names[pattern_index][track]
             self.audio_track_free_pan[track] = self.audio_track_slot_pan[pattern_index][track]
             self.audio_track_free_volume[track] = self.audio_track_slot_volume[pattern_index][track]
+            self.audio_track_free_shift[track] = self.audio_track_slot_shift[pattern_index][track]
             self.audio_track_free_channels[track] = self.audio_track_slot_channels[pattern_index][track]
             # Clear source pattern slot so this is a true move, not copy.
             self.audio_track_slot_samples[pattern_index][track] = None
@@ -2228,6 +2345,7 @@ class Sequencer:
             self.audio_track_slot_sample_names[pattern_index][track] = "-"
             self.audio_track_slot_pan[pattern_index][track] = 5
             self.audio_track_slot_volume[pattern_index][track] = 9
+            self.audio_track_slot_shift[pattern_index][track] = 12
             self.audio_track_slot_channels[pattern_index][track] = 1
         else:
             # Move ownership from song payload into current pattern slot.
@@ -2236,6 +2354,7 @@ class Sequencer:
             self.audio_track_slot_sample_names[pattern_index][track] = self.audio_track_free_sample_names[track]
             self.audio_track_slot_pan[pattern_index][track] = self.audio_track_free_pan[track]
             self.audio_track_slot_volume[pattern_index][track] = self.audio_track_free_volume[track]
+            self.audio_track_slot_shift[pattern_index][track] = self.audio_track_free_shift[track]
             self.audio_track_slot_channels[pattern_index][track] = self.audio_track_free_channels[track]
             # Clear song payload after moving back to pattern ownership.
             self.audio_track_free_samples[track] = None
@@ -2243,6 +2362,7 @@ class Sequencer:
             self.audio_track_free_sample_names[track] = "-"
             self.audio_track_free_pan[track] = 5
             self.audio_track_free_volume[track] = 9
+            self.audio_track_free_shift[track] = 12
             self.audio_track_free_channels[track] = 1
 
         self.audio_track_mode[track] = next_mode
@@ -2290,6 +2410,35 @@ class Sequencer:
         if pattern_index < 0 or pattern_index >= self.pattern_count():
             return 9
         return self.audio_track_slot_volume[pattern_index][track]
+
+    @staticmethod
+    def audio_shift_ui_to_ms(shift_ui):
+        """Convert audio start shift UI value (0..50) to milliseconds (-60..+190)."""
+        ui = max(0, min(50, int(shift_ui)))
+        return (ui - 12) * 5
+
+    def get_audio_track_shift(self, pattern_index, track):
+        """Return current audio-track shift UI value (0..50, 12 = no shift)."""
+        if track < 0 or track >= TRACKS - 1:
+            return 12
+        if self.audio_track_mode[track] == 1:
+            return self.audio_track_free_shift[track]
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return 12
+        return self.audio_track_slot_shift[pattern_index][track]
+
+    def set_audio_track_shift(self, pattern_index, track, shift_ui):
+        """Set audio-track start shift UI value (0..50, 12 = no shift)."""
+        if track < 0 or track >= TRACKS - 1:
+            return
+        value = max(0, min(50, int(shift_ui)))
+        if self.audio_track_mode[track] == 1:
+            self.audio_track_free_shift[track] = value
+        else:
+            if pattern_index < 0 or pattern_index >= self.pattern_count():
+                return
+            self.audio_track_slot_shift[pattern_index][track] = value
+        self.dirty = True
 
     def get_audio_track_channels(self, pattern_index, track):
         """Return channel count (1 or 2) for active audio track lane."""

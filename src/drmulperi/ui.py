@@ -355,7 +355,7 @@ def draw(
                 (HUMANIZE_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
                 (PROB_COL, "●"),
                 (GROUP_COL, "X"),
-                (TRACK_PITCH_COL, "N"),
+                (TRACK_PITCH_COL, f"↔{seq.get_audio_track_shift(seq.view_pattern, t):02d}"),
             ]
             for col, char in cols:
                 safe_add(y, x, "| ", theme["divider"])
@@ -513,7 +513,7 @@ def draw(
     elif active_tab == 1 and cursor_x == GROUP_COL:
         help_line = "Clear current audio track sample"
     elif active_tab == 1 and cursor_x == TRACK_PITCH_COL:
-        help_line = "Rename current track sample"
+        help_line = "Start shift: 0..50 (12=center). 1 step = 5ms. Higher trims sample start, lower adds delay."
     elif active_tab == 1 and cursor_y < TRACKS - 1:
         active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
         help_line = f"AUDIO TRACK SAMPLE: {seq.get_audio_track_name(seq.view_pattern, active_track)}"
@@ -1173,6 +1173,31 @@ class Controller:
         elif col == TRACK_PITCH_COL:
             value = max(0, min(24, value))
             self.seq.set_track_pitch_ui(self.cursor_y, value)
+
+    def _apply_inline_audio_track_value(self, col, digit):
+        """Apply inline numeric typing for Audio-view parameter columns."""
+        track_idx = self._track_for_row(self.cursor_y)
+        now = time.time()
+        target = (self.cursor_y, col)
+        if self.inline_value_target != target or (now - self.inline_value_time) > 1.0:
+            self.inline_value_buffer = ""
+
+        self.inline_value_target = target
+        self.inline_value_time = now
+        self.inline_value_buffer = (self.inline_value_buffer + str(digit))[-3:]
+
+        try:
+            value = int(self.inline_value_buffer)
+        except ValueError:
+            value = digit
+
+        if col == PAN_COL:
+            if value > 0:
+                self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, max(1, min(9, value)))
+        elif col == HUMANIZE_COL:
+            self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, max(0, min(9, value)))
+        elif col == TRACK_PITCH_COL:
+            self.seq.set_audio_track_shift(self.seq.view_pattern, track_idx, max(0, min(50, value)))
 
     def _close_pattern_dialog(self):
         self.pattern_load_active = False
@@ -2834,13 +2859,16 @@ class Controller:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
                 return True
             if self.active_tab == 1 and self.cursor_x == PAN_COL:
-                if self.cursor_y != ACCENT_TRACK and velocity > 0:
-                    self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, velocity)
+                if self.cursor_y != ACCENT_TRACK:
+                    self._apply_inline_audio_track_value(PAN_COL, velocity)
             elif self.active_tab == 1 and self.cursor_x == HUMANIZE_COL:
                 if self.cursor_y != ACCENT_TRACK:
-                    self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
+                    self._apply_inline_audio_track_value(HUMANIZE_COL, velocity)
             elif self.active_tab == 1 and self.cursor_x == PROB_COL:
                 pass
+            elif self.active_tab == 1 and self.cursor_x == TRACK_PITCH_COL:
+                if self.cursor_y != ACCENT_TRACK:
+                    self._apply_inline_audio_track_value(TRACK_PITCH_COL, velocity)
             elif self.cursor_x == PREVIEW_COL:
                 pass
             elif self.cursor_x == PAN_COL:
@@ -2982,8 +3010,7 @@ class Controller:
                 elif self.cursor_x == GROUP_COL:
                     self._open_clear_audio_confirm(self.seq.view_pattern, track_idx)
                 elif self.cursor_x == TRACK_PITCH_COL:
-                    self.track_rename_active = True
-                    self.track_rename_input = ""
+                    self.seq.set_audio_track_shift(self.seq.view_pattern, track_idx, 12)
                 return True
             if self.active_tab == 2:
                 self.status_message = "Mixer: type 1-9 for pan, 0-9 for volume"

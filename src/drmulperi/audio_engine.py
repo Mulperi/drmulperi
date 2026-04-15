@@ -484,38 +484,52 @@ class AudioEngine:
 
         return mix
 
+    def _mix_voice_into_buffer(self, mix, voice, frames):
+        """Mix one active voice into the output buffer, supporting mono/stereo sources."""
+        if not voice.active:
+            return
+        src = voice.data
+        if src is None:
+            voice.active = False
+            voice.track = -1
+            return
+
+        src_len = int(src.shape[0]) if hasattr(src, "shape") else len(src)
+        if src_len < 2:
+            voice.active = False
+            voice.track = -1
+            return
+
+        positions = voice.pos + (np.arange(frames, dtype=np.float32) * voice.rate)
+        valid = positions < (src_len - 1)
+        n = int(np.count_nonzero(valid))
+        if n > 0:
+            p = positions[:n]
+            idx0 = p.astype(np.int32)
+            frac = p - idx0
+            idx1 = idx0 + 1
+
+            if np.asarray(src).ndim == 2 and src.shape[1] >= 2:
+                l = ((1.0 - frac) * src[idx0, 0]) + (frac * src[idx1, 0])
+                r = ((1.0 - frac) * src[idx0, 1]) + (frac * src[idx1, 1])
+                mix[:n, 0] += (l * voice.vel) * voice.pan_l
+                mix[:n, 1] += (r * voice.vel) * voice.pan_r
+            else:
+                chunk = ((1.0 - frac) * src[idx0]) + (frac * src[idx1])
+                scaled = chunk * voice.vel
+                mix[:n, 0] += scaled * voice.pan_l
+                mix[:n, 1] += scaled * voice.pan_r
+
+        voice.pos += frames * voice.rate
+        if voice.pos >= (src_len - 1):
+            voice.active = False
+            voice.track = -1
+
     def audio_callback(self, outdata, frames, time_info, status):
         """PortAudio callback: consume trigger queue, mix voices, write to `outdata`."""
         mix = self._render_output(frames)
-
         for v in self.voices:
-            if not v.active:
-                continue
-
-            src = v.data
-            src_len = len(src)
-            if src_len < 2:
-                v.active = False
-                v.track = -1
-                continue
-
-            positions = v.pos + (np.arange(frames, dtype=np.float32) * v.rate)
-            valid = positions < (src_len - 1)
-            n = int(np.count_nonzero(valid))
-            if n > 0:
-                p = positions[:n]
-                idx0 = p.astype(np.int32)
-                frac = p - idx0
-                idx1 = idx0 + 1
-                chunk = ((1.0 - frac) * src[idx0]) + (frac * src[idx1])
-                scaled = chunk * v.vel
-                mix[:n, 0] += scaled * v.pan_l
-                mix[:n, 1] += scaled * v.pan_r
-
-            v.pos += frames * v.rate
-            if v.pos >= (src_len - 1):
-                v.active = False
-                v.track = -1
+            self._mix_voice_into_buffer(mix, v, frames)
 
         outdata[:] = mix * 0.25
 
@@ -564,32 +578,6 @@ class AudioEngine:
 
         mix = self._render_output(frames)
         for v in self.voices:
-            if not v.active:
-                continue
-
-            src = v.data
-            src_len = len(src)
-            if src_len < 2:
-                v.active = False
-                v.track = -1
-                continue
-
-            positions = v.pos + (np.arange(frames, dtype=np.float32) * v.rate)
-            valid = positions < (src_len - 1)
-            n = int(np.count_nonzero(valid))
-            if n > 0:
-                p = positions[:n]
-                idx0 = p.astype(np.int32)
-                frac = p - idx0
-                idx1 = idx0 + 1
-                chunk = ((1.0 - frac) * src[idx0]) + (frac * src[idx1])
-                scaled = chunk * v.vel
-                mix[:n, 0] += scaled * v.pan_l
-                mix[:n, 1] += scaled * v.pan_r
-
-            v.pos += frames * v.rate
-            if v.pos >= (src_len - 1):
-                v.active = False
-                v.track = -1
+            self._mix_voice_into_buffer(mix, v, frames)
 
         outdata[:] = mix * 0.25
