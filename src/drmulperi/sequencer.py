@@ -1389,6 +1389,150 @@ class Sequencer:
         scope_label = "song" if scope == "chain" else "pattern"
         return True, f"Exported audio: {os.path.basename(path)} ({scope_label}, {target_sr}Hz, {bit_depth}-bit, {chan_label})"
 
+    def render_record_backing(self, precount_pattern, take_pattern, scope="pattern", include_precount=True):
+        """Render a deterministic record backing buffer (precount + take) at engine sample rate.
+
+        Returns:
+            (buffer_mono, trim_seconds, total_seconds)
+            `trim_seconds` indicates how much leading precount should be removed
+            from captured input audio after recording.
+        """
+        sr = int(self.engine.sr)
+        scope_norm = str(scope or "pattern").strip().lower()
+        if scope_norm not in {"pattern", "song"}:
+            scope_norm = "pattern"
+
+        max_idx = max(0, self.pattern_count() - 1)
+        pre_idx = max(0, min(max_idx, int(precount_pattern)))
+        take_idx = max(0, min(max_idx, int(take_pattern)))
+
+        take_order = []
+        if scope_norm == "song" and self.chain:
+            take_order = [max(0, min(max_idx, int(v))) for v in self.chain]
+        else:
+            take_order = [take_idx]
+
+        play_order = []
+        trim_seconds = 0.0
+        if include_precount:
+            play_order.append(pre_idx)
+            trim_seconds += self.pattern_duration_seconds(pre_idx)
+        play_order.extend(take_order)
+
+        if not play_order:
+            return np.zeros((1,), dtype=np.float32), 0.0, 0.0
+
+        base_step_time = (60.0 / self.bpm) / self.steps_per_beat
+        timeline = []
+        pattern_starts = []
+        t_cursor = 0.0
+        for pattern in play_order:
+            pattern_starts.append((pattern, t_cursor))
+            current_length = self.pattern_length[pattern]
+            for s in range(current_length):
+                step_time = self._step_duration_for(pattern, s, base_step_time)
+                timeline.append((pattern, s, t_cursor, step_time))
+                t_cursor += step_time
+
+        total_seconds = max(0.01, float(t_cursor))
+        total_samples = max(1, int(round(total_seconds * sr)))
+        mix = np.zeros((total_samples, 2), dtype=np.float32)
+
+        def pitch_sample(sample, rate):
+            if sample is None:
+                return None
+            if abs(rate - 1.0) < 1e-6:
+                return sample
+            src_len = len(sample)
+            if src_len < 2:
+                return sample
+            out_len = max(1, int(((src_len - 1) / rate) + 1))
+            pos = np.arange(out_len, dtype=np.float32) * rate
+            idx0 = np.minimum(pos.astype(np.int32), src_len - 2)
+            frac = pos - idx0
+            idx1 = idx0 + 1
+            return ((1.0 - frac) * sample[idx0]) + (frac * sample[idx1])
+
+        pitched_seq_samples = [pitch_sample(self.engine.samples[t], self.pitch_rate(t)) for t in range(TRACKS - 1)]
+
+        # Pattern/song audio tracks fire once at pattern start.
+        for pattern, start_t in pattern_starts:
+            start = int(round(start_t * sr))
+            if start >= total_samples:
+                continue
+            for t in range(TRACKS - 1):
+                if self.audio_track_mode[t] == 1:
+                    # Song audio is only part of song takes.
+                    if scope_norm != "song":
+                        continue
+                    sample = self.audio_track_free_samples[t]
+                    vol = max(0.0, min(1.0, self.audio_track_free_volume[t] / 9.0))
+                    pan = self.audio_track_free_pan[t]
+                else:
+                    sample = self.audio_track_slot_samples[pattern][t]
+                    vol = max(0.0, min(1.0, self.audio_track_slot_volume[pattern][t] / 9.0))
+                    pan = self.audio_track_slot_pan[pattern][t]
+                if sample is None or vol <= 0.0:
+                    continue
+                pitched = pitch_sample(sample, self.pitch_rate())
+                if pitched is None:
+                    continue
+                n = min(len(pitched), total_samples - start)
+                if n <= 0:
+                    continue
+                pan_pos = (pan - 1) / 8.0
+                pan_l = float(np.cos(pan_pos * (np.pi / 2)))
+                pan_r = float(np.sin(pan_pos * (np.pi / 2)))
+                chunk = pitched[:n] * vol
+                mix[start:start + n, 0] += chunk * pan_l
+                mix[start:start + n, 1] += chunk * pan_r
+
+        # Sequencer track events.
+        for pattern, s, step_start, step_time in timeline:
+            accent_on = (
+                not self.muted_rows[ACCENT_TRACK]
+                and self.grid[pattern][ACCENT_TRACK][s] > 0
+            )
+            for t in range(TRACKS - 1):
+                if self.muted_rows[t]:
+                    continue
+                vel = self.grid[pattern][t][s]
+                if vel <= 0:
+                    continue
+                sample = pitched_seq_samples[t]
+                if sample is None:
+                    continue
+
+                v = vel / 9.0
+                if accent_on:
+                    v = min(1.0, v + ACCENT_BOOST)
+                v = max(0.0, min(1.0, v * (self.seq_track_volume[t] / 9.0)))
+
+                pan_pos = (self.seq_track_pan[t] - 1) / 8.0
+                pan_l = float(np.cos(pan_pos * (np.pi / 2)))
+                pan_r = float(np.sin(pan_pos * (np.pi / 2)))
+
+                ratchet = max(1, min(4, self.ratchet_grid[pattern][t][s]))
+                interval = step_time / ratchet
+                for i in range(ratchet):
+                    start = int(round((step_start + (i * interval)) * sr))
+                    if start >= total_samples:
+                        continue
+                    n = min(len(sample), total_samples - start)
+                    if n <= 0:
+                        continue
+                    chunk = sample[:n] * v
+                    mix[start:start + n, 0] += chunk * pan_l
+                    mix[start:start + n, 1] += chunk * pan_r
+
+        # Keep healthy headroom to avoid clipping in realtime callback.
+        peak = float(np.max(np.abs(mix))) if mix.size > 0 else 0.0
+        if peak > 1e-9:
+            mix = np.clip(mix * min(1.0, 0.8 / peak), -1.0, 1.0)
+
+        mono = mix.mean(axis=1).astype(np.float32)
+        return mono, float(trim_seconds), float(total_seconds)
+
     @staticmethod
     def _resample_audio_mono(samples, src_sr, dst_sr):
         """Linear-resample mono audio to a new sample rate."""

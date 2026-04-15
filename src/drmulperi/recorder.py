@@ -235,7 +235,9 @@ def cancel_record_capture(controller, reason="Recording canceled"):
         controller.record_capture_controls_transport = True
         controller.record_capture_end_time = 0.0
         controller.record_capture_started_playback = False
+        controller.record_capture_trim_seconds = 0.0
         controller.seq.engine.stop_capture()
+        controller.seq.engine.stop_all()
         if controller.record_use_external_capture:
             # Do not call `sd.stop()` here; it can stop the engine output stream too.
             controller._record_stream = None
@@ -270,8 +272,13 @@ def finish_record_capture(controller):
         controller.seq.engine.stop_capture()
         recorded = controller.seq.engine.consume_capture()
         controller.seq.engine.disable_duplex_after_recording()
+    pre_roll_seconds = float(getattr(controller, "record_capture_trim_seconds", 0.0) or 0.0)
     if recorded is not None:
         recorded = np.asarray(recorded, dtype=np.float32)
+        if pre_roll_seconds > 0.0:
+            trim_n = int(round(pre_roll_seconds * controller.seq.engine.sr))
+            if trim_n > 0:
+                recorded = recorded[trim_n:, ...]
     controller.record_capture_chunks = []
     controller.record_capture_buffer = None
     controller.record_capture_write = 0
@@ -282,7 +289,10 @@ def finish_record_capture(controller):
     controller.record_capture_end_time = 0.0
     controller.record_use_external_capture = False
     controller.record_capture_started_playback = False
+    # Clear one-shot precount trim marker after applying it.
+    controller.record_capture_trim_seconds = 0.0
     controller._stop_record_monitor()
+    controller.seq.engine.stop_all()
     with controller.seq.transport_lock:
         controller.seq.pending_events.clear()
         if controller.seq.pending_midi_off:
@@ -335,7 +345,7 @@ def finish_record_capture(controller):
 
 
 def arm_record_capture(controller):
-    """Start recording with selected precount and scope."""
+    """Start recording using pre-rendered backing for stable timing."""
     track = controller.record_capture_context_track
     if track is None and controller.active_tab == 1 and controller.cursor_y < (TRACKS - 1):
         track = controller._track_for_row(controller.cursor_y)
@@ -345,36 +355,56 @@ def arm_record_capture(controller):
     precount_pattern = max(0, min(controller.seq.pattern_count() - 1, int(controller.record_precount_pattern)))
     take_pattern = controller.seq.view_pattern
     scope = "song" if (0 <= track < (TRACKS - 1) and controller.seq.audio_track_mode[track] == 1) else "pattern"
-    precount_loops = 1 if controller.record_precount_enabled else 0
-    take_loops = max(1, len(controller.seq.chain)) if scope == "song" else 1
-    if take_loops <= 0:
-        controller.status_message = "Nothing to record"
-        return
+    include_precount = bool(controller.record_precount_enabled)
 
-    was_playing = bool(controller.seq.playing)
     controller._cancel_record_capture("")
     controller.record_capture_channels = 2 if int(controller.record_channels) >= 2 else 1
     controller.record_capture_input_indices = controller._current_record_input_indices()
-    take_seconds = controller.seq.chain_duration_seconds() if scope == "song" else controller.seq.pattern_duration_seconds(take_pattern)
+
+    with controller.seq.transport_lock:
+        if controller.seq.playing:
+            controller.seq.toggle_playback()
+        controller.seq.step = 0
+        controller.seq.next_pattern = None
+        controller.seq.pending_events.clear()
+        controller.seq.pending_midi_off.clear()
+        controller.seq.transport_resync = True
+
+    try:
+        backing, pre_roll_seconds, total_seconds = controller.seq.render_record_backing(
+            precount_pattern=precount_pattern,
+            take_pattern=take_pattern,
+            scope=scope,
+            include_precount=include_precount,
+        )
+    except Exception as exc:
+        controller.status_message = f"Record failed: backing render error ({exc})"
+        return
+
+    if backing is None or len(backing) <= 1:
+        controller.status_message = "Record failed: empty backing"
+        return
+
     controller.record_capture_buffer = None
     controller.record_capture_capacity = 0
     controller.record_capture_write = 0
-    controller.record_capture_duration_seconds = max(0.05, float(take_seconds))
+    controller.record_capture_duration_seconds = max(0.05, float(total_seconds))
     controller.record_capture_started_at = 0.0
     controller.record_capture_controls_transport = False
     controller.record_capture_end_time = 0.0
     controller.record_capture_started_playback = False
+    # Remove only deterministic precount duration from recorded take.
+    controller.record_capture_trim_seconds = max(0.0, float(pre_roll_seconds if include_precount else 0.0))
 
     if not controller._start_record_capture_stream():
         return
-    live_duplex = bool(controller.seq.engine.using_duplex and not controller.record_use_external_capture)
-    controller.record_capture_controls_transport = live_duplex
+
     controller.record_capture_active = True
-    controller.record_capture_stage = "preroll" if (precount_loops > 0 and controller.record_capture_controls_transport) else "recording"
+    controller.record_capture_stage = "recording"
     controller.record_capture_pattern = take_pattern
     controller.record_capture_scope = scope
-    controller.record_capture_precount_loops = int(precount_loops)
-    controller.record_capture_take_loops = int(take_loops)
+    controller.record_capture_precount_loops = 1 if include_precount else 0
+    controller.record_capture_take_loops = 1
     controller.record_capture_loop_count = 0
     controller.record_capture_precount_seconds = 0.0
     controller.record_capture_take_seconds = 0.0
@@ -385,121 +415,25 @@ def arm_record_capture(controller):
     controller.record_capture_chunks = []
     controller.record_level_db = -60.0
 
-    # Non-duplex: isolate recording from playback for stability.
-    if not live_duplex:
-        with controller.seq.transport_lock:
-            if controller.seq.playing:
-                controller.seq.toggle_playback()
-            controller.seq.step = 0
-            controller.seq.next_pattern = None
-            controller.seq.pending_events.clear()
-            controller.seq.pending_midi_off.clear()
-            controller.seq.transport_resync = True
-            controller.record_capture_last_step = controller.seq.step
-
-        try:
-            _start_take_capture(controller)
-        except Exception as exc:
-            controller._cancel_record_capture(f"Record failed: {exc}")
-            return
-        controller.record_capture_end_time = time.perf_counter() + controller.record_capture_duration_seconds
-        if was_playing:
-            controller.status_message = "Recording (playback paused for stability)"
-        else:
-            controller.status_message = "Recording..."
+    try:
+        _start_take_capture(controller)
+    except Exception as exc:
+        controller._cancel_record_capture(f"Record failed: {exc}")
         return
 
-    # Duplex live path: keep playback running and align capture to loop boundaries.
-    with controller.seq.transport_lock:
-        if not controller.seq.playing:
-            if controller.record_capture_stage == "preroll":
-                controller.seq.chain_enabled = False
-                controller.seq.select_pattern(precount_pattern)
-            else:
-                if scope == "song":
-                    controller.seq.chain_enabled = True
-                    if not controller.seq.chain:
-                        controller.seq.chain = [0]
-                    controller.seq.chain_pos = 0
-                    controller.seq.pattern = controller.seq.chain[0]
-                    controller.seq.view_pattern = controller.seq.pattern
-                else:
-                    controller.seq.chain_enabled = False
-                    controller.seq.select_pattern(controller.record_capture_pattern)
-            controller.seq.step = 0
-            controller.seq.next_pattern = None
-            controller.seq.pending_events.clear()
-            controller.seq.pending_midi_off.clear()
-            controller.seq.transport_resync = True
-            controller.seq.toggle_playback()
-            controller.record_capture_started_playback = True
-        controller.record_capture_last_step = controller.seq.step
-
-    if controller.record_capture_stage == "recording":
-        try:
-            _start_take_capture(controller)
-        except Exception as exc:
-            controller._cancel_record_capture(f"Record failed: {exc}")
-            return
-        controller.status_message = "Recording..."
+    controller.seq.engine.trigger_buffer(backing, 1.0, 5, rate=1.0, track=999, replace=True)
+    controller.record_capture_end_time = time.perf_counter() + controller.record_capture_duration_seconds
+    scope_text = "song" if scope == "song" else "pattern"
+    if include_precount:
+        controller.status_message = f"Recording... (precount + {scope_text})"
     else:
-        scope_text = "song" if scope == "song" else "pattern"
-        controller.status_message = f"Record armed: precount pattern {precount_pattern + 1}, then {scope_text} capture"
+        controller.status_message = f"Recording... ({scope_text})"
 
 
 def tick_record_capture(controller):
-    """Advance recording state machine at loop boundaries."""
+    """Advance recording timer for pre-rendered backing capture."""
     controller.record_level_db = controller.seq.engine.get_input_level_db()
     if not controller.record_capture_active:
         return
-    if not controller.record_capture_controls_transport:
-        if controller.record_capture_end_time > 0.0 and time.perf_counter() >= controller.record_capture_end_time:
-            controller._finish_record_capture()
-        return
-
-    if not controller.seq.playing:
-        controller._cancel_record_capture("Recording canceled (playback stopped)")
-        return
-    current_step = int(controller.seq.step)
-    wrapped = controller.record_capture_last_step > current_step
-    controller.record_capture_last_step = current_step
-    if not wrapped:
-        return
-
-    controller.record_capture_loop_count += 1
-
-    if controller.record_capture_stage == "preroll":
-        if controller.record_capture_loop_count < controller.record_capture_precount_loops:
-            return
-        controller.record_capture_stage = "recording"
-        controller.record_capture_loop_count = 0
-        with controller.seq.transport_lock:
-            if controller.record_capture_scope == "song":
-                controller.seq.chain_enabled = True
-                if not controller.seq.chain:
-                    controller.seq.chain = [0]
-                controller.seq.chain_pos = 0
-                controller.seq.pattern = controller.seq.chain[0]
-                controller.seq.view_pattern = controller.seq.pattern
-            else:
-                controller.seq.chain_enabled = False
-                controller.seq.select_pattern(controller.record_capture_pattern)
-            controller.seq.step = 0
-            controller.seq.next_pattern = None
-            controller.seq.pending_events.clear()
-            controller.seq.pending_midi_off.clear()
-            controller.seq.transport_resync = True
-            controller.record_capture_last_step = controller.seq.step
-        try:
-            _start_take_capture(controller)
-        except Exception as exc:
-            controller._cancel_record_capture(f"Record failed: {exc}")
-            return
-        controller.status_message = "Recording..."
-        return
-
-    if controller.record_capture_loop_count >= controller.record_capture_take_loops:
-        with controller.seq.transport_lock:
-            if controller.record_capture_started_playback and controller.seq.playing:
-                controller.seq.toggle_playback()
+    if controller.record_capture_end_time > 0.0 and time.perf_counter() >= controller.record_capture_end_time:
         controller._finish_record_capture()

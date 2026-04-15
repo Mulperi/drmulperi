@@ -1094,6 +1094,7 @@ class Controller:
         self.record_capture_capacity = 0
         self.record_capture_duration_seconds = 0.0
         self.record_capture_started_at = 0.0
+        self.record_capture_trim_seconds = 0.0
         self.record_capture_controls_transport = True
         self.record_capture_end_time = 0.0
         self.record_use_external_capture = False
