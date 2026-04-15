@@ -5,6 +5,7 @@ import random
 import shutil
 import threading
 import time
+import warnings
 
 import numpy as np
 from scipy.io import wavfile
@@ -52,6 +53,11 @@ class Sequencer:
         self.track_probability = [100 for _ in range(TRACKS)]
         self.track_group = [0 for _ in range(TRACKS)]
         self.track_pitch = [0 for _ in range(TRACKS)]
+        self.audio_track_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_sample_paths = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_sample_names = [["-" for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
+        self.audio_track_samples = [[None for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
@@ -61,6 +67,9 @@ class Sequencer:
         self.pitch_semitones = 0
         self.track_trigger_until = [0.0 for _ in range(TRACKS)]
         self.trigger_flash_seconds = 0.12
+        self.chop_preview_path = None
+        self.chop_preview_samples = []
+        self.chop_preview_names = []
 
         self.enter_held = False
         self.draw_mode = None
@@ -113,6 +122,183 @@ class Sequencer:
             return True
         return False
 
+    def prepare_chop_candidates_from_file(self, path, slices=8):
+        """Analyze a long WAV file and prepare up to 8 chopped one-shot candidates."""
+        if not os.path.isfile(path) or not path.lower().endswith(".wav"):
+            return False, "Select a .wav file to chop"
+
+        try:
+            mono, src_sr, sr, resampled = self._read_wav_mono_info(path)
+        except Exception as exc:
+            return False, f"Chop load failed: {exc}"
+
+        mono = np.asarray(mono, dtype=np.float32)
+        if mono.size < 64:
+            return False, "Sample too short to chop"
+
+        slices = max(1, min(8, int(slices)))
+        starts = self._detect_chop_starts(mono, sr, slices)
+        if len(starts) < slices:
+            starts = np.linspace(0, max(0, len(mono) - 1), num=slices, endpoint=False, dtype=np.int32).tolist()
+        starts = sorted(max(0, min(len(mono) - 1, int(v))) for v in starts[:slices])
+
+        candidates = []
+        names = []
+        min_len = max(64, int(sr * 0.02))
+        for i in range(slices):
+            start = starts[i]
+            end = starts[i + 1] if i + 1 < len(starts) else len(mono)
+            if end - start < min_len:
+                end = min(len(mono), start + min_len)
+            chunk = np.copy(mono[start:end])
+            if chunk.size <= 0:
+                chunk = np.zeros(min_len, dtype=np.float32)
+            chunk = self._cleanup_chop_chunk(chunk)
+            candidates.append(chunk)
+            names.append(f"{os.path.splitext(os.path.basename(path))[0]}_{i+1:02d}.wav")
+
+        self.chop_preview_path = path
+        self.chop_preview_samples = candidates
+        self.chop_preview_names = names
+        sr_hint = f" (SR {src_sr}->{sr})" if resampled else ""
+        return True, f"Prepared {len(candidates)} chops{sr_hint}"
+
+    def _detect_chop_starts(self, samples, sr, slices):
+        """Detect transient start positions from amplitude envelope for chop preview."""
+        if samples.size < 64:
+            return [0]
+        env = np.abs(samples)
+        win = max(1, int(sr * 0.004))
+        if win > 1:
+            kernel = np.ones(win, dtype=np.float32) / float(win)
+            env = np.convolve(env, kernel, mode="same")
+        peak = float(np.max(env))
+        if peak <= 1e-9:
+            return [0]
+        threshold = peak * 0.25
+        min_gap = max(1, int(sr * 0.04))
+        starts = [0]
+        last = 0
+        idx = 1
+        end_limit = samples.size - min_gap
+        while idx < end_limit and len(starts) < slices:
+            if env[idx] >= threshold and env[idx - 1] < threshold and (idx - last) >= min_gap:
+                starts.append(idx)
+                last = idx
+                idx += min_gap
+                continue
+            idx += 1
+        return starts
+
+    def _cleanup_chop_chunk(self, chunk):
+        """Trim leading/trailing silence, normalize, and apply tiny fades."""
+        if chunk.size <= 1:
+            return chunk
+        chunk = self._trim_silence_edges(chunk)
+        if chunk.size <= 1:
+            return chunk
+        peak = float(np.max(np.abs(chunk)))
+        if peak > 1e-9:
+            chunk = np.clip(chunk * (0.9 / peak), -1.0, 1.0)
+        fade = min(64, chunk.size // 8)
+        if fade > 1:
+            ramp = np.linspace(0.0, 1.0, num=fade, endpoint=True, dtype=np.float32)
+            chunk[:fade] *= ramp
+            chunk[-fade:] *= ramp[::-1]
+        return chunk.astype(np.float32)
+
+    @staticmethod
+    def _resample_mono_linear(data, src_sr, dst_sr):
+        """Resample mono float signal with linear interpolation."""
+        mono = np.asarray(data, dtype=np.float32)
+        if mono.size <= 1 or src_sr <= 0 or dst_sr <= 0 or src_sr == dst_sr:
+            return mono
+        ratio = float(dst_sr) / float(src_sr)
+        out_len = max(1, int(round(mono.size * ratio)))
+        src_idx = np.arange(mono.size, dtype=np.float32)
+        dst_idx = np.linspace(0.0, float(mono.size - 1), num=out_len, dtype=np.float32)
+        return np.interp(dst_idx, src_idx, mono).astype(np.float32)
+
+    def _read_wav_mono_info(self, path):
+        """Read WAV mono and return (data, source_sr, engine_sr, was_resampled)."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", wavfile.WavFileWarning)
+            sr, data = wavfile.read(path)
+        if data.dtype == np.int16:
+            data = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            data = data.astype(np.float32) / 2147483648.0
+        else:
+            data = data.astype(np.float32)
+        if len(data.shape) == 2:
+            data = data.mean(axis=1)
+        source_sr = int(sr) if int(sr) > 0 else int(self.engine.sr)
+        engine_sr = int(self.engine.sr)
+        resampled = source_sr != engine_sr
+        if resampled:
+            data = self._resample_mono_linear(data, source_sr, engine_sr)
+        return data, source_sr, engine_sr, resampled
+
+    def _read_wav_mono(self, path):
+        """Read WAV as mono float32 and resample to engine sample rate."""
+        data, _, _, _ = self._read_wav_mono_info(path)
+        return data
+
+    def _trim_silence_edges(self, chunk):
+        """Trim near-silence from both chunk ends using relative amplitude threshold."""
+        if chunk.size <= 1:
+            return chunk
+        abs_chunk = np.abs(chunk)
+        peak = float(np.max(abs_chunk))
+        if peak <= 1e-9:
+            return chunk
+        # Slightly aggressive trim so imported chops start/end tighter.
+        threshold = max(2e-4, peak * 0.04)
+        idx = np.flatnonzero(abs_chunk >= threshold)
+        if idx.size == 0:
+            return chunk
+        start = int(idx[0])
+        end = int(idx[-1]) + 1
+        trimmed = chunk[start:end]
+        return trimmed if trimmed.size > 0 else chunk
+
+    def preview_chop_candidate(self, index, track=None):
+        """Preview one prepared chop candidate in-place from the chop overlay."""
+        if index < 0 or index >= len(self.chop_preview_samples):
+            return False, "Invalid chop index"
+        pan = 5
+        if track is not None and 0 <= track < TRACKS - 1:
+            pan = self.track_pan[track]
+            self._mark_track_trigger(track)
+        return self.engine.preview_mono_buffer(
+            self.chop_preview_samples[index],
+            self.engine.sr,
+            velocity=self.last_velocity / 9.0,
+            pan=pan,
+            name=self.chop_preview_names[index] if index < len(self.chop_preview_names) else f"chop_{index+1}",
+        )
+
+    def apply_chop_candidates_to_kit(self):
+        """Commit prepared chop candidates into a generated 8-sample kit folder and load it."""
+        if not self.chop_preview_samples:
+            return False, "No prepared chops"
+        base = os.path.splitext(os.path.basename(self.chop_preview_path or "chop"))[0]
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        kit_dir = os.path.join(os.getcwd(), "generated_kits", f"{base}_chop_{ts}")
+        try:
+            os.makedirs(kit_dir, exist_ok=True)
+            for i in range(min(8, len(self.chop_preview_samples))):
+                sample = np.asarray(self.chop_preview_samples[i], dtype=np.float32)
+                out = np.clip(sample * 32767.0, -32768, 32767).astype(np.int16)
+                name = self.chop_preview_names[i] if i < len(self.chop_preview_names) else f"{base}_{i+1:02d}.wav"
+                wavfile.write(os.path.join(kit_dir, name), self.engine.sr, out)
+        except Exception as exc:
+            return False, f"Chop save failed: {exc}"
+        ok, message = self.load_kit_folder(kit_dir)
+        if ok:
+            self.dirty = True
+        return ok, (f"{message} (from chop)" if ok else message)
+
     @staticmethod
     def swing_ui_to_internal(ui_value):
         """Convert user-facing swing value (0..10) into internal timing value (50..75)."""
@@ -139,6 +325,10 @@ class Sequencer:
             "track_probability": self.track_probability,
             "track_group": self.track_group,
             "track_pitch": self.track_pitch,
+            "audio_track_pan": self.audio_track_pan,
+            "audio_track_volume": self.audio_track_volume,
+            "audio_track_sample_paths": self.audio_track_sample_paths,
+            "audio_track_sample_names": self.audio_track_sample_names,
             "pattern_length": self.pattern_length,
             "pattern_swing": [self.swing_internal_to_ui(v) for v in self.pattern_swing],
             "ratchet_grid": self.ratchet_grid,
@@ -260,6 +450,65 @@ class Sequencer:
         normalized_track_pitch[ACCENT_TRACK] = 0
         self.track_pitch = normalized_track_pitch
 
+        loaded_audio_pan = data.get("audio_track_pan", self.audio_track_pan)
+        normalized_audio_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
+        if isinstance(loaded_audio_pan, list):
+            for p in range(min(pattern_count, len(loaded_audio_pan))):
+                if not isinstance(loaded_audio_pan[p], list):
+                    continue
+                for t in range(min(TRACKS - 1, len(loaded_audio_pan[p]))):
+                    try:
+                        normalized_audio_pan[p][t] = max(1, min(9, int(loaded_audio_pan[p][t])))
+                    except (ValueError, TypeError):
+                        normalized_audio_pan[p][t] = 5
+        self.audio_track_pan = normalized_audio_pan
+
+        loaded_audio_vol = data.get("audio_track_volume", self.audio_track_volume)
+        normalized_audio_vol = [[9 for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
+        if isinstance(loaded_audio_vol, list):
+            for p in range(min(pattern_count, len(loaded_audio_vol))):
+                if not isinstance(loaded_audio_vol[p], list):
+                    continue
+                for t in range(min(TRACKS - 1, len(loaded_audio_vol[p]))):
+                    try:
+                        normalized_audio_vol[p][t] = max(0, min(9, int(loaded_audio_vol[p][t])))
+                    except (ValueError, TypeError):
+                        normalized_audio_vol[p][t] = 9
+        self.audio_track_volume = normalized_audio_vol
+
+        loaded_audio_paths = data.get("audio_track_sample_paths", self.audio_track_sample_paths)
+        loaded_audio_names = data.get("audio_track_sample_names", self.audio_track_sample_names)
+        normalized_audio_paths = [[None for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
+        normalized_audio_names = [["-" for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
+        for p in range(pattern_count):
+            for t in range(TRACKS - 1):
+                path_val = None
+                name_val = "-"
+                if isinstance(loaded_audio_paths, list) and p < len(loaded_audio_paths) and isinstance(loaded_audio_paths[p], list) and t < len(loaded_audio_paths[p]):
+                    raw = loaded_audio_paths[p][t]
+                    if isinstance(raw, str) and raw.strip():
+                        path_val = raw
+                        if not os.path.isabs(path_val):
+                            base_dir = os.path.dirname(self.pattern_path) if self.pattern_path else os.getcwd()
+                            path_val = os.path.join(base_dir, path_val)
+                if isinstance(loaded_audio_names, list) and p < len(loaded_audio_names) and isinstance(loaded_audio_names[p], list) and t < len(loaded_audio_names[p]):
+                    raw_name = loaded_audio_names[p][t]
+                    if isinstance(raw_name, str) and raw_name.strip():
+                        name_val = raw_name
+                if path_val and os.path.isfile(path_val):
+                    normalized_audio_paths[p][t] = path_val
+                    if name_val == "-":
+                        name_val = os.path.basename(path_val)
+                normalized_audio_names[p][t] = name_val
+        self.audio_track_sample_paths = normalized_audio_paths
+        self.audio_track_sample_names = normalized_audio_names
+        self.audio_track_samples = [[None for _ in range(TRACKS - 1)] for _ in range(pattern_count)]
+        for p in range(pattern_count):
+            for t in range(TRACKS - 1):
+                path = self.audio_track_sample_paths[p][t]
+                if path and os.path.isfile(path):
+                    self.audio_track_samples[p][t] = self._read_wav_mono(path)
+
         loaded_lengths = data.get("pattern_length", self.pattern_length)
         normalized_lengths = [STEPS for _ in range(pattern_count)]
         if isinstance(loaded_lengths, list):
@@ -371,8 +620,8 @@ class Sequencer:
         except Exception as exc:
             return False, f"Load failed: {exc}"
 
-        self._apply_loaded_data(data)
         self.pattern_path = path
+        self._apply_loaded_data(data)
         self.pattern_name = os.path.basename(path)
         self.playing = False
         self.step = 0
@@ -416,10 +665,88 @@ class Sequencer:
         return True, f"Loaded kit {os.path.basename(path)} ({loaded_count}/8 samples)"
 
     def load_single_sample_to_track(self, track, path):
-        ok, message = self.engine.load_single_sample(track, path)
+        """Load one drum sample into a track and trim silence at both edges."""
+        if track < 0 or track >= TRACKS - 1:
+            return False, "Invalid track"
+        if not os.path.isfile(path) or not path.lower().endswith(".wav"):
+            return False, "Select a .wav file"
+        try:
+            sample, src_sr, dst_sr, resampled = self._read_wav_mono_info(path)
+        except Exception as exc:
+            return False, f"Sample load failed: {exc}"
+        trimmed = self._trim_silence_edges(np.asarray(sample, dtype=np.float32))
+        if trimmed.size > 1:
+            sample = trimmed
+        ok, message = self.engine.load_single_sample_buffer(
+            track,
+            sample,
+            os.path.basename(path),
+            source_path=path,
+        )
         if ok:
             self.dirty = True
+            if resampled:
+                message = f"{message} (SR {src_sr}->{dst_sr})"
         return ok, message
+
+    def load_audio_track_sample(self, pattern_index, track, path):
+        """Assign a sample file to a track-view lane for a specific pattern."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return False, "Invalid pattern"
+        if track < 0 or track >= TRACKS - 1:
+            return False, "Invalid track"
+        if not os.path.isfile(path) or not path.lower().endswith(".wav"):
+            return False, "Select a .wav file"
+        try:
+            sample, src_sr, dst_sr, resampled = self._read_wav_mono_info(path)
+        except Exception as exc:
+            return False, f"Sample load failed: {exc}"
+        self.audio_track_sample_paths[pattern_index][track] = path
+        self.audio_track_sample_names[pattern_index][track] = os.path.basename(path)
+        self.audio_track_samples[pattern_index][track] = sample
+        self.dirty = True
+        msg = f"Loaded track sample {self.audio_track_sample_names[pattern_index][track]}"
+        if resampled:
+            msg = f"{msg} (SR {src_sr}->{dst_sr})"
+        return True, msg
+
+    def clear_audio_track_sample(self, pattern_index, track):
+        """Clear assigned audio-track sample from one pattern/track slot."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return False, "Invalid pattern"
+        if track < 0 or track >= TRACKS - 1:
+            return False, "Invalid track"
+        self.audio_track_sample_paths[pattern_index][track] = None
+        self.audio_track_sample_names[pattern_index][track] = "-"
+        self.audio_track_samples[pattern_index][track] = None
+        self.dirty = True
+        return True, f"Cleared track sample on track {track + 1}"
+
+    def preview_audio_track_file(self, path, pattern_index=None, track=None):
+        """Preview any sample file with track-view pan/volume when track is provided."""
+        pan = 5
+        velocity = self.last_velocity / 9.0
+        if (
+            pattern_index is not None
+            and track is not None
+            and 0 <= pattern_index < self.pattern_count()
+            and 0 <= track < TRACKS - 1
+        ):
+            pan = self.audio_track_pan[pattern_index][track]
+            velocity = max(0.0, min(1.0, self.audio_track_volume[pattern_index][track] / 9.0))
+            self._mark_track_trigger(track)
+        return self.engine.preview_wav_file(path, velocity=velocity, pan=pan)
+
+    def preview_audio_track_slot(self, pattern_index, track):
+        """Preview the currently assigned sample in one track-view lane."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return False, "Invalid pattern"
+        if track < 0 or track >= TRACKS - 1:
+            return False, "Invalid track"
+        path = self.audio_track_sample_paths[pattern_index][track]
+        if not path:
+            return False, "No sample loaded on this track"
+        return self.preview_audio_track_file(path, pattern_index=pattern_index, track=track)
 
     def preview_sample_file(self, path, track=None):
         """Preview a sample file from browser without assigning it."""
@@ -453,14 +780,51 @@ class Sequencer:
             except Exception:
                 continue
 
+        # Copy Track-view audio samples (across every pattern), deduplicated by source path.
+        track_audio_map = {}
+        track_audio_count = 0
+        for p in range(self.pattern_count()):
+            for t in range(TRACKS - 1):
+                src = self.audio_track_sample_paths[p][t]
+                if not src or not os.path.isfile(src):
+                    continue
+                if src in track_audio_map:
+                    continue
+                base = os.path.basename(src)
+                safe_name = f"trk_{p+1:02d}_{t+1:02d}_{base}"
+                dst = os.path.join(pack_dir, safe_name)
+                # Keep deterministic unique names.
+                suffix = 2
+                while os.path.exists(dst):
+                    stem, ext = os.path.splitext(safe_name)
+                    dst = os.path.join(pack_dir, f"{stem}_{suffix}{ext}")
+                    suffix += 1
+                try:
+                    shutil.copy2(src, dst)
+                    track_audio_map[src] = os.path.basename(dst)
+                    track_audio_count += 1
+                except Exception:
+                    continue
+
         pattern_path = os.path.join(pack_dir, "pattern_bank.json")
+        pack_data = self._serialize()
+        # Rewrite track-view sample paths to local pack-relative names when available.
+        if "audio_track_sample_paths" in pack_data:
+            rewritten = []
+            for p in range(self.pattern_count()):
+                row = []
+                for t in range(TRACKS - 1):
+                    src = self.audio_track_sample_paths[p][t]
+                    row.append(track_audio_map.get(src, None))
+                rewritten.append(row)
+            pack_data["audio_track_sample_paths"] = rewritten
         try:
             with open(pattern_path, "w") as f:
-                json.dump(self._serialize(), f)
+                json.dump(pack_data, f)
         except Exception as exc:
             return False, f"Pattern save failed: {exc}"
 
-        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 samples + pattern_bank.json)"
+        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 kit + {track_audio_count} track samples + pattern_bank.json)"
 
     def export_current_pattern_audio(self, filename, options=None):
         """Offline-render the viewed pattern as one-loop WAV with export options.
@@ -655,6 +1019,9 @@ class Sequencer:
                     step_time = self._step_duration_for(self.pattern, self.step, base_step_time)
                     current_length = self.pattern_length[self.pattern]
 
+                    if self.step == 0 and not self.midi_out_enabled:
+                        self._trigger_audio_tracks_for_pattern(self.pattern)
+
                     accent_on = (
                         not self.muted_rows[ACCENT_TRACK]
                         and self.grid[self.pattern][ACCENT_TRACK][self.step] > 0
@@ -747,6 +1114,7 @@ class Sequencer:
                     self.chain = [0]
                 self.pattern = self.chain[0]
             self.pending_events.clear()
+            self.engine.stop_all()
             if self.pending_midi_off:
                 self.midi.all_notes_off()
                 self.pending_midi_off.clear()
@@ -831,6 +1199,21 @@ class Sequencer:
         note = MIDI_NOTES[track] if track < len(MIDI_NOTES) else 36
         self.midi.send_note_on(channel, note, velocity)
         heapq.heappush(self.pending_midi_off, (time.perf_counter() + max(0.01, gate_seconds), channel, note))
+
+    def _trigger_audio_tracks_for_pattern(self, pattern_index):
+        """Trigger all loaded Tracks-view lanes for the given pattern once."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return
+        for t in range(TRACKS - 1):
+            sample = self.audio_track_samples[pattern_index][t]
+            if sample is None:
+                continue
+            vol = max(0.0, min(1.0, self.audio_track_volume[pattern_index][t] / 9.0))
+            if vol <= 0.0:
+                continue
+            pan = self.audio_track_pan[pattern_index][t]
+            self._mark_track_trigger(t)
+            self.engine.trigger_buffer(sample, vol, pan, rate=self.pitch_rate())
 
     def _mark_track_trigger(self, track):
         """Mark a track as recently triggered for short UI flash feedback."""
@@ -1022,11 +1405,21 @@ class Sequencer:
             self.ratchet_grid.append([row[:] for row in self.ratchet_grid[self.view_pattern]])
             self.pattern_length.append(int(self.pattern_length[self.view_pattern]))
             self.pattern_swing.append(int(self.pattern_swing[self.view_pattern]))
+            self.audio_track_pan.append(self.audio_track_pan[self.view_pattern][:])
+            self.audio_track_volume.append(self.audio_track_volume[self.view_pattern][:])
+            self.audio_track_sample_paths.append(self.audio_track_sample_paths[self.view_pattern][:])
+            self.audio_track_sample_names.append(self.audio_track_sample_names[self.view_pattern][:])
+            self.audio_track_samples.append(self.audio_track_samples[self.view_pattern][:])
         else:
             self.grid.append(self._new_pattern_grid())
             self.ratchet_grid.append(self._new_pattern_ratchet())
             self.pattern_length.append(STEPS)
             self.pattern_swing.append(50)
+            self.audio_track_pan.append([5 for _ in range(TRACKS - 1)])
+            self.audio_track_volume.append([9 for _ in range(TRACKS - 1)])
+            self.audio_track_sample_paths.append([None for _ in range(TRACKS - 1)])
+            self.audio_track_sample_names.append(["-" for _ in range(TRACKS - 1)])
+            self.audio_track_samples.append([None for _ in range(TRACKS - 1)])
         self.view_pattern = self.pattern_count() - 1
         if not self.chain_enabled and not self.playing:
             self.pattern = self.view_pattern
@@ -1042,6 +1435,11 @@ class Sequencer:
         del self.ratchet_grid[idx]
         del self.pattern_length[idx]
         del self.pattern_swing[idx]
+        del self.audio_track_pan[idx]
+        del self.audio_track_volume[idx]
+        del self.audio_track_sample_paths[idx]
+        del self.audio_track_sample_names[idx]
+        del self.audio_track_samples[idx]
 
         def remap_pattern_index(v):
             if v == idx:
@@ -1130,6 +1528,24 @@ class Sequencer:
         if track == ACCENT_TRACK:
             return
         self.track_pan[track] = max(1, min(9, pan))
+        self.dirty = True
+
+    def set_audio_track_pan(self, pattern_index, track, pan):
+        """Set pan (1..9) for one track-view lane."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return
+        if track < 0 or track >= TRACKS - 1:
+            return
+        self.audio_track_pan[pattern_index][track] = max(1, min(9, int(pan)))
+        self.dirty = True
+
+    def set_audio_track_volume(self, pattern_index, track, volume):
+        """Set volume (0..9) for one track-view lane."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return
+        if track < 0 or track >= TRACKS - 1:
+            return
+        self.audio_track_volume[pattern_index][track] = max(0, min(9, int(volume)))
         self.dirty = True
 
     def set_track_humanize(self, track, value):

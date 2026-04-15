@@ -155,7 +155,7 @@ class AudioEngine:
     def _read_wav_mono(self, path):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", wavfile.WavFileWarning)
-            _, data = wavfile.read(path)
+            sr, data = wavfile.read(path)
 
         if data.dtype == np.int16:
             data = data.astype(np.float32) / 32768.0
@@ -166,6 +166,12 @@ class AudioEngine:
 
         if len(data.shape) == 2:
             data = data.mean(axis=1)
+        if int(sr) > 0 and int(sr) != int(self.sr):
+            ratio = float(self.sr) / float(sr)
+            out_len = max(1, int(round(data.size * ratio)))
+            src_idx = np.arange(data.size, dtype=np.float32)
+            dst_idx = np.linspace(0.0, float(data.size - 1), num=out_len, dtype=np.float32)
+            data = np.interp(dst_idx, src_idx, data).astype(np.float32)
         return data
 
     def preview_wav_file(self, path, velocity=1.0, pan=5):
@@ -205,7 +211,29 @@ class AudioEngine:
             return False, f"Preview failed: {exc}"
         return True, f"Preview: {os.path.basename(path)}"
 
+    def preview_mono_buffer(self, mono, sr, velocity=1.0, pan=5, name="preview"):
+        """Preview a mono float buffer as stereo with velocity/pan gains."""
+        if mono is None:
+            return False, "Nothing to preview"
+        mono = np.asarray(mono, dtype=np.float32)
+        if mono.size <= 1:
+            return False, "Nothing to preview"
+
+        velocity = max(0.0, min(1.0, float(velocity)))
+        pan_pos = (max(1, min(9, int(pan))) - 1) / 8.0
+        left_gain = float(np.cos(pan_pos * (np.pi / 2)))
+        right_gain = float(np.sin(pan_pos * (np.pi / 2)))
+        stereo = np.zeros((len(mono), 2), dtype=np.float32)
+        stereo[:, 0] = mono * velocity * left_gain
+        stereo[:, 1] = mono * velocity * right_gain
+        try:
+            sd.play(stereo, int(sr), blocking=False)
+        except Exception as exc:
+            return False, f"Preview failed: {exc}"
+        return True, f"Preview: {name}"
+
     def load_single_sample(self, track, path):
+        """Load one sample file into a drum track slot without preprocessing."""
         if track < 0 or track >= TRACKS - 1:
             return False, "Invalid track"
         if not os.path.isfile(path) or not path.lower().endswith(".wav"):
@@ -221,10 +249,30 @@ class AudioEngine:
         self.stop_all()
         return True, f"Loaded {self.sample_names[track]} on track {track + 1}"
 
+    def load_single_sample_buffer(self, track, sample, name, source_path=None):
+        """Load preprocessed mono sample data into a drum track slot."""
+        if track < 0 or track >= TRACKS - 1:
+            return False, "Invalid track"
+        if sample is None:
+            return False, "No sample data"
+        mono = np.asarray(sample, dtype=np.float32)
+        if mono.size <= 1:
+            return False, "Sample is empty"
+        self.samples[track] = mono
+        self.sample_names[track] = str(name) if name else f"track_{track + 1}.wav"
+        self.sample_paths[track] = source_path
+        self.stop_all()
+        return True, f"Loaded {self.sample_names[track]} on track {track + 1}"
+
     def stop_all(self):
+        """Stop all active voices and any convenience preview playback."""
         for v in self.voices:
             v.active = False
             v.track = -1
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
     def choke_group(self, group_id, track_groups):
         """Stop active voices belonging to a choke/mute group."""
@@ -239,13 +287,24 @@ class AudioEngine:
                 v.track = -1
 
     def trigger(self, track, velocity, pan, rate=1.0):
-        """Queue one sample trigger event for the audio callback thread."""
+        """Queue one kit-slot trigger event for the audio callback thread."""
         pan_pos = (pan - 1) / 8.0
         left_gain = float(np.cos(pan_pos * (np.pi / 2)))
         right_gain = float(np.sin(pan_pos * (np.pi / 2)))
 
         idx = self.event_write % len(self.event_buffer)
-        self.event_buffer[idx] = (track, velocity, left_gain, right_gain, float(rate))
+        self.event_buffer[idx] = ("slot", track, velocity, left_gain, right_gain, float(rate))
+        self.event_write += 1
+
+    def trigger_buffer(self, sample, velocity, pan, rate=1.0):
+        """Queue an arbitrary mono sample buffer trigger event."""
+        if sample is None:
+            return
+        pan_pos = (pan - 1) / 8.0
+        left_gain = float(np.cos(pan_pos * (np.pi / 2)))
+        right_gain = float(np.sin(pan_pos * (np.pi / 2)))
+        idx = self.event_write % len(self.event_buffer)
+        self.event_buffer[idx] = ("buf", sample, velocity, left_gain, right_gain, float(rate))
         self.event_write += 1
 
     def audio_callback(self, outdata, frames, time_info, status):
@@ -258,8 +317,13 @@ class AudioEngine:
             event = self.event_buffer[idx]
 
             if event:
-                track, vel, pan_l, pan_r, rate = event
-                sample = self.samples[track]
+                kind = event[0] if isinstance(event, tuple) and len(event) > 0 else "slot"
+                if kind == "buf":
+                    _, sample, vel, pan_l, pan_r, rate = event
+                    track = -1
+                else:
+                    _, track, vel, pan_l, pan_r, rate = event
+                    sample = self.samples[track]
 
                 if sample is not None:
                     for v in self.voices:

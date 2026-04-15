@@ -100,12 +100,13 @@ Pattern bank JSON stores:
 
 - BPM
 - active/visible pattern (`pattern`, `view_pattern`)
-- 4 patterns (`grid`)
+- dynamic patterns (`grid`, `pattern_count`)
 - ratchets (`ratchet_grid`)
 - per-track pan (`track_pan`, accent row fixed center)
 - per-track humanize/probability/group (`track_humanize`, `track_probability`, `track_group`)
 - per-pattern length (`pattern_length`)
 - per-pattern swing (`pattern_swing`) stored as `0..10`
+- per-pattern Tracks-view lanes (`audio_track_pan`, `audio_track_volume`, `audio_track_sample_paths`, `audio_track_sample_names`)
 - chain mode + chain sequence (`chain_enabled`, `chain`)
 - MIDI out state (`midi_out_enabled`)
 - global pitch transpose in semitones (`pitch_semitones`)
@@ -114,21 +115,53 @@ Pattern bank JSON stores:
 
 - `Space`: play/stop
 - Arrow keys: move cursor
+- `Up` from top row enters header/tabs focus (`Sequencer`, `Tracks`, `Mixer`)
 - `Tab` / `Shift+Tab`: jump next/previous edit column group
 - `0..9`: set velocity in step cells (`0` clears step, `1..9` sets velocity)
 - `Enter`: toggle step on/off (or reset pan to center when cursor is on pan column)
 - `P`: preview current track sample
 - `M`: mute/unmute current row
-- `Q/W/E/R`: select pattern (manual mode) or queue pattern while playing
+- `Q`: open/close Patterns overlay
+- `W` / `E`: previous/next pattern quickly
+- `Enter` on `▶` column: preview current track sample
 - `Enter` on `↓` column: open sample browser and load one `.wav` into current track
+- In Tracks view, `Enter` on `●` opens Record Input overlay (select input device + live dBFS level bar)
 
 ## Modes And Editing
 
 - `mode_toggle` (default `T`): toggle velocity/ratchet mode
 - Ratchet mode: `1..4` sets ratchet count for selected step
 - Quick ratchet shortcuts: `Shift+1..4` (plus layout fallbacks) and `F1..F4`
-- Right-side parameter columns after 16 steps: pan (`P1..P9`), sample load (`↓`), humanize (`H0..H100`), probability (`%0..%100`), mute group (`0..9`)
+- Right-side parameter columns after 16 steps: preview (`▶`), sample load (`↓`), pan (`P1..P9`), humanize (`H0..H100`), probability (`%0..%100`), mute group (`0..9`), track pitch (`0..24`)
 - Humanize and probability can be edited directly by typing digits in their cells (no Enter required)
+- Track pitch column uses `0..24` where `12` is no shift (`-12..+12` semitone mapping)
+
+## Views
+
+- `Sequencer`: step grid + drum sequencing workflow
+- `Tracks`: 8 per-pattern audio lanes with columns `Preview`, `Load`, `Pan`, `Volume`, `Record`; sample name shown in row area
+- `Mixer`: placeholder tab (UI shell only for now)
+
+## Patterns Overlay
+
+- Open with `Q` (or header `PATTERNS` button + Enter)
+- `Enter`: select/queue highlighted pattern
+- `Space`: play/stop transport (starts from selected pattern if stopped)
+- `A`: add new empty pattern
+- `D`: duplicate current view pattern into a new one
+- `X`: delete selected pattern (double-press confirm required)
+- Rows show `EMPTY`, `LEN`, `SW`, and `HITS` summary
+
+## Import Chops From Dropped WAV
+
+- Drag a `.wav` file path into terminal (or paste an absolute path starting with `/` or `~`)
+- App opens `IMPORT CHOPS` overlay with 8 candidate slices
+- In `IMPORT CHOPS` overlay:
+  - `Up/Down`: move selection
+  - `Space`: preview selected chop
+  - `Enter` on `[ Use Samples ]`: replace current kit with chopped samples
+  - `Enter` on `[ Cancel ]` or `Esc`: cancel
+- Accepted chops are saved into `generated_kits/<name>_chop_<timestamp>/` and loaded as active kit
 
 ## Load/Save Dialogs
 
