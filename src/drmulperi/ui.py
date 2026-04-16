@@ -94,7 +94,7 @@ def draw(
     record_level_tick,
     record_monitor_info,
     record_capture_active,
-    pattern_menu_key_label,
+    file_menu_key_label,
     file_browser_active,
     file_browser_mode,
     file_browser_path,
@@ -2197,9 +2197,9 @@ class Controller:
 
         if self.pattern_menu_active:
             menu_items = self._menu_items()
-            close_by_hotkey = self.keymap.matches("pattern_menu", event_tokens)
+            close_by_hotkey = self.keymap.matches("file_menu", event_tokens)
             if self.pattern_menu_kind == "pattern":
-                close_by_hotkey = close_by_hotkey or self.keymap.matches("pattern_menu_open", event_tokens)
+                close_by_hotkey = close_by_hotkey or self.keymap.matches("pattern_menu", event_tokens)
             if key_code == 27 or close_by_hotkey:
                 menu_kind = self.pattern_menu_kind
                 self._close_pattern_menu()
@@ -2710,7 +2710,7 @@ class Controller:
             self.patterns_overlay_active = True
             self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
             self.patterns_overlay_delete_confirm_index = -1
-        elif self.keymap.matches("pattern_menu", event_tokens):
+        elif self.keymap.matches("file_menu", event_tokens):
             self.header_focus = False
             self.header_section = "params"
             self.header_edit_active = False
@@ -2737,7 +2737,7 @@ class Controller:
             self.chain_edit_input = ""
             self.swing_edit_active = False
             self.swing_edit_input = ""
-        elif self.keymap.matches("pattern_menu_open", event_tokens):
+        elif self.keymap.matches("pattern_menu", event_tokens):
             self.header_focus = False
             self.header_section = "params"
             self.header_edit_active = False
@@ -3158,7 +3158,7 @@ def ui_loop(stdscr, seq):
 
     keymap = Keymap()
     controller = Controller(seq, keymap)
-    pattern_menu_label = keymap.label("pattern_menu")
+    file_menu_label = keymap.label("file_menu")
     mode_key_label = keymap.label("mode_toggle")
     clear_key_label = keymap.label("clear_pattern")
     length_dec_label = keymap.label("pattern_length_dec")
@@ -3408,7 +3408,7 @@ def ui_loop(stdscr, seq):
                 controller.record_level_tick,
                 controller.record_monitor_info,
                 controller.record_capture_active,
-                pattern_menu_label,
+                file_menu_label,
                 controller.file_browser_active,
                 controller.file_browser_mode,
                 controller.file_browser_path,

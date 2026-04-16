@@ -23,8 +23,9 @@ from .config import (
 
 class Sequencer:
     """Pattern sequencer state, persistence, scheduling, and high-level actions."""
-    def __init__(self, kit_path, pattern_path, samplerate=44100, duplex_mode="off"):
+    def __init__(self, kit_path, pattern_path, samplerate=44100, duplex_mode="off", default_new_project_kit=None):
         self.kit_path = kit_path
+        self.default_new_project_kit = default_new_project_kit if default_new_project_kit is not None else kit_path
         self.pattern_path = pattern_path
         self.pattern_name = os.path.basename(pattern_path)
         self.engine = AudioEngine(kit_path=self.kit_path, samplerate=int(samplerate), duplex_mode=duplex_mode)
@@ -894,12 +895,12 @@ class Sequencer:
 
     def new_project(self, filename="new_project.json", kit=None):
         """Reset to a fresh project state and save it to a new JSON file."""
-        # target = str(filename or "").strip()
-        # if not target:
-        #     target = "new_project.json"
-        # if not target.lower().endswith(".json"):
-        #     target = f"{target}.json"
-        # path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        target = str(filename or "").strip()
+        if not target:
+            target = "new_project.json"
+        if not target.lower().endswith(".json"):
+            target = f"{target}.json"
+        path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
 
         self.playing = False
         self.engine.stop_all()
@@ -949,18 +950,23 @@ class Sequencer:
         self.seq_track_trigger_until = [0.0 for _ in range(TRACKS)]
         self.audio_track_trigger_until = [0.0 for _ in range(TRACKS)]
 
-        # Start truly empty: clear currently loaded sequencer kit samples.
-        self.kit_path = os.path.join(os.getcwd(), 'examplekit')  # kit or ""
+        selected_kit = self.default_new_project_kit if kit is None else kit
+        selected_kit = str(selected_kit or "").strip()
+        if selected_kit:
+            kit_path = selected_kit if os.path.isabs(selected_kit) else os.path.join(os.getcwd(), selected_kit)
+        else:
+            kit_path = ""
+        self.kit_path = kit_path
         self.engine.reload_kit(self.kit_path)
 
-        # self.pattern_path = path
-        self.pattern_name = 'New Project'
+        self.pattern_path = path
+        self.pattern_name = os.path.basename(path)
         self.dirty = False
         self.last_save_time = time.time()
-        # try:
-        #     self.save()
-        # except Exception as exc:
-        #     return False, f"New project failed: {exc}"
+        try:
+            self.save()
+        except Exception as exc:
+            return False, f"New project failed: {exc}"
         return True, f"New project: {self.pattern_name}"
 
     def save_project_file(self, filename):

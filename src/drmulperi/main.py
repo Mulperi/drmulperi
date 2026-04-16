@@ -30,15 +30,21 @@ def _load_audio_settings(path=SETTINGS_PATH):
     return sample_rate, duplex_raw
 
 
+def _load_default_kit(path=SETTINGS_PATH):
+    """Load the default new-project kit from settings.ini."""
+    parser = configparser.ConfigParser()
+    parser.read(path)
+    section = parser["sequencer"] if "sequencer" in parser else {}
+    return str(section.get("default_kit", DEFAULT_KIT_PATH)).strip()
+
+
 def main(path=SETTINGS_PATH):
     """CLI entry point."""
     parser = argparse.ArgumentParser()
-    config_parser = configparser.ConfigParser()
-    config_parser.read(path)
-    section = config_parser["sequencer"] if "sequencer" in config_parser else {}
+    configured_default_kit = _load_default_kit(path)
     parser.add_argument(
         "--kit",
-        default=DEFAULT_KIT_PATH,
+        default=configured_default_kit,
         help="Sample kit directory (optional; if omitted, project JSON/sample loads define kit content)",
     )
     parser.add_argument(
@@ -65,13 +71,20 @@ def main(path=SETTINGS_PATH):
     if not pattern_path.lower().endswith(".json"):
         pattern_path = f"{pattern_path}.json"
 
-    settings_sr, settings_duplex = _load_audio_settings()
+    kit_path = str(args.kit or "").strip()
+    settings_sr, settings_duplex = _load_audio_settings(path)
     sample_rate = args.samplerate if isinstance(args.samplerate, int) and args.samplerate > 0 else settings_sr
     duplex_mode = args.duplex if isinstance(args.duplex, str) and args.duplex.strip() else settings_duplex
-    seq = Sequencer(kit_path=args.kit, pattern_path=pattern_path, samplerate=sample_rate, duplex_mode=duplex_mode)
+    seq = Sequencer(
+        kit_path=kit_path,
+        pattern_path=pattern_path,
+        samplerate=sample_rate,
+        duplex_mode=duplex_mode,
+        default_new_project_kit=kit_path,
+    )
     if not pattern_arg:
         # Default startup should be a truly empty project.
-        seq.new_project("new_project.json", kit=section.get("kit", DEFAULT_KIT_PATH))
+        seq.new_project("new_project.json")
     curses.wrapper(ui_loop, seq)
 
 

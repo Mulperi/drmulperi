@@ -20,8 +20,8 @@ ACCENT_TRACK = 8
 ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
-    "pattern_menu": "F",
-    "pattern_menu_open": "P",
+    "file_menu": "F",
+    "pattern_menu": "P",
     "record_menu": "R",
     "tab_1": "F1",
     "tab_2": "F2",
