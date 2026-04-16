@@ -3,7 +3,7 @@ import configparser
 import curses
 import os
 
-from .config import DEFAULT_KIT_PATH, DEFAULT_PATTERN_NAME, DEFAULT_SETTINGS, SETTINGS_PATH
+from .config import DEFAULT_KIT_PATH, DEFAULT_SETTINGS, SETTINGS_PATH
 from .sequencer import Sequencer
 from .ui import ui_loop
 
@@ -40,8 +40,8 @@ def main():
     )
     parser.add_argument(
         "--pattern",
-        default=DEFAULT_PATTERN_NAME,
-        help="Pattern JSON file name/path without or with .json (default: patterns)",
+        default=None,
+        help="Project JSON file name/path without or with .json (default: empty new project)",
     )
     parser.add_argument(
         "--samplerate",
@@ -57,7 +57,8 @@ def main():
     )
     args = parser.parse_args()
 
-    pattern_path = args.pattern
+    pattern_arg = (args.pattern or "").strip()
+    pattern_path = pattern_arg if pattern_arg else "new_project.json"
     if not pattern_path.lower().endswith(".json"):
         pattern_path = f"{pattern_path}.json"
 
@@ -65,6 +66,9 @@ def main():
     sample_rate = args.samplerate if isinstance(args.samplerate, int) and args.samplerate > 0 else settings_sr
     duplex_mode = args.duplex if isinstance(args.duplex, str) and args.duplex.strip() else settings_duplex
     seq = Sequencer(kit_path=args.kit, pattern_path=pattern_path, samplerate=sample_rate, duplex_mode=duplex_mode)
+    if not pattern_arg:
+        # Default startup should be a truly empty project.
+        seq.new_project("new_project.json")
     curses.wrapper(ui_loop, seq)
 
 

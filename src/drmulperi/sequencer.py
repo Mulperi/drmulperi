@@ -31,6 +31,8 @@ class Sequencer:
 
         self.grid = [self._new_pattern_grid() for _ in range(PATTERNS)]
         self.ratchet_grid = [self._new_pattern_ratchet() for _ in range(PATTERNS)]
+        self.detune_grid = [self._new_pattern_detune() for _ in range(PATTERNS)]
+        self.detune_grid = [self._new_pattern_detune() for _ in range(PATTERNS)]
 
         self.pattern = 0
         self.view_pattern = 0
@@ -49,7 +51,7 @@ class Sequencer:
         self.transport_resync = True
         self.transport_lock = threading.RLock()
 
-        self.last_velocity = 5
+        self.last_velocity = 9
         self.seq_track_pan = [5 for _ in range(TRACKS)]
         self.seq_track_volume = [9 for _ in range(TRACKS)]
         self.seq_track_humanize = [0 for _ in range(TRACKS)]
@@ -106,6 +108,12 @@ class Sequencer:
     def _new_pattern_ratchet():
         data = [[1 for _ in range(STEPS)] for _ in range(TRACKS)]
         data[ACCENT_TRACK] = [1 for _ in range(STEPS)]
+        return data
+
+    @staticmethod
+    def _new_pattern_detune():
+        data = [[5 for _ in range(STEPS)] for _ in range(TRACKS)]
+        data[ACCENT_TRACK] = [5 for _ in range(STEPS)]
         return data
 
     def pattern_count(self):
@@ -426,6 +434,7 @@ class Sequencer:
             "pattern_length": self.pattern_length,
             "pattern_swing": [self.swing_internal_to_ui(v) for v in self.pattern_swing],
             "ratchet_grid": self.ratchet_grid,
+            "detune_grid": self.detune_grid,
             "chain_enabled": self.chain_enabled,
             "chain": self.chain,
             "midi_out_enabled": self.midi_out_enabled,
@@ -435,7 +444,10 @@ class Sequencer:
     def _apply_loaded_data(self, data):
         """Apply and sanitize loaded project data into runtime state."""
         self.bpm = data.get("bpm", 120)
-        self.last_velocity = data.get("last_velocity", 5)
+        try:
+            self.last_velocity = max(1, min(9, int(data.get("last_velocity", 9))))
+        except (TypeError, ValueError):
+            self.last_velocity = 9
         loaded_grid = data.get("grid", self.grid)
         pattern_count = PATTERNS
         if isinstance(data.get("pattern_count"), int):
@@ -479,6 +491,23 @@ class Sequencer:
                         normalized_ratchet[p][t][s] = max(1, min(4, ratchet))
                 normalized_ratchet[p][ACCENT_TRACK] = [1 for _ in range(STEPS)]
         self.ratchet_grid = normalized_ratchet
+        loaded_detune = data.get("detune_grid", self.detune_grid)
+        normalized_detune = [self._new_pattern_detune() for _ in range(pattern_count)]
+        if isinstance(loaded_detune, list):
+            for p in range(min(pattern_count, len(loaded_detune))):
+                if not isinstance(loaded_detune[p], list):
+                    continue
+                for t in range(min(TRACKS, len(loaded_detune[p]))):
+                    if not isinstance(loaded_detune[p][t], list):
+                        continue
+                    for s in range(min(STEPS, len(loaded_detune[p][t]))):
+                        try:
+                            det = int(loaded_detune[p][t][s])
+                        except (TypeError, ValueError):
+                            det = 5
+                        normalized_detune[p][t][s] = max(0, min(9, det))
+                normalized_detune[p][ACCENT_TRACK] = [5 for _ in range(STEPS)]
+        self.detune_grid = normalized_detune
 
         try:
             self.pattern = max(0, min(pattern_count - 1, int(data.get("pattern", self.pattern))))
@@ -791,6 +820,20 @@ class Sequencer:
         with open(self.pattern_path, "w") as f:
             json.dump(data, f)
 
+    def autosave_path(self):
+        """Return autosave target path for current project."""
+        base = os.path.splitext(os.path.basename(self.pattern_path or "project.json"))[0]
+        autosave_dir = os.path.join(os.getcwd(), "autosave")
+        return os.path.join(autosave_dir, f"{base}_autosave.json")
+
+    def save_autosave(self):
+        """Save autosave snapshot without touching the main project file."""
+        target = self.autosave_path()
+        autosave_dir = os.path.dirname(target)
+        os.makedirs(autosave_dir, exist_ok=True)
+        with open(target, "w") as f:
+            json.dump(self._serialize(base_dir=autosave_dir), f)
+
     def load(self):
         """Load pattern bank from `self.pattern_path`, creating one if missing."""
         if not os.path.exists(self.pattern_path):
@@ -858,7 +901,7 @@ class Sequencer:
         self.chain_pos = 0
 
         self.bpm = 120
-        self.last_velocity = 5
+        self.last_velocity = 9
         self.seq_track_pan = [5 for _ in range(TRACKS)]
         self.seq_track_volume = [9 for _ in range(TRACKS)]
         self.seq_track_humanize = [0 for _ in range(TRACKS)]
@@ -1123,24 +1166,24 @@ class Sequencer:
             self._mark_track_trigger(track, source="seq")
         return self.engine.preview_wav_file(path, velocity=self.last_velocity / 9.0, pan=pan)
 
-    def save_pack(self, foldername):
-        """Save a portable pack folder with `pattern_bank.json` plus current samples."""
+    def save_project_as(self, foldername):
+        """Save project into a portable folder containing JSON + referenced samples."""
         target = foldername.strip()
         if not target:
-            return False, "Save pack canceled"
+            return False, "Save Project As canceled"
 
-        pack_dir = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        project_dir = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
         try:
-            os.makedirs(pack_dir, exist_ok=True)
+            os.makedirs(project_dir, exist_ok=True)
         except Exception as exc:
-            return False, f"Pack folder create failed: {exc}"
+            return False, f"Project folder create failed: {exc}"
 
         copied = 0
         for t in range(TRACKS - 1):
             src = self.engine.sample_paths[t] if t < len(self.engine.sample_paths) else None
             if not src or not os.path.isfile(src):
                 continue
-            dst = os.path.join(pack_dir, f"{t+1:02d}_{self.engine.sample_names[t]}")
+            dst = os.path.join(project_dir, f"{t+1:02d}_{self.engine.sample_names[t]}")
             try:
                 shutil.copy2(src, dst)
                 copied += 1
@@ -1159,12 +1202,12 @@ class Sequencer:
                     continue
                 base = os.path.basename(src)
                 safe_name = f"trk_{p+1:02d}_{t+1:02d}_{base}"
-                dst = os.path.join(pack_dir, safe_name)
+                dst = os.path.join(project_dir, safe_name)
                 # Keep deterministic unique names.
                 suffix = 2
                 while os.path.exists(dst):
                     stem, ext = os.path.splitext(safe_name)
-                    dst = os.path.join(pack_dir, f"{stem}_{suffix}{ext}")
+                    dst = os.path.join(project_dir, f"{stem}_{suffix}{ext}")
                     suffix += 1
                 try:
                     shutil.copy2(src, dst)
@@ -1180,11 +1223,11 @@ class Sequencer:
                 continue
             base = os.path.basename(src)
             safe_name = f"song_{t+1:02d}_{base}"
-            dst = os.path.join(pack_dir, safe_name)
+            dst = os.path.join(project_dir, safe_name)
             suffix = 2
             while os.path.exists(dst):
                 stem, ext = os.path.splitext(safe_name)
-                dst = os.path.join(pack_dir, f"{stem}_{suffix}{ext}")
+                dst = os.path.join(project_dir, f"{stem}_{suffix}{ext}")
                 suffix += 1
             try:
                 shutil.copy2(src, dst)
@@ -1193,24 +1236,24 @@ class Sequencer:
             except Exception:
                 continue
 
-        pack_name = os.path.basename(os.path.normpath(pack_dir)) or "project"
-        pattern_filename = f"{pack_name}_data.json"
-        pattern_path = os.path.join(pack_dir, pattern_filename)
-        pack_data = self._serialize(base_dir=pack_dir)
+        project_name = os.path.basename(os.path.normpath(project_dir)) or "project"
+        pattern_filename = f"{project_name}_data.json"
+        pattern_path = os.path.join(project_dir, pattern_filename)
+        project_data = self._serialize(base_dir=project_dir)
         # Rewrite embedded sequencer sample paths to local copied kit sample files.
-        if "seq_samples" in pack_data and isinstance(pack_data["seq_samples"], dict):
+        if "seq_samples" in project_data and isinstance(project_data["seq_samples"], dict):
             seq_paths = [None for _ in range(TRACKS - 1)]
             seq_names = [self.engine.sample_names[t] if t < len(self.engine.sample_names) else "-" for t in range(TRACKS - 1)]
             for t in range(TRACKS - 1):
                 src = self.engine.sample_paths[t] if t < len(self.engine.sample_paths) else None
                 if src and os.path.isfile(src):
                     seq_paths[t] = f"{t+1:02d}_{self.engine.sample_names[t]}"
-            pack_data["seq_samples"]["sample_paths"] = seq_paths
-            pack_data["seq_samples"]["sample_names"] = seq_names
-        # Rewrite track-view sample paths to local pack-relative names when available.
-        if "audio_tracks" in pack_data and isinstance(pack_data["audio_tracks"], list):
-            for t in range(min(TRACKS - 1, len(pack_data["audio_tracks"]))):
-                track_obj = pack_data["audio_tracks"][t]
+            project_data["seq_samples"]["sample_paths"] = seq_paths
+            project_data["seq_samples"]["sample_names"] = seq_names
+        # Rewrite track-view sample paths to local project-relative names when available.
+        if "audio_tracks" in project_data and isinstance(project_data["audio_tracks"], list):
+            for t in range(min(TRACKS - 1, len(project_data["audio_tracks"]))):
+                track_obj = project_data["audio_tracks"][t]
                 if not isinstance(track_obj, dict):
                     continue
                 pattern_obj = track_obj.get("slot")
@@ -1228,11 +1271,19 @@ class Sequencer:
                     free_obj["sample_path"] = track_audio_map.get(src, None)
         try:
             with open(pattern_path, "w") as f:
-                json.dump(pack_data, f)
+                json.dump(project_data, f)
         except Exception as exc:
             return False, f"Pattern save failed: {exc}"
 
-        return True, f"Pack saved: {os.path.basename(pack_dir)} ({copied}/8 kit + {track_audio_count} track samples + {pattern_filename})"
+        # Open the freshly saved project so UI/project context points at the new folder.
+        ok_loaded, load_message = self.load_project_file(pattern_path)
+        if not ok_loaded:
+            return False, f"Project saved but reload failed: {load_message}"
+
+        return True, (
+            f"Project saved: {os.path.basename(project_dir)} "
+            f"({copied}/8 kit + {track_audio_count} track samples + {pattern_filename})"
+        )
 
     def export_current_kit(self, foldername, options=None):
         """Export current sequencer kit samples into a folder with format options."""
@@ -1408,15 +1459,20 @@ class Sequencer:
 
                 ratchet = max(1, min(4, self.ratchet_grid[pattern][t][s]))
                 interval = step_time / ratchet
+                detune_ui = max(0, min(9, int(self.detune_grid[pattern][t][s])))
+                detune_rate = float(2.0 ** ((detune_ui - 5) / 12.0))
+                step_sample = pitch_sample(sample, detune_rate)
+                if step_sample is None:
+                    continue
                 for i in range(ratchet):
                     hit_t = step_start + (i * interval)
                     start = int(hit_t * sr)
                     if start >= total_samples:
                         continue
-                    n = min(len(sample), total_samples - start)
+                    n = min(len(step_sample), total_samples - start)
                     if n <= 0:
                         continue
-                    chunk = sample[:n] * v
+                    chunk = step_sample[:n] * v
                     mix[start:start + n, 0] += chunk * pan_l
                     mix[start:start + n, 1] += chunk * pan_r
 
@@ -1594,14 +1650,19 @@ class Sequencer:
 
                 ratchet = max(1, min(4, self.ratchet_grid[pattern][t][s]))
                 interval = step_time / ratchet
+                detune_ui = max(0, min(9, int(self.detune_grid[pattern][t][s])))
+                detune_rate = float(2.0 ** ((detune_ui - 5) / 12.0))
+                step_sample = pitch_sample(sample, detune_rate)
+                if step_sample is None:
+                    continue
                 for i in range(ratchet):
                     start = int(round((step_start + (i * interval)) * sr))
                     if start >= total_samples:
                         continue
-                    n = min(len(sample), total_samples - start)
+                    n = min(len(step_sample), total_samples - start)
                     if n <= 0:
                         continue
-                    chunk = sample[:n] * v
+                    chunk = step_sample[:n] * v
                     mix[start:start + n, 0] += chunk * pan_l
                     mix[start:start + n, 1] += chunk * pan_r
 
@@ -1640,7 +1701,12 @@ class Sequencer:
                     self.transport_resync = False
 
                 while self.pending_events and self.pending_events[0][0] <= now:
-                    _, track, vel = heapq.heappop(self.pending_events)
+                    event = heapq.heappop(self.pending_events)
+                    if len(event) >= 4:
+                        _, track, vel, rate = event
+                    else:
+                        _, track, vel = event
+                        rate = self.pitch_rate(track if 0 <= track < TRACKS - 1 else None)
                     self._mark_track_trigger(track, source="seq")
                     if self.midi_out_enabled:
                         self._trigger_midi(track, vel, 0.05)
@@ -1649,7 +1715,7 @@ class Sequencer:
                         if group_id > 0:
                             self.engine.choke_group(group_id, self.seq_track_group)
                         vol = self.seq_track_volume[track] / 9.0 if 0 <= track < len(self.seq_track_volume) else 1.0
-                        self.engine.trigger(track, vel * vol, self.seq_track_pan[track], rate=self.pitch_rate(track))
+                        self.engine.trigger(track, vel * vol, self.seq_track_pan[track], rate=rate)
 
                 while self.pending_midi_off and self.pending_midi_off[0][0] <= now:
                     _, channel, note = heapq.heappop(self.pending_midi_off)
@@ -1693,13 +1759,14 @@ class Sequencer:
                                 ratchet = self.ratchet_grid[self.pattern][t][self.step]
                                 ratchet = max(1, min(4, ratchet))
                                 interval = step_time / ratchet
+                                step_rate = self.pitch_rate(t) * self.step_detune_rate(t, self.step)
 
                                 for i in range(ratchet):
                                     fire_time = next_time + (i * interval)
                                     if humanize > 0.0:
                                         jitter_max = min(step_time * 0.2, interval * 0.45) * humanize
                                         fire_time += random.uniform(-jitter_max, jitter_max)
-                                    heapq.heappush(self.pending_events, (fire_time, t, v))
+                                    heapq.heappush(self.pending_events, (fire_time, t, v, step_rate))
 
                         self.step += 1
 
@@ -1725,7 +1792,7 @@ class Sequencer:
 
             # ---------- AUTO SAVE (debounce) ----------
             if self.dirty and (time.time() - self.last_save_time > 1.5):
-                self.save()
+                self.save_autosave()
                 self.dirty = False
                 self.last_save_time = time.time()
 
@@ -2067,6 +2134,23 @@ class Sequencer:
         self.ratchet_grid[self.view_pattern][track][step] = max(1, min(4, ratchet))
         self.dirty = True
 
+    def set_step_detune(self, track, step, detune):
+        """Set per-step detune value (0..9, 5 neutral)."""
+        if track == ACCENT_TRACK:
+            return
+        self.detune_grid[self.view_pattern][track][step] = max(0, min(9, int(detune)))
+        self.dirty = True
+
+    def step_detune_rate(self, track, step):
+        """Return playback rate multiplier for per-step detune value."""
+        if track == ACCENT_TRACK:
+            return 1.0
+        if track < 0 or track >= TRACKS - 1 or step < 0 or step >= STEPS:
+            return 1.0
+        ui = int(self.detune_grid[self.pattern][track][step])
+        semis = float(ui - 5)
+        return float(2.0 ** (semis / 12.0))
+
     def quick_set_ratchet(self, track, step, ratchet):
         if track == ACCENT_TRACK:
             return
@@ -2107,6 +2191,10 @@ class Sequencer:
             [1 for _ in range(STEPS)] for _ in range(TRACKS)
         ]
         self.ratchet_grid[self.view_pattern][ACCENT_TRACK] = [1 for _ in range(STEPS)]
+        self.detune_grid[self.view_pattern] = [
+            [5 for _ in range(STEPS)] for _ in range(TRACKS)
+        ]
+        self.detune_grid[self.view_pattern][ACCENT_TRACK] = [5 for _ in range(STEPS)]
         self.dirty = True
 
     def add_pattern(self, copy_from_view=False):
@@ -2114,6 +2202,7 @@ class Sequencer:
         if copy_from_view and 0 <= self.view_pattern < self.pattern_count():
             self.grid.append([row[:] for row in self.grid[self.view_pattern]])
             self.ratchet_grid.append([row[:] for row in self.ratchet_grid[self.view_pattern]])
+            self.detune_grid.append([row[:] for row in self.detune_grid[self.view_pattern]])
             self.pattern_length.append(int(self.pattern_length[self.view_pattern]))
             self.pattern_swing.append(int(self.pattern_swing[self.view_pattern]))
             self.audio_track_slot_pan.append(self.audio_track_slot_pan[self.view_pattern][:])
@@ -2126,6 +2215,7 @@ class Sequencer:
         else:
             self.grid.append(self._new_pattern_grid())
             self.ratchet_grid.append(self._new_pattern_ratchet())
+            self.detune_grid.append(self._new_pattern_detune())
             self.pattern_length.append(STEPS)
             self.pattern_swing.append(50)
             self.audio_track_slot_pan.append([5 for _ in range(TRACKS - 1)])
@@ -2148,6 +2238,7 @@ class Sequencer:
         idx = max(0, min(self.pattern_count() - 1, int(pattern_index)))
         del self.grid[idx]
         del self.ratchet_grid[idx]
+        del self.detune_grid[idx]
         del self.pattern_length[idx]
         del self.pattern_swing[idx]
         del self.audio_track_slot_pan[idx]
@@ -2196,6 +2287,7 @@ class Sequencer:
         self.pattern_clipboard = {
             "grid": [row[:] for row in self.grid[self.view_pattern]],
             "ratchet_grid": [row[:] for row in self.ratchet_grid[self.view_pattern]],
+            "detune_grid": [row[:] for row in self.detune_grid[self.view_pattern]],
             "length": self.pattern_length[self.view_pattern],
             "swing": self.pattern_swing[self.view_pattern],
             "audio_slot_pan": self.audio_track_slot_pan[self.view_pattern][:],
@@ -2215,6 +2307,8 @@ class Sequencer:
 
         self.grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["grid"]]
         self.ratchet_grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["ratchet_grid"]]
+        if "detune_grid" in self.pattern_clipboard:
+            self.detune_grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["detune_grid"]]
         self.pattern_length[self.view_pattern] = max(1, min(STEPS, int(self.pattern_clipboard["length"])))
         self.pattern_swing[self.view_pattern] = max(50, min(75, int(self.pattern_clipboard.get("swing", 50))))
         if "audio_slot_pan" in self.pattern_clipboard:
@@ -2250,6 +2344,137 @@ class Sequencer:
 
         self.dirty = True
         return True, f"Pasted pattern {self.view_pattern + 1}"
+
+    def _parse_pattern_rows_block(self, rows):
+        """Parse one 8x16 text block into sequencer + ratchet grids.
+
+        Format rules:
+        - Exactly 8 rows (sequencer tracks 1..8, accent is implicit off)
+        - Exactly 16 characters per row
+        - Allowed chars: 0,1,2,3,4
+          - 0: empty step
+          - 1: velocity 9, ratchet 1
+          - 2/3/4: velocity 9, ratchet value
+        """
+        if not isinstance(rows, list) or len(rows) != (TRACKS - 1):
+            return False, f"Each pattern must have exactly {TRACKS - 1} rows", None
+
+        grid = self._new_pattern_grid()
+        ratchet = self._new_pattern_ratchet()
+        detune = self._new_pattern_detune()
+        for track in range(TRACKS - 1):
+            line = str(rows[track]).strip()
+            if len(line) != STEPS:
+                return False, f"Row {track + 1} must have exactly {STEPS} steps", None
+            for step, ch in enumerate(line):
+                if ch not in "01234":
+                    return False, f"Invalid char '{ch}' on row {track + 1}, step {step + 1}", None
+                if ch == "0":
+                    grid[track][step] = 0
+                    ratchet[track][step] = 1
+                elif ch == "1":
+                    grid[track][step] = 9
+                    ratchet[track][step] = 1
+                else:
+                    grid[track][step] = 9
+                    ratchet[track][step] = int(ch)
+                detune[track][step] = 5
+        grid[ACCENT_TRACK] = [0 for _ in range(STEPS)]
+        ratchet[ACCENT_TRACK] = [1 for _ in range(STEPS)]
+        detune[ACCENT_TRACK] = [5 for _ in range(STEPS)]
+        return True, "", (grid, ratchet, detune)
+
+    def parse_patterns_from_text(self, text):
+        """Parse clipboard-style text into one or more pattern payloads."""
+        src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = src.split("\n")
+        blocks = []
+        current = []
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
+            current.append(line)
+        if current:
+            blocks.append(current)
+
+        if not blocks:
+            return False, "Clipboard is empty or invalid", []
+
+        parsed = []
+        for idx, block in enumerate(blocks):
+            ok, message, payload = self._parse_pattern_rows_block(block)
+            if not ok:
+                return False, f"Pattern {idx + 1}: {message}", []
+            parsed.append(payload)
+        return True, "", parsed
+
+    def import_patterns_from_text(self, text):
+        """Import clipboard text into current pattern or whole project.
+
+        Single pattern block:
+        - Overwrites current viewed pattern only.
+
+        Multiple blocks (separated by blank line):
+        - Replaces all patterns with imported ones.
+        - Enables song mode and sets song chain sequentially.
+        """
+        ok, message, parsed = self.parse_patterns_from_text(text)
+        if not ok:
+            return False, message
+
+        with self.transport_lock:
+            self.playing = False
+            self.engine.stop_all()
+            self.pending_events.clear()
+            self.pending_midi_off.clear()
+            self.step = 0
+            self.next_pattern = None
+
+            if len(parsed) == 1:
+                grid, ratchet, detune = parsed[0]
+                idx = max(0, min(self.pattern_count() - 1, int(self.view_pattern)))
+                self.grid[idx] = [row[:] for row in grid]
+                self.ratchet_grid[idx] = [row[:] for row in ratchet]
+                self.detune_grid[idx] = [row[:] for row in detune]
+                self.pattern_length[idx] = STEPS
+                if not self.chain_enabled:
+                    self.pattern = idx
+                self.dirty = True
+                return True, f"Imported clipboard to pattern {idx + 1}"
+
+            count = len(parsed)
+            self.grid = []
+            self.ratchet_grid = []
+            self.detune_grid = []
+            self.pattern_length = []
+            self.pattern_swing = []
+            for grid, ratchet, detune in parsed:
+                self.grid.append([row[:] for row in grid])
+                self.ratchet_grid.append([row[:] for row in ratchet])
+                self.detune_grid.append([row[:] for row in detune])
+                self.pattern_length.append(STEPS)
+                self.pattern_swing.append(50)
+
+            self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(count)]
+            self.audio_track_slot_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(count)]
+            self.audio_track_slot_shift = [[12 for _ in range(TRACKS - 1)] for _ in range(count)]
+            self.audio_track_slot_sample_paths = [[None for _ in range(TRACKS - 1)] for _ in range(count)]
+            self.audio_track_slot_sample_names = [["-" for _ in range(TRACKS - 1)] for _ in range(count)]
+            self.audio_track_slot_samples = [[None for _ in range(TRACKS - 1)] for _ in range(count)]
+            self.audio_track_slot_channels = [[1 for _ in range(TRACKS - 1)] for _ in range(count)]
+
+            self.pattern = 0
+            self.view_pattern = 0
+            self.chain = [i for i in range(count)]
+            self.chain_pos = 0
+            self.chain_enabled = True
+            self._sync_chain_pos_to_pattern()
+            self.dirty = True
+            return True, f"Imported {count} patterns from clipboard (song mode ON)"
 
     def select_pattern(self, pattern_index):
         """Select/queue pattern depending on chain/playback mode."""

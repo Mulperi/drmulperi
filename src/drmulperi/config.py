@@ -21,16 +21,14 @@ ACCENT_TRACK = 8
 ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
-    "help_menu": "H",
     "pattern_menu": "F",
     "pattern_menu_open": "P",
-    "sequencer_menu": "S",
     "record_menu": "R",
     "tab_1": "F1",
     "tab_2": "F2",
     "tab_3": "F3",
     "patterns_overlay": "Q,O",
-    "mode_toggle": "T",
+    "mode_toggle": "V",
     "clear_pattern": "N",
     "pattern_copy": "B",
     "pattern_paste": "V",
@@ -61,19 +59,18 @@ FILE_MENU_ITEMS = [
     "1. New Project",
     "2. Load Project",
     "3. Save Project",
-    "4. Export",
+    "4. Save Project As",
+    "5. Save Kit",
+    "6. Load Kit",
+    "7. Export",
 ]
 
 PATTERN_MENU_ITEMS = [
     "1. Patterns Overlay",
-    "2. Clear Pattern",
-    "3. Copy Pattern",
-    "4. Paste Pattern",
-]
-
-SEQUENCER_MENU_ITEMS = [
-    "1. Save Kit",
-    "2. Load Kit",
+    "2. Import From Clipboard",
+    "3. Clear Pattern",
+    "4. Copy Pattern",
+    "5. Paste Pattern",
 ]
 
 MIDI_NOTES = [36, 37, 38, 39, 40, 41, 42, 43]

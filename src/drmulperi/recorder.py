@@ -128,14 +128,32 @@ def extract_record_input(controller, indata):
 def record_level_callback(controller, indata, frames, time_info, status):
     """Input stream callback: compute current dBFS level for UI meter."""
     try:
-        selected = controller._extract_record_input(indata)
-        mono = selected.mean(axis=1) if np.asarray(selected).ndim == 2 else np.asarray(selected, dtype=np.float32)
-        rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size > 0 else 0.0
-        if rms <= 1e-9:
-            db = -60.0
+        arr = np.asarray(indata, dtype=np.float32)
+        if arr.ndim == 1:
+            mono = arr
+        elif arr.ndim == 2 and arr.shape[1] > 0:
+            # Meter should react to any live input on the interface.
+            mono = arr.mean(axis=1)
         else:
-            db = max(-60.0, min(0.0, 20.0 * np.log10(rms)))
+            mono = np.zeros((0,), dtype=np.float32)
+        rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size > 0 else 0.0
+        peak = float(np.max(np.abs(mono))) if mono.size > 0 else 0.0
+        if rms <= 1e-9:
+            db_rms = -60.0
+        else:
+            db_rms = max(-60.0, min(0.0, 20.0 * np.log10(rms)))
+        if peak <= 1e-9:
+            db_peak = -60.0
+        else:
+            db_peak = max(-60.0, min(0.0, 20.0 * np.log10(peak)))
+
+        # Make meter visually reactive: peak-forward with gentle decay.
+        prev = float(getattr(controller, "record_level_db", -60.0))
+        instant = max(db_rms, db_peak)
+        db = max(instant, prev - 3.0)
         controller.record_level_db = db
+        controller.record_level_peak_db = db_peak
+        controller.record_level_tick = int(getattr(controller, "record_level_tick", 0)) + 1
     except Exception:
         controller.record_level_db = -60.0
 
@@ -147,25 +165,96 @@ def record_capture_callback(controller, indata, frames, time_info, status):
 
 def stop_record_monitor(controller):
     """Stop and dispose current input monitor stream."""
-    controller._record_stream = None
+    stream = getattr(controller, "_record_monitor_stream", None)
+    if stream is not None:
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
+    controller._record_monitor_stream = None
     controller.record_monitor_running = False
+    controller.record_monitor_info = ""
     controller.seq.engine.set_input_monitoring(False)
+    controller.record_level_peak_db = -60.0
 
 
 def start_record_monitor(controller):
     """Start input monitor stream for currently selected device."""
     controller._stop_record_monitor()
-    if controller.seq.playing and not controller.record_capture_active:
-        controller.record_level_db = -60.0
-        controller.record_monitor_running = False
+    sr = int(controller.seq.engine.sr)
+    controller.record_capture_sr = sr
+    if controller.seq.engine.input_available:
+        controller.record_monitor_running = True
+        controller.seq.engine.set_input_monitoring(True)
+        controller.record_level_db = controller.seq.engine.get_input_level_db()
+        controller.record_monitor_info = "engine duplex"
         return
-    if not controller.seq.engine.input_available:
+
+    # Fallback meter path: open lightweight input stream even when engine is output-only.
+    if not controller.record_device_ids:
         controller.record_level_db = -60.0
         return
-    controller.record_monitor_running = True
-    controller.record_capture_sr = int(controller.seq.engine.sr)
-    controller.seq.engine.set_input_monitoring(True)
-    controller.record_level_db = controller.seq.engine.get_input_level_db()
+
+    dev_idx = max(0, min(len(controller.record_device_ids) - 1, int(controller.record_device_index)))
+    dev_id = controller.record_device_ids[dev_idx]
+    max_in = max(1, int(controller.record_device_channels[dev_idx])) if controller.record_device_channels else 1
+    dev_sr = sr
+    if 0 <= dev_idx < len(controller.record_device_sample_rates):
+        try:
+            dev_sr = int(controller.record_device_sample_rates[dev_idx])
+        except Exception:
+            dev_sr = sr
+
+    wanted_idx = controller._current_record_input_indices()
+    wanted_channels = (max(wanted_idx) + 1) if wanted_idx else 1
+    meter_channels = max(1, min(max_in, int(wanted_channels)))
+
+    # Try progressively safer monitor stream configurations.
+    attempts = [
+        {"samplerate": dev_sr, "device": dev_id, "channels": max_in},
+        {"samplerate": sr, "device": dev_id, "channels": max_in},
+        {"samplerate": dev_sr, "device": dev_id, "channels": meter_channels},
+        {"samplerate": sr, "device": dev_id, "channels": meter_channels},
+        {"samplerate": dev_sr, "device": None, "channels": 1},
+    ]
+
+    last_exc = None
+    for cfg in attempts:
+        try:
+            monitor_stream = sd.InputStream(
+                samplerate=cfg["samplerate"],
+                blocksize=1024,
+                device=cfg["device"],
+                channels=max(1, int(cfg["channels"])),
+                callback=controller._record_level_callback,
+                dtype="float32",
+                latency="high",
+            )
+            monitor_stream.start()
+            controller._record_monitor_stream = monitor_stream
+            controller.record_monitor_running = True
+            controller.record_level_db = -60.0
+            controller.record_level_tick = 0
+            selected_name = (
+                controller.record_device_names[dev_idx]
+                if 0 <= dev_idx < len(controller.record_device_names)
+                else f"device {dev_id}"
+            )
+            dev_label = "default" if cfg["device"] is None else str(selected_name)
+            controller.record_monitor_info = f"{dev_label} {int(cfg['samplerate'])}Hz ch{int(cfg['channels'])}"
+            controller.status_message = f"Input meter ON ({dev_label}, {int(cfg['samplerate'])}Hz, ch {int(cfg['channels'])})"
+            return
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    controller._record_monitor_stream = None
+    controller.record_monitor_running = False
+    controller.record_monitor_info = ""
+    controller.record_level_db = -60.0
+    if last_exc is not None:
+        controller.status_message = f"Input meter unavailable: {last_exc}"
 
 
 def start_record_capture_stream(controller):

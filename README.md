@@ -106,7 +106,6 @@ Top bar is navigable and contains:
 
 - `FILE`
 - `PATTERN`
-- `SEQUENCER`
 - `SONG`
 - `RECORD`
 - `BPM`
@@ -115,7 +114,6 @@ Top bar is navigable and contains:
 - `PITCH`
 - `VELOCITY` / `RATCHET`
 - `MIDI OUT`
-- `HELP`
 
 Menus open anchored from their button (desktop-style dropdowns).
 
@@ -125,12 +123,10 @@ Menus open anchored from their button (desktop-style dropdowns).
 - `F1` / `F2` / `F3`: switch tabs (`Sequencer`, `Audio`, `Mixer`)
 - `F`: open/close File menu
 - `P`: open/close Pattern menu
-- `S`: open/close Sequencer menu
 - `R`: open/close Record menu
 - `Q`: open/close Patterns overlay
 - `W` / `E`: previous/next pattern
 - `M`: mute sequencer row (Sequencer view)
-- `H`: help overlay
 
 ## Menus
 
@@ -138,12 +134,16 @@ Menus open anchored from their button (desktop-style dropdowns).
 
 - New project
 - Load project
-- Save project (pack folder: samples + JSON)
+- Save project (overwrite current project JSON)
+- Save Project As (project folder: samples + JSON)
+- Save kit (kit export options + output folder)
+- Load kit
 - Export (audio export overlay)
 
 ### Pattern
 
 - Patterns overlay
+- Import from clipboard
 - Clear pattern
 - Copy pattern
 - Paste pattern
@@ -155,11 +155,6 @@ Pattern copy/paste includes:
 - length
 - swing
 - per-pattern audio track data for that pattern
-
-### Sequencer
-
-- Save kit (kit export options + output folder)
-- Load kit
 
 ## Views
 
