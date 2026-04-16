@@ -23,9 +23,18 @@ from .config import (
 
 class Sequencer:
     """Pattern sequencer state, persistence, scheduling, and high-level actions."""
-    def __init__(self, kit_path, pattern_path, samplerate=44100, duplex_mode="off", default_new_project_kit=None):
+    def __init__(
+        self,
+        kit_path,
+        pattern_path,
+        samplerate=44100,
+        duplex_mode="off",
+        default_new_project_kit=None,
+        follow_song=False,
+    ):
         self.kit_path = kit_path
         self.default_new_project_kit = default_new_project_kit if default_new_project_kit is not None else kit_path
+        self.follow_song = bool(follow_song)
         self.pattern_path = pattern_path
         self.pattern_name = os.path.basename(pattern_path)
         self.engine = AudioEngine(kit_path=self.kit_path, samplerate=int(samplerate), duplex_mode=duplex_mode)
@@ -814,6 +823,8 @@ class Sequencer:
                 self.chain = [0]
             self.chain_pos = 0
             self.pattern = self.chain[0]
+            if self.follow_song:
+                self.view_pattern = self.pattern
             self.next_pattern = None
             self.step = 0
 
@@ -1798,6 +1809,8 @@ class Sequencer:
                             if self.chain_enabled and self.chain:
                                 self.chain_pos = (self.chain_pos + 1) % len(self.chain)
                                 self.pattern = self.chain[self.chain_pos]
+                                if self.follow_song:
+                                    self.view_pattern = self.pattern
                                 self.next_pattern = None
                             elif self.next_pattern is not None:
                                 self.pattern = self.next_pattern
@@ -1872,6 +1885,8 @@ class Sequencer:
                     self.chain = [0]
                 self.chain_pos = 0
                 self.pattern = self.chain[0]
+                if self.follow_song:
+                    self.view_pattern = self.pattern
                 self.next_pattern = None
                 self.step = 0
                 self.pending_events.clear()

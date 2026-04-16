@@ -30,18 +30,21 @@ def _load_audio_settings(path=SETTINGS_PATH):
     return sample_rate, duplex_raw
 
 
-def _load_default_kit(path=SETTINGS_PATH):
-    """Load the default new-project kit from settings.ini."""
+def _load_sequencer_settings(path=SETTINGS_PATH):
+    """Load sequencer defaults from settings.ini."""
     parser = configparser.ConfigParser()
     parser.read(path)
     section = parser["sequencer"] if "sequencer" in parser else {}
-    return str(section.get("default_kit", DEFAULT_KIT_PATH)).strip()
+    default_kit = str(section.get("default_kit", DEFAULT_KIT_PATH)).strip()
+    raw_follow_song = str(section.get("follow_song", "off")).strip().lower()
+    follow_song = raw_follow_song in {"1", "true", "yes", "on"}
+    return default_kit, follow_song
 
 
 def main(path=SETTINGS_PATH):
     """CLI entry point."""
     parser = argparse.ArgumentParser()
-    configured_default_kit = _load_default_kit(path)
+    configured_default_kit, configured_follow_song = _load_sequencer_settings(path)
     parser.add_argument(
         "--kit",
         default=configured_default_kit,
@@ -81,6 +84,7 @@ def main(path=SETTINGS_PATH):
         samplerate=sample_rate,
         duplex_mode=duplex_mode,
         default_new_project_kit=kit_path,
+        follow_song=configured_follow_song,
     )
     if not pattern_arg:
         # Default startup should be a truly empty project.

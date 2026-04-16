@@ -1,7 +1,9 @@
 import curses
 import os
+import shlex
 import subprocess
 import time
+from urllib.parse import unquote, urlparse
 
 from .config import (
     ACCENT_TRACK,
@@ -49,6 +51,27 @@ def _read_system_clipboard_text():
     except Exception:
         pass
     return ""
+
+
+def _normalize_dropped_path(raw_path):
+    """Normalize dragged path text from terminal into a local filesystem path."""
+    text = str(raw_path or "").strip()
+    if not text:
+        return ""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ['"', "'"]:
+        text = text[1:-1]
+    if text.startswith("file://"):
+        parsed = urlparse(text)
+        text = unquote(parsed.path or "")
+    else:
+        text = unquote(text)
+    try:
+        parts = shlex.split(text)
+        if parts:
+            text = parts[0]
+    except ValueError:
+        pass
+    return os.path.expanduser(text)
 
 def draw(
     stdscr,
@@ -1314,7 +1337,7 @@ class Controller:
 
     def _open_import_overlay(self, path, can_delete_source=False):
         """Open import action overlay for a dropped/pasted WAV path."""
-        src = os.path.expanduser(path.strip())
+        src = _normalize_dropped_path(path)
         if not os.path.isfile(src) or not src.lower().endswith(".wav"):
             self.status_message = "Select a .wav file to import"
             return False
@@ -1390,7 +1413,7 @@ class Controller:
         """Auto-open import overlay shortly after a dropped path appears complete."""
         if not self.drop_path_active:
             return False
-        src = self.drop_path_input.strip().strip('"').strip("'").replace("\\ ", " ")
+        src = _normalize_dropped_path(self.drop_path_input)
         if not src.lower().endswith(".wav"):
             return False
         if (time.perf_counter() - self.drop_path_last_input_time) < 0.15:
@@ -1955,8 +1978,7 @@ class Controller:
                 self.status_message = "Drop canceled"
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
-                dropped = self.drop_path_input.strip().strip('"').strip("'")
-                dropped = dropped.replace("\\ ", " ")
+                dropped = _normalize_dropped_path(self.drop_path_input)
                 self.drop_path_active = False
                 self.drop_path_input = ""
                 if dropped:
