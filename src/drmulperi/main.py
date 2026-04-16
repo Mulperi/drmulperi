@@ -30,9 +30,12 @@ def _load_audio_settings(path=SETTINGS_PATH):
     return sample_rate, duplex_raw
 
 
-def main():
+def main(path=SETTINGS_PATH):
     """CLI entry point."""
     parser = argparse.ArgumentParser()
+    config_parser = configparser.ConfigParser()
+    config_parser.read(path)
+    section = config_parser["sequencer"] if "sequencer" in config_parser else {}
     parser.add_argument(
         "--kit",
         default=DEFAULT_KIT_PATH,
@@ -68,7 +71,7 @@ def main():
     seq = Sequencer(kit_path=args.kit, pattern_path=pattern_path, samplerate=sample_rate, duplex_mode=duplex_mode)
     if not pattern_arg:
         # Default startup should be a truly empty project.
-        seq.new_project("new_project.json")
+        seq.new_project("new_project.json", kit=section.get("kit", DEFAULT_KIT_PATH))
     curses.wrapper(ui_loop, seq)
 
 

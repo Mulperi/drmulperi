@@ -892,14 +892,14 @@ class Sequencer:
         self._sync_chain_pos_to_pattern()
         return True, f"Loaded {self.pattern_name}"
 
-    def new_project(self, filename="new_project.json"):
+    def new_project(self, filename="new_project.json", kit=None):
         """Reset to a fresh project state and save it to a new JSON file."""
-        target = str(filename or "").strip()
-        if not target:
-            target = "new_project.json"
-        if not target.lower().endswith(".json"):
-            target = f"{target}.json"
-        path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
+        # target = str(filename or "").strip()
+        # if not target:
+        #     target = "new_project.json"
+        # if not target.lower().endswith(".json"):
+        #     target = f"{target}.json"
+        # path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
 
         self.playing = False
         self.engine.stop_all()
@@ -950,17 +950,17 @@ class Sequencer:
         self.audio_track_trigger_until = [0.0 for _ in range(TRACKS)]
 
         # Start truly empty: clear currently loaded sequencer kit samples.
-        self.kit_path = ""
+        self.kit_path = os.path.join(os.getcwd(), 'examplekit')  # kit or ""
         self.engine.reload_kit(self.kit_path)
 
-        self.pattern_path = path
-        self.pattern_name = os.path.basename(path)
+        # self.pattern_path = path
+        self.pattern_name = 'New Project'
         self.dirty = False
         self.last_save_time = time.time()
-        try:
-            self.save()
-        except Exception as exc:
-            return False, f"New project failed: {exc}"
+        # try:
+        #     self.save()
+        # except Exception as exc:
+        #     return False, f"New project failed: {exc}"
         return True, f"New project: {self.pattern_name}"
 
     def save_project_file(self, filename):
