@@ -192,8 +192,9 @@ def draw(
         ("song", " SONG "),
         ("record", " STOP " if record_capture_active else " RECORD "),
         ("bpm", f" BPM:{seq.bpm} "),
-        ("length", f" LEN:{seq.pattern_length[seq.view_pattern]} "),
+        ("length", f" {seq.pattern_length[seq.view_pattern]} "),
         ("swing", f" ~{seq.current_pattern_swing_ui()} "),
+        ("humanize", f" H:{seq.current_pattern_humanize()} "),
         ("pitch", f" {seq.pitch_semitones:+d}st "),
         ("mode", f" {mode} "),
         ("midi", " MIDI OUT "),
@@ -437,6 +438,9 @@ def draw(
 
                 if s >= seq.pattern_length[seq.view_pattern]:
                     cell_attr = theme["muted"]
+                elif val == 0 and (s % 4 == 0):
+                    # Highlight each beat-start dot so the rhythm grid is easier to read.
+                    cell_attr = theme["text"]
                 if cursor_x == s and cursor_y == t:
                     cell_attr = cell_attr | curses.A_REVERSE
                 safe_add(y, x, char, cell_attr)
@@ -457,7 +461,7 @@ def draw(
                     char = f"P{seq.seq_track_pan[t]}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 elif s == HUMANIZE_COL:
-                    char = f"{seq.seq_track_humanize[t]}" if t != ACCENT_TRACK else ""
+                    char = ""
                     cell_attr = row_attr
                 elif s == PROB_COL:
                     char = f"%{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
@@ -492,7 +496,7 @@ def draw(
             if header_edit_active:
                 help_line = "Header edit: Left/Right or Up/Down changes LEN. Enter exits edit."
             else:
-                help_line = "Enter edits LEN."
+                help_line = "Pattern length."
         elif header_param == "bpm":
             if header_edit_active:
                 help_line = "Header edit: Left/Right or Up/Down changes BPM. Enter exits edit."
@@ -503,6 +507,11 @@ def draw(
                 help_line = "Header edit: Left/Right or Up/Down changes swing. Enter exits edit."
             else:
                 help_line = "Enter edits swing."
+        elif header_param == "humanize":
+            if header_edit_active:
+                help_line = "Header edit: Left/Right or Up/Down changes humanize. Enter exits edit."
+            else:
+                help_line = "Pattern humanize."
         elif header_param == "mode":
             help_line = "Enter rotates mode (velocity/ratchet/blocks/detune)."
         elif header_param == "midi":
@@ -556,7 +565,7 @@ def draw(
     elif cursor_x == PAN_COL:
         help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
     elif cursor_x == HUMANIZE_COL:
-        help_line = "H Humanize: timing/velocity randomization per track (0-100). Type digits to set."
+        help_line = "Pattern humanize is global (top bar H:)."
     elif cursor_x == PROB_COL:
         help_line = "% Probability: chance that a step triggers on this track (0-100). Type digits to set."
     elif cursor_x == GROUP_COL:
@@ -1066,7 +1075,7 @@ class Controller:
         self.header_section = "params"
         self.header_edit_active = False
         self.active_tab = 0
-        self.header_params = ["file", "pattern", "song", "record", "bpm", "length", "swing", "pitch", "mode", "midi"]
+        self.header_params = ["file", "pattern", "song", "record", "bpm", "length", "swing", "humanize", "pitch", "mode", "midi"]
         self.header_param_index = 0
         self.inline_value_buffer = ""
         self.inline_value_target = None  # (row, col)
@@ -1211,10 +1220,7 @@ class Controller:
             value = int(self.inline_value_buffer)
         except ValueError:
             value = digit
-        if col == HUMANIZE_COL:
-            value = max(0, min(100, value))
-            self.seq.set_track_humanize(self.cursor_y, value)
-        elif col == PROB_COL:
+        if col == PROB_COL:
             value = max(0, min(100, value))
             self.seq.set_track_probability(self.cursor_y, value)
         elif col == TRACK_PITCH_COL:
@@ -2233,6 +2239,8 @@ class Controller:
                         self.seq.change_current_pattern_length(+1)
                     elif param == "swing":
                         self.seq.change_current_pattern_swing(+1)
+                    elif param == "humanize":
+                        self.seq.change_current_pattern_humanize(+1)
                     else:
                         self.seq.change_pitch_semitones(+1)
                 else:
@@ -2272,6 +2280,8 @@ class Controller:
                         self.seq.change_current_pattern_length(-1)
                     elif param == "swing":
                         self.seq.change_current_pattern_swing(-1)
+                    elif param == "humanize":
+                        self.seq.change_current_pattern_humanize(-1)
                     else:
                         self.seq.change_pitch_semitones(-1)
                 else:
@@ -2306,6 +2316,8 @@ class Controller:
                         self.seq.change_current_pattern_length(+1)
                     elif param == "swing":
                         self.seq.change_current_pattern_swing(+1)
+                    elif param == "humanize":
+                        self.seq.change_current_pattern_humanize(+1)
                     elif param == "pitch":
                         self.seq.change_pitch_semitones(+1)
                 elif self.header_section == "tabs":
@@ -2332,6 +2344,8 @@ class Controller:
                             self.seq.change_current_pattern_length(-1)
                         elif param == "swing":
                             self.seq.change_current_pattern_swing(-1)
+                        elif param == "humanize":
+                            self.seq.change_current_pattern_humanize(-1)
                         elif param == "pitch":
                             self.seq.change_pitch_semitones(-1)
                     else:
@@ -2358,7 +2372,7 @@ class Controller:
             elif self.active_tab == 2:
                 cycle = [0, 1, 2, 3]
             else:
-                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             next_idx = 0
             for i, col in enumerate(cycle):
                 if col > self.cursor_x:
@@ -2380,7 +2394,7 @@ class Controller:
             elif self.active_tab == 2:
                 cycle = [0, 1, 2, 3]
             else:
-                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             prev_idx = len(cycle) - 1
             for i in range(len(cycle) - 1, -1, -1):
                 if cycle[i] < self.cursor_x:
@@ -2609,11 +2623,8 @@ class Controller:
                     self.status_message = "Humanize must be 0-100"
                     self._close_humanize_dialog()
                     return True
-                if self.cursor_y == ACCENT_TRACK:
-                    self.status_message = "Accent track has no humanize"
-                else:
-                    self.seq.set_track_humanize(self.cursor_y, value)
-                    self.status_message = f"Track {self.cursor_y + 1} humanize: {max(0, min(100, value))}"
+                self.seq.set_current_pattern_humanize(value)
+                self.status_message = f"Pattern humanize: {max(0, min(100, value))}"
                 self._close_humanize_dialog()
                 return True
 
@@ -2917,8 +2928,6 @@ class Controller:
             elif self.cursor_x == TRACK_PITCH_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
-            elif self.cursor_x == HUMANIZE_COL:
-                self._apply_inline_track_value(HUMANIZE_COL, velocity)
             elif self.cursor_x == PROB_COL:
                 self._apply_inline_track_value(PROB_COL, velocity)
             elif self.cursor_x == LOAD_COL:
@@ -3051,11 +3060,7 @@ class Controller:
                 if self.cursor_y != ACCENT_TRACK:
                     self._open_file_browser("sample", target_track=self.cursor_y)
             elif self.cursor_x == HUMANIZE_COL:
-                if self.cursor_y == ACCENT_TRACK:
-                    self.status_message = "Accent track has no humanize"
-                else:
-                    self.humanize_edit_active = True
-                    self.humanize_edit_input = ""
+                self.status_message = "Pattern humanize is global (top bar H:)"
             elif self.cursor_x == PROB_COL:
                 if self.cursor_y == ACCENT_TRACK:
                     self.status_message = "Accent track has no probability"
@@ -3289,6 +3294,7 @@ def ui_loop(stdscr, seq):
             seq.bpm,
             seq.pattern_length[seq.view_pattern],
             seq.pattern_swing[seq.view_pattern],
+            seq.pattern_humanize[seq.view_pattern],
             seq.midi_out_enabled,
             seq.pattern,
             seq.view_pattern,

@@ -75,6 +75,7 @@ class Sequencer:
         self.audio_track_free_channels = [1 for _ in range(TRACKS - 1)]
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
+        self.pattern_humanize = [0 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
         self.pattern_clipboard = None
         self.midi = MidiOut()
@@ -141,6 +142,8 @@ class Sequencer:
         if self.pattern_length[pattern_index] != STEPS:
             return True
         if self.pattern_swing[pattern_index] != 50:
+            return True
+        if self.pattern_humanize[pattern_index] != 0:
             return True
         return False
 
@@ -426,13 +429,13 @@ class Sequencer:
             },
             "track_pan": self.seq_track_pan,
             "track_volume": self.seq_track_volume,
-            "track_humanize": self.seq_track_humanize,
             "track_probability": self.seq_track_probability,
             "track_group": self.seq_track_group,
             "track_pitch": self.seq_track_pitch,
             "audio_tracks": audio_tracks,
             "pattern_length": self.pattern_length,
             "pattern_swing": [self.swing_internal_to_ui(v) for v in self.pattern_swing],
+            "pattern_humanize": self.pattern_humanize,
             "ratchet_grid": self.ratchet_grid,
             "detune_grid": self.detune_grid,
             "chain_enabled": self.chain_enabled,
@@ -540,16 +543,29 @@ class Sequencer:
         normalized_vol[ACCENT_TRACK] = 9
         self.seq_track_volume = normalized_vol
 
-        loaded_humanize = data.get("track_humanize", self.seq_track_humanize)
-        normalized_humanize = [0 for _ in range(TRACKS)]
-        if isinstance(loaded_humanize, list):
-            for i in range(min(TRACKS, len(loaded_humanize))):
+        loaded_pattern_humanize = data.get("pattern_humanize", [])
+        normalized_pattern_humanize = [0 for _ in range(pattern_count)]
+        if isinstance(loaded_pattern_humanize, list):
+            for i in range(min(pattern_count, len(loaded_pattern_humanize))):
                 try:
-                    normalized_humanize[i] = max(0, min(100, int(loaded_humanize[i])))
+                    normalized_pattern_humanize[i] = max(0, min(100, int(loaded_pattern_humanize[i])))
                 except (ValueError, TypeError):
-                    normalized_humanize[i] = 0
-        normalized_humanize[ACCENT_TRACK] = 0
-        self.seq_track_humanize = normalized_humanize
+                    normalized_pattern_humanize[i] = 0
+        else:
+            # Backward compatibility: if old per-track humanize exists, map it into one value per pattern.
+            loaded_humanize = data.get("track_humanize", [])
+            derived = 0
+            if isinstance(loaded_humanize, list):
+                values = []
+                for i in range(min(TRACKS - 1, len(loaded_humanize))):
+                    try:
+                        values.append(max(0, min(100, int(loaded_humanize[i]))))
+                    except (ValueError, TypeError):
+                        pass
+                if values:
+                    derived = int(round(sum(values) / len(values)))
+            normalized_pattern_humanize = [derived for _ in range(pattern_count)]
+        self.pattern_humanize = normalized_pattern_humanize
 
         loaded_prob = data.get("track_probability", self.seq_track_probability)
         normalized_prob = [100 for _ in range(TRACKS)]
@@ -910,6 +926,7 @@ class Sequencer:
         self.seq_track_pitch = [0 for _ in range(TRACKS)]
         self.pattern_length = [STEPS for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
+        self.pattern_humanize = [0 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
         self.pattern_clipboard = None
         self.pitch_semitones = 0
@@ -1751,7 +1768,7 @@ class Sequencer:
                                     v = min(1.0, v + ACCENT_BOOST)
                                 v = max(0.0, min(1.0, v * (self.seq_track_volume[t] / 9.0)))
 
-                                humanize = self.seq_track_humanize[t] / 100.0
+                                humanize = self.pattern_humanize[self.pattern] / 100.0
                                 if humanize > 0.0:
                                     vel_jitter = 1.0 + (random.uniform(-0.3, 0.3) * humanize)
                                     v = max(0.0, min(1.0, v * vel_jitter))
@@ -2095,6 +2112,21 @@ class Sequencer:
         """Increase or decrease viewed pattern swing within 0..10."""
         self.set_current_pattern_swing_ui(self.current_pattern_swing_ui() + int(delta))
 
+    def current_pattern_humanize(self):
+        """Return current pattern-level humanize amount (0..100)."""
+        return max(0, min(100, int(self.pattern_humanize[self.view_pattern])))
+
+    def set_current_pattern_humanize(self, value):
+        """Set current pattern-level humanize amount (0..100)."""
+        humanize = max(0, min(100, int(value)))
+        if self.pattern_humanize[self.view_pattern] != humanize:
+            self.pattern_humanize[self.view_pattern] = humanize
+            self.dirty = True
+
+    def change_current_pattern_humanize(self, delta):
+        """Increase or decrease current pattern-level humanize amount (0..100)."""
+        self.set_current_pattern_humanize(self.current_pattern_humanize() + int(delta))
+
     def set_current_pattern_swing_from_text(self, text):
         src = text.strip()
         if not src:
@@ -2205,6 +2237,7 @@ class Sequencer:
             self.detune_grid.append([row[:] for row in self.detune_grid[self.view_pattern]])
             self.pattern_length.append(int(self.pattern_length[self.view_pattern]))
             self.pattern_swing.append(int(self.pattern_swing[self.view_pattern]))
+            self.pattern_humanize.append(int(self.pattern_humanize[self.view_pattern]))
             self.audio_track_slot_pan.append(self.audio_track_slot_pan[self.view_pattern][:])
             self.audio_track_slot_volume.append(self.audio_track_slot_volume[self.view_pattern][:])
             self.audio_track_slot_shift.append(self.audio_track_slot_shift[self.view_pattern][:])
@@ -2218,6 +2251,7 @@ class Sequencer:
             self.detune_grid.append(self._new_pattern_detune())
             self.pattern_length.append(STEPS)
             self.pattern_swing.append(50)
+            self.pattern_humanize.append(0)
             self.audio_track_slot_pan.append([5 for _ in range(TRACKS - 1)])
             self.audio_track_slot_volume.append([9 for _ in range(TRACKS - 1)])
             self.audio_track_slot_shift.append([12 for _ in range(TRACKS - 1)])
@@ -2241,6 +2275,7 @@ class Sequencer:
         del self.detune_grid[idx]
         del self.pattern_length[idx]
         del self.pattern_swing[idx]
+        del self.pattern_humanize[idx]
         del self.audio_track_slot_pan[idx]
         del self.audio_track_slot_volume[idx]
         del self.audio_track_slot_shift[idx]
@@ -2290,6 +2325,7 @@ class Sequencer:
             "detune_grid": [row[:] for row in self.detune_grid[self.view_pattern]],
             "length": self.pattern_length[self.view_pattern],
             "swing": self.pattern_swing[self.view_pattern],
+            "humanize": self.pattern_humanize[self.view_pattern],
             "audio_slot_pan": self.audio_track_slot_pan[self.view_pattern][:],
             "audio_slot_volume": self.audio_track_slot_volume[self.view_pattern][:],
             "audio_slot_shift": self.audio_track_slot_shift[self.view_pattern][:],
@@ -2311,6 +2347,7 @@ class Sequencer:
             self.detune_grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["detune_grid"]]
         self.pattern_length[self.view_pattern] = max(1, min(STEPS, int(self.pattern_clipboard["length"])))
         self.pattern_swing[self.view_pattern] = max(50, min(75, int(self.pattern_clipboard.get("swing", 50))))
+        self.pattern_humanize[self.view_pattern] = max(0, min(100, int(self.pattern_clipboard.get("humanize", 0))))
         if "audio_slot_pan" in self.pattern_clipboard:
             self.audio_track_slot_pan[self.view_pattern] = self.pattern_clipboard["audio_slot_pan"][:]
         if "audio_slot_volume" in self.pattern_clipboard:
@@ -2452,12 +2489,14 @@ class Sequencer:
             self.detune_grid = []
             self.pattern_length = []
             self.pattern_swing = []
+            self.pattern_humanize = []
             for grid, ratchet, detune in parsed:
                 self.grid.append([row[:] for row in grid])
                 self.ratchet_grid.append([row[:] for row in ratchet])
                 self.detune_grid.append([row[:] for row in detune])
                 self.pattern_length.append(STEPS)
                 self.pattern_swing.append(50)
+                self.pattern_humanize.append(0)
 
             self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(count)]
             self.audio_track_slot_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(count)]
