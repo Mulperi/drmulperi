@@ -730,6 +730,26 @@ def draw(
             if i == pattern_menu_index:
                 item_attr = item_attr | theme["selected"]
             safe_add(box_top + 1 + i, box_left + 2, item[: box_width - 4], item_attr)
+            if pattern_menu_kind == "pattern" and i == 1:
+                add_pos = item.find("Add")
+                if add_pos >= 0:
+                    safe_add(box_top + 1 + i, box_left + 2 + add_pos, "A", item_attr | curses.A_UNDERLINE)
+            if pattern_menu_kind == "pattern" and i == 2:
+                dup_pos = item.find("Duplicate")
+                if dup_pos >= 0:
+                    safe_add(box_top + 1 + i, box_left + 2 + dup_pos, "D", item_attr | curses.A_UNDERLINE)
+            if pattern_menu_kind == "pattern" and i == 7:
+                copy_pos = item.find("Copy")
+                if copy_pos >= 0:
+                    safe_add(box_top + 1 + i, box_left + 2 + copy_pos, "C", item_attr | curses.A_UNDERLINE)
+            if pattern_menu_kind == "pattern" and i == 8:
+                v_pos = item.find("(V)")
+                if v_pos >= 0:
+                    safe_add(box_top + 1 + i, box_left + 2 + v_pos + 1, "V", item_attr | curses.A_UNDERLINE)
+            if pattern_menu_kind == "pattern" and i == 9:
+                x_pos = item.find("(X)")
+                if x_pos >= 0:
+                    safe_add(box_top + 1 + i, box_left + 2 + x_pos + 1, "X", item_attr | curses.A_UNDERLINE)
 
     if patterns_overlay_active:
         count = seq.pattern_count()
@@ -1756,6 +1776,8 @@ class Controller:
             elif self.pattern_menu_index == 1:
                 ok, message = self.seq.add_pattern_after_current(copy_from_view=False)
             elif self.pattern_menu_index == 2:
+                ok, message = self.seq.add_pattern_after_current(copy_from_view=True)
+            elif self.pattern_menu_index == 3:
                 clip_text = _read_system_clipboard_text()
                 ok_parse, parse_message, parsed = self.seq.parse_patterns_from_text(clip_text)
                 if not ok_parse:
@@ -1765,23 +1787,25 @@ class Controller:
                     self.clipboard_import_text = clip_text
                     self.clipboard_import_count = len(parsed)
                     ok, message = True, ""
-            elif self.pattern_menu_index == 3:
+            elif self.pattern_menu_index == 4:
                 self._open_file_browser("pattern_steps")
                 ok, message = True, ""
-            elif self.pattern_menu_index == 4:
+            elif self.pattern_menu_index == 5:
                 text = self.seq.export_patterns_to_text()
                 copied, copy_error = _write_system_clipboard_text(text)
                 if copied:
                     ok, message = True, f"Copied {self.seq.pattern_count()} patterns to clipboard"
                 else:
                     ok, message = False, f"Copy failed: {copy_error}"
-            elif self.pattern_menu_index == 5:
+            elif self.pattern_menu_index == 6:
                 self.seq.clear_current_pattern()
                 ok, message = True, f"Cleared pattern {self.seq.view_pattern + 1}"
-            elif self.pattern_menu_index == 6:
-                ok, message = self.seq.copy_current_pattern()
             elif self.pattern_menu_index == 7:
+                ok, message = self.seq.copy_current_pattern()
+            elif self.pattern_menu_index == 8:
                 ok, message = self.seq.paste_to_current_pattern()
+            elif self.pattern_menu_index == 9:
+                ok, message = self.seq.delete_pattern(self.seq.view_pattern)
             else:
                 ok, message = False, "Invalid Pattern menu option"
             self.status_message = message
@@ -2157,13 +2181,13 @@ class Controller:
                 self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code in [ord("a"), ord("A")]:
-                ok, message = self.seq.add_pattern(copy_from_view=False)
+                ok, message = self.seq.add_pattern_after_current(copy_from_view=False)
                 self.status_message = message
                 self.patterns_overlay_index = self.seq.view_pattern
                 self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code in [ord("d"), ord("D")]:
-                ok, message = self.seq.add_pattern(copy_from_view=True)
+                ok, message = self.seq.add_pattern_after_current(copy_from_view=True)
                 self.status_message = message
                 self.patterns_overlay_index = self.seq.view_pattern
                 self.patterns_overlay_delete_confirm_index = -1
@@ -2366,6 +2390,31 @@ class Controller:
                 return True
             if key_code == curses.KEY_DOWN:
                 self.pattern_menu_index = (self.pattern_menu_index + 1) % len(menu_items)
+                return True
+            if self.pattern_menu_kind == "pattern" and key_code in [ord("a"), ord("A")]:
+                self.pattern_menu_index = 1
+                self._run_pattern_menu_action()
+                self._close_pattern_menu()
+                return True
+            if self.pattern_menu_kind == "pattern" and key_code in [ord("d"), ord("D")]:
+                self.pattern_menu_index = 2
+                self._run_pattern_menu_action()
+                self._close_pattern_menu()
+                return True
+            if self.pattern_menu_kind == "pattern" and key_code in [ord("c"), ord("C")]:
+                self.pattern_menu_index = 7
+                self._run_pattern_menu_action()
+                self._close_pattern_menu()
+                return True
+            if self.pattern_menu_kind == "pattern" and key_code in [ord("v"), ord("V")]:
+                self.pattern_menu_index = 8
+                self._run_pattern_menu_action()
+                self._close_pattern_menu()
+                return True
+            if self.pattern_menu_kind == "pattern" and key_code in [ord("x"), ord("X")]:
+                self.pattern_menu_index = 9
+                self._run_pattern_menu_action()
+                self._close_pattern_menu()
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
                 self._run_pattern_menu_action()

@@ -8,6 +8,32 @@ from .sequencer import Sequencer
 from .ui import ui_loop
 
 
+def _first_json_in_dir(project_dir):
+    """Return first JSON file path in directory (case-insensitive sorted), else None."""
+    try:
+        names = sorted(os.listdir(project_dir), key=str.lower)
+    except Exception:
+        return None
+    for name in names:
+        full = os.path.join(project_dir, name)
+        if os.path.isfile(full) and name.lower().endswith(".json"):
+            return full
+    return None
+
+
+def _resolve_project_pattern_path(project_dir):
+    """Resolve project folder to first JSON file path, raising ValueError on failure."""
+    folder = os.path.abspath(os.path.expanduser(str(project_dir or "").strip()))
+    if not folder:
+        raise ValueError("Project folder is empty")
+    if not os.path.isdir(folder):
+        raise ValueError(f"Project folder not found: {folder}")
+    first_json = _first_json_in_dir(folder)
+    if not first_json:
+        raise ValueError(f"No .json project file found in folder: {folder}")
+    return first_json
+
+
 def _load_audio_settings(path=SETTINGS_PATH):
     """Load audio settings from settings.ini, creating defaults when needed."""
     parser = configparser.ConfigParser()
@@ -105,6 +131,17 @@ def main(path=SETTINGS_PATH):
         help="Project JSON file name/path without or with .json (default: empty new project)",
     )
     parser.add_argument(
+        "--project",
+        default=None,
+        help="Project folder; loads the first .json file found in that folder",
+    )
+    parser.add_argument(
+        "project_arg",
+        nargs="?",
+        default=None,
+        help="Optional project folder or project JSON path (same as --project/--pattern)",
+    )
+    parser.add_argument(
         "--samplerate",
         type=int,
         default=None,
@@ -119,9 +156,28 @@ def main(path=SETTINGS_PATH):
     args = parser.parse_args()
 
     pattern_arg = (args.pattern or "").strip()
-    pattern_path = pattern_arg if pattern_arg else "new_project.json"
-    if not pattern_path.lower().endswith(".json"):
-        pattern_path = f"{pattern_path}.json"
+    project_arg = (args.project or "").strip()
+    positional_arg = (args.project_arg or "").strip()
+
+    # Precedence: --project > --pattern > positional argument > default new project.
+    if project_arg:
+        try:
+            pattern_path = _resolve_project_pattern_path(project_arg)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif pattern_arg:
+        pattern_path = pattern_arg if pattern_arg.lower().endswith(".json") else f"{pattern_arg}.json"
+    elif positional_arg:
+        expanded = os.path.abspath(os.path.expanduser(positional_arg))
+        if os.path.isdir(expanded):
+            try:
+                pattern_path = _resolve_project_pattern_path(expanded)
+            except ValueError as exc:
+                parser.error(str(exc))
+        else:
+            pattern_path = positional_arg if positional_arg.lower().endswith(".json") else f"{positional_arg}.json"
+    else:
+        pattern_path = "new_project.json"
 
     kit_path = str(args.kit or "").strip()
     settings_sr, settings_duplex = _load_audio_settings(path)
@@ -138,7 +194,7 @@ def main(path=SETTINGS_PATH):
         max_step_count=configured_max_step_count,
         default_pattern_count=configured_default_pattern_count,
     )
-    if not pattern_arg:
+    if not project_arg and not pattern_arg and not positional_arg:
         # Default startup should be a truly empty project.
         seq.new_project("new_project.json")
     curses.wrapper(ui_loop, seq, configured_colors)

@@ -65,12 +65,14 @@ FILE_MENU_ITEMS = [
 PATTERN_MENU_ITEMS = [
     "1. Patterns Overlay",
     "2. Add Pattern",
-    "3. Import From Clipboard",
-    "4. Import From Project",
-    "5. Copy Patterns To Clipboard",
-    "6. Clear Pattern",
-    "7. Copy Pattern",
-    "8. Paste Pattern",
+    "3. Duplicate Pattern",
+    "4. Import From Clipboard",
+    "5. Import From Project",
+    "6. Copy Patterns To Clipboard",
+    "7. Clear Pattern",
+    "8. Copy Pattern",
+    "9. Paste Pattern (V)",
+    "10. Delete Pattern (X)",
 ]
 
 MIDI_NOTES = [36, 37, 38, 39, 40, 41, 42, 43]
