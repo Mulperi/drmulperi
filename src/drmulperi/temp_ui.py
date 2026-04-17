@@ -1,103 +1,27 @@
 import curses
 import os
-import shlex
-import subprocess
 import time
-from urllib.parse import unquote, urlparse
+
+import numpy as np
+import sounddevice as sd
+from scipy.io import wavfile
 
 from .config import (
     ACCENT_TRACK,
-    FILE_MENU_ITEMS,
+    GRID_COLS,
     GROUP_COL,
+    HUMANIZE_COL,
     LOAD_COL,
+    PAN_COL,
     PREVIEW_COL,
     PATTERN_MENU_ITEMS,
     PATTERNS,
     PROB_COL,
+    STEPS,
     TRACK_PITCH_COL,
     TRACKS,
 )
 from .keymap import Keymap, _event_tokens
-from . import recorder
-
-
-# Audio tab volume column — own negative ID, no collision with steps or other param cols.
-AUDIO_VOLUME_COL = -7
-
-
-def _read_system_clipboard_text():
-    """Return clipboard text using platform tools (macOS/Linux) with safe fallback."""
-    # macOS
-    try:
-        result = subprocess.run(["pbpaste"], capture_output=True, text=True, check=False)
-        if result.returncode == 0 and isinstance(result.stdout, str):
-            text = result.stdout
-            if text:
-                return text
-    except Exception:
-        pass
-    # Linux (when available)
-    try:
-        result = subprocess.run(
-            ["xclip", "-selection", "clipboard", "-o"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0 and isinstance(result.stdout, str):
-            text = result.stdout
-            if text:
-                return text
-    except Exception:
-        pass
-    return ""
-
-
-def _write_system_clipboard_text(text):
-    """Write text to system clipboard using platform tools (macOS/Linux)."""
-    payload = str(text or "")
-    # macOS
-    try:
-        result = subprocess.run(["pbcopy"], input=payload, text=True, capture_output=True, check=False)
-        if result.returncode == 0:
-            return True, ""
-    except Exception:
-        pass
-    # Linux (when available)
-    try:
-        result = subprocess.run(
-            ["xclip", "-selection", "clipboard"],
-            input=payload,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return True, ""
-    except Exception:
-        pass
-    return False, "Clipboard write tool not available"
-
-
-def _normalize_dropped_path(raw_path):
-    """Normalize dragged path text from terminal into a local filesystem path."""
-    text = str(raw_path or "").strip()
-    if not text:
-        return ""
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in ['"', "'"]:
-        text = text[1:-1]
-    if text.startswith("file://"):
-        parsed = urlparse(text)
-        text = unquote(parsed.path or "")
-    else:
-        text = unquote(text)
-    try:
-        parts = shlex.split(text)
-        if parts:
-            text = parts[0]
-    except ValueError:
-        pass
-    return os.path.expanduser(text)
 
 def draw(
     stdscr,
@@ -107,9 +31,6 @@ def draw(
     header_focus,
     header_section,
     header_param,
-    pattern_params_focus,
-    pattern_params_index,
-    pattern_params_edit_active,
     active_tab,
     header_edit_active,
     edit_mode,
@@ -118,7 +39,6 @@ def draw(
     pattern_load_prompt,
     status_message,
     pattern_menu_active,
-    pattern_menu_kind,
     pattern_menu_index,
     patterns_overlay_active,
     patterns_overlay_index,
@@ -126,7 +46,6 @@ def draw(
     import_overlay_active,
     import_overlay_index,
     import_overlay_path,
-    import_overlay_can_delete_source,
     import_target_drum_track,
     import_target_audio_track,
     chop_overlay_active,
@@ -134,19 +53,15 @@ def draw(
     record_overlay_active,
     record_device_names,
     record_device_index,
-    record_input_sources,
-    record_input_source_index,
     record_overlay_index,
     record_action_index,
     record_channels,
-    record_precount_enabled,
-    record_precount_pattern,
     record_level_db,
     record_monitor_running,
-    record_level_tick,
-    record_monitor_info,
-    record_capture_active,
-    file_menu_key_label,
+    pattern_menu_key_label,
+    help_active,
+    help_lines,
+    help_key_label,
     file_browser_active,
     file_browser_mode,
     file_browser_path,
@@ -155,13 +70,7 @@ def draw(
     audio_export_options_active,
     audio_export_options,
     audio_export_options_index,
-    kit_export_options_active,
-    kit_export_options,
-    kit_export_options_index,
     mode_key_label,
-    tab_1_label,
-    tab_2_label,
-    tab_3_label,
     clear_key_label,
     length_dec_label,
     length_inc_label,
@@ -171,23 +80,9 @@ def draw(
     stdscr.clear()
     h, w = stdscr.getmaxyx()
 
-    def safe_add(y, x, text, attr=0, transform_case=True):
-        """Safely draw text in curses with clipping and optional global text transforms.
-
-        Use transform_case=False for user-provided filenames/paths so their original
-        casing is preserved.
-        """
+    def safe_add(y, x, text, attr=0):
         if y < 0 or y >= h or x < 0 or x >= w:
             return
-        if not isinstance(text, str):
-            text = str(text)
-        if transform_case:
-            if theme.get("text_uppercase_enabled", True):
-                text = text.upper()
-            else:
-                text = text.lower()
-        if theme.get("text_bold_enabled", False):
-            attr = (attr or 0) | curses.A_BOLD
         max_len = w - x
         if max_len <= 0:
             return
@@ -219,92 +114,53 @@ def draw(
             return
         draw_hline(y0, x0 + 1, x1 - 1, "─", attr)
         draw_hline(y1, x0 + 1, x1 - 1, "─", attr)
-        safe_add(y0, x0, "┌", attr)
-        safe_add(y0, x1, "┐", attr)
-        safe_add(y1, x0, "└", attr)
-        safe_add(y1, x1, "┘", attr)
+        safe_add(y0, x0, "╭", attr)
+        safe_add(y0, x1, "╮", attr)
+        safe_add(y1, x0, "╰", attr)
+        safe_add(y1, x1, "╯", attr)
         for y in range(y0 + 1, y1):
             safe_add(y, x0, "│", attr)
             safe_add(y, x1, "│", attr)
 
-    min_layout_h = 16
-    min_layout_w = 56
-    if h < min_layout_h or w < min_layout_w:
+    if h < 16 or w < 80:
         safe_add(0, 0, "Terminal too small for outlined layout")
         stdscr.refresh()
         return
 
-    frame_attr = theme["record"] if record_capture_active else theme["frame"]
-
-    area_prompt = h - 1
     outer_left = 0
     outer_top = 0
     outer_right = w - 1
-    outer_bottom = h - 2
-    draw_box(outer_left, outer_top, outer_right, outer_bottom, frame_attr)
+    outer_bottom = h - 1
+    draw_box(outer_left, outer_top, outer_right, outer_bottom, theme["frame"])
 
     header_left = 2
     header_right = w - 3
-    area_menubar = 1
-    area_work_left = 2
-    area_work_right = w - 3
-    area_work_top = 2
-    area_work_bottom = h - 3
-    draw_box(area_work_left, area_work_top, area_work_right, area_work_bottom, frame_attr)
+    header_top = 2
+    header_bottom = 6
+    draw_box(header_left, header_top, header_right, header_bottom, theme["frame"])
 
-    mode = {
-        "velocity": "VELOCITY",
-        "ratchet": "RATCHET",
-        "blocks": "BLOCKS",
-        "detune": "DETUNE",
-        "pan": "PAN",
-    }.get(edit_mode, "VELOCITY")
-    # Menubar options are defined here. Edit labels/ordering in this list.
-    top_menus = [
-        ("file", " FILE "),
-        ("pattern", " PATTERN "),
-        ("song", " SONG "),
-        ("record", " REC "),
-        ("bpm", f" {seq.bpm} "),
-        ("pitch", f" {seq.pitch_semitones:+d}st "),
-        ("midi", " MIDI OUT "),
-    ]
-    top_menu_x = {}
-    menu_x = outer_left + 2
-    for menu_key, menu_label in top_menus:
-        top_menu_x[menu_key] = menu_x
-        menu_attr = theme["text"]
-        if menu_key == "song":
-            menu_attr = theme["chain_on"] if seq.chain_enabled else theme["chain_off"]
-        if menu_key == "record":
-            menu_attr = theme["record"] if record_capture_active else theme["text"]
-        if menu_key == "midi":
-            menu_attr = theme["midi_on"] if seq.midi_out_enabled else theme["midi_off"]
-        if pattern_menu_active and pattern_menu_kind == menu_key:
-            menu_attr = theme["title"]
-        if header_focus and header_section == "params" and header_param == menu_key:
-            menu_attr = menu_attr | theme["selected"]
-        safe_add(outer_top, menu_x, menu_label, menu_attr)
-        if menu_key in {"file", "pattern", "record"} and len(menu_label) > 2:
-            safe_add(outer_top, menu_x + 1, menu_label[1], menu_attr | curses.A_UNDERLINE)
-        menu_x += len(menu_label) + 1
+    grid_left = 2
+    grid_right = w - 3
+    grid_top = 7
+    grid_bottom = h - 2
+    draw_box(grid_left, grid_top, grid_right, grid_bottom, theme["frame"])
 
-    tabs = [("Sequencer", tab_1_label), ("Audio", tab_2_label), ("Mixer", tab_3_label)]
+    tabs = ["Sequencer", "Audio", "Mixer"]
     tx = 3
-    for i, (label, hotkey) in enumerate(tabs):
-        tab_text = f"┌ {label} {hotkey} ┐"
+    for i, label in enumerate(tabs):
+        tab_text = f"┌ {label} ┐"
         attr = theme["muted"]
         if i == active_tab:
             attr = theme["title"]
         if header_focus and header_section == "tabs" and i == active_tab:
-            attr = attr | theme["selected"]
-        safe_add(area_menubar, tx, tab_text, attr)
-        hotkey_x = tx + len(f"┌ {label} ")
-        safe_add(area_menubar, hotkey_x, hotkey, attr | curses.A_UNDERLINE)
+            attr = attr | curses.A_REVERSE
+        safe_add(1, tx, tab_text, attr)
         tx += len(tab_text) + 1
 
-    content_x = max(header_left + 2, tx + 2)
+    content_x = header_left + 2
+    mode = "RATCHET" if edit_mode == "ratchet" else "VELOCITY"
 
+    kit_name = os.path.basename(os.path.normpath(seq.kit_path))
     queue_flash_on = int(time.time() * 2) % 2 == 0
     count = seq.pattern_count()
     max_visible = min(12, max(1, count))
@@ -335,41 +191,48 @@ def draw(
                 song_parts.append(label)
     song_line = "-".join(song_parts) if song_parts else "-"
 
-    area_work_content_x = area_work_left + 2
-    area_work_controls_y = area_work_top + 1
-    area_work_values_y = area_work_top + 2
-    playhead_y = area_work_top + 3
+    row_parts = [
+        ("pattern_bank", f"BANK:{seq.pattern_name}"),
+        ("kit", f"KIT:{kit_name}"),
+        ("bpm", f"BPM:{seq.bpm}"),
+        ("length", f"LEN:{seq.pattern_length[seq.view_pattern]}"),
+        ("swing", f"SW:{seq.current_pattern_swing_ui()}"),
+        ("pitch", f"PITCH:{seq.pitch_semitones:+d}st"),
+        ("mode", mode),
+        ("menu", "MENU"),
+        ("help", "HELP"),
+    ]
+    x_row = content_x
+    for key, text in row_parts:
+        attr = theme["text"]
+        if header_focus and key == header_param:
+            attr = attr | curses.A_REVERSE
+        token = f"{text}  "
+        safe_add(4, x_row, token[:max(0, header_right - x_row)], attr)
+        x_row += len(token)
+        if x_row >= header_right:
+            break
+    midi_text = "MIDI OUT"
+    midi_attr = theme["midi_on"] if seq.midi_out_enabled else theme["midi_off"]
+    midi_x = header_right - len(midi_text) - 1
+    safe_add(3, midi_x, midi_text, midi_attr)
+
+    grid_content_x = grid_left + 2
+    playhead_y = grid_top + 1
     current_length = seq.pattern_length[seq.view_pattern]
     show_playhead = seq.playing and (seq.view_pattern == seq.pattern)
-    x = area_work_content_x
+    x = grid_content_x
     safe_add(playhead_y, x, "  ", theme["text"])
     x += 2
 
-    pattern_param_table = [
-        ("length", "Steps", str(seq.pattern_length[seq.view_pattern]), 8),
-        ("swing", "Swing", str(seq.current_pattern_swing_ui()), 7),
-        ("humanize", "Human", str(seq.current_pattern_humanize()), 7),
-        ("mode", "Mode", mode.title(), 8),
-    ]
-    px = area_work_content_x
-    for idx, (item_key, item_header, item_value, cell_w) in enumerate(pattern_param_table):
-        safe_add(area_work_controls_y, px, f"{item_header:<{cell_w}}", theme["muted"])
-        value_attr = theme["text"]
-        if pattern_params_focus and pattern_params_index == idx:
-            value_attr = value_attr | theme["selected"]
-            if pattern_params_edit_active:
-                value_attr = value_attr | curses.A_UNDERLINE
-        safe_add(area_work_values_y, px, f"{item_value:<{cell_w}}", value_attr)
-        px += cell_w + 2
-
     def col_cell_width(col):
-        if col < seq.max_step_count:
+        if col == PREVIEW_COL:
             return 1
         if col == LOAD_COL:
             return 1
-        if col == PREVIEW_COL:
-            return 1
-        if col == AUDIO_VOLUME_COL:
+        if col == PAN_COL:
+            return 2
+        if col == HUMANIZE_COL:
             return 3
         if col == PROB_COL:
             return 4
@@ -379,37 +242,31 @@ def draw(
             return 3
         return 3
 
-    # --- Sequencer tab UI elements: playhead lane + step-grid baseline ---
     if active_tab == 0:
-        # Sequencer view: reserve load + preview slots before the step grid.
-        safe_add(playhead_y, x, "  ", theme["text"])
-        x += 2
-        step_x = x
-        _max_steps = seq.max_step_count
-        safe_add(playhead_y, step_x, " " * _max_steps, theme["muted"])
-        if show_playhead and 0 <= seq.step < _max_steps:
-            safe_add(playhead_y, step_x + seq.step, "v", theme["playhead"])
-        if 1 <= current_length < _max_steps:
-            safe_add(playhead_y, step_x + current_length - 1, "|", theme["hint"])
-    # --- Audio tab UI elements: rows align to sequencer lanes (no playhead heading) ---
-    elif active_tab == 1:
-        # Keep Audio rows aligned with sequencer rows; no heading on playhead line.
-        pass
+        for s in range(GRID_COLS):
+            sep = "| " if (s == current_length and s < STEPS) else "  "
+            sep_attr = theme["hint"] if sep.strip() else theme["text"]
+            safe_add(playhead_y, x, sep, sep_attr)
+            x += 2
+            cell_w = col_cell_width(s)
+            if s < STEPS:
+                body = ("  v  " if show_playhead and s == seq.step else "     ")
+                if cell_w != 3:
+                    body = " " * (cell_w + 2)
+            else:
+                body = " " * (cell_w + 2)
+            body_attr = theme["playhead"] if show_playhead and s == seq.step else theme["muted"]
+            safe_add(playhead_y, x, body, body_attr)
+            x += len(body)
     else:
-        safe_add(playhead_y, area_work_content_x + 4, "Sequencer Tracks", theme["title"])
-        safe_add(playhead_y, area_work_content_x + 28, "Audio Tracks", theme["title"])
+        safe_add(playhead_y, grid_content_x + 2, "Pattern Audio", theme["muted"])
 
-    row_start = area_work_top + 4
+    row_start = grid_top + 2
     visible_rows = TRACKS if active_tab == 0 else (TRACKS - 1)
-    if active_tab == 0:
-        track_order = [t for t in range(TRACKS - 1)]
-    elif active_tab == 1:
-        track_order = (
-            [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 0]
-            + [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 1]
-        )
-    else:
-        track_order = [t for t in range(TRACKS - 1)]
+    track_order = [t for t in range(TRACKS - 1)] if active_tab == 0 else (
+        [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 0]
+        + [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 1]
+    )
     first_song_row = None
     if active_tab == 1:
         for idx, tr in enumerate(track_order):
@@ -419,7 +276,7 @@ def draw(
     now_pc = time.perf_counter()
     for row_idx in range(visible_rows):
         y = row_start + row_idx
-        if y >= area_work_bottom:
+        if y >= grid_bottom:
             continue
         t = row_idx if active_tab == 0 else track_order[row_idx]
 
@@ -428,13 +285,19 @@ def draw(
             row_attr = theme["muted"]
         if active_tab == 1 and seq.audio_track_mode[t] == 1:
             row_attr = theme["chain_on"]
-        # No extra separator line in Audio view; ordering + color indicate grouping.
+        if active_tab == 1 and first_song_row is not None and row_idx == first_song_row:
+            divider_text = " Song Audio "
+            line_w = max(0, grid_right - grid_content_x - 4)
+            if line_w > len(divider_text):
+                left = "-" * ((line_w - len(divider_text)) // 2)
+                right = "-" * (line_w - len(divider_text) - len(left))
+                safe_add(y - 1, grid_content_x + 2, f"{left}{divider_text}{right}", theme["muted"])
+            else:
+                safe_add(y - 1, grid_content_x + 2, divider_text[:line_w], theme["muted"])
 
-        x = area_work_content_x
+        x = grid_content_x
         if active_tab == 1:
-            row_label = f"{t+1} "
-        elif active_tab == 2:
-            row_label = f"{t+1} "
+            row_label = f"{t+1:>2}"
         else:
             row_label = "A " if t == ACCENT_TRACK else f"{t+1} "
         label_attr = row_attr
@@ -455,128 +318,84 @@ def draw(
                 return theme["velocity_low"]
             return theme["velocity_high"]
 
-        # --- Audio tab UI elements: sample-name column + audio parameter columns ---
         if active_tab == 1:
             sample_name = seq.get_audio_track_name(seq.view_pattern, t)
             ch_tag = "◯◯" if seq.get_audio_track_channels(seq.view_pattern, t) >= 2 else "◯"
-            sample_name_width = 24
-            sample_field = f"{ch_tag} {sample_name}"[:sample_name_width].ljust(sample_name_width)
-            safe_add(y, x, "  ", row_attr)
+            sample_width = 30
+            sample_field = f"{ch_tag} {sample_name}"[:sample_width].ljust(sample_width)
+            safe_add(y, x, "  ", theme["divider"])
             x += 2
             body = f"[{sample_field}]" if (cursor_x == 0 and cursor_y == row_idx) else f" {sample_field} "
-            attr = row_attr | (theme["selected"] if (cursor_x == 0 and cursor_y == row_idx) else 0)
-            safe_add(y, x, body, attr, transform_case=False)
+            attr = row_attr | (curses.A_REVERSE if (cursor_x == 0 and cursor_y == row_idx) else 0)
+            safe_add(y, x, body, attr)
             x += len(body)
             cols = [
-                (LOAD_COL, "↓"),
                 (PREVIEW_COL, "▶"),
-                (AUDIO_VOLUME_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
+                (LOAD_COL, "↓"),
+                (PAN_COL, f"P{seq.get_audio_track_pan(seq.view_pattern, t)}"),
+                (HUMANIZE_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
                 (PROB_COL, "●"),
                 (GROUP_COL, "X"),
-                (TRACK_PITCH_COL, f"↔{seq.get_audio_track_shift(seq.view_pattern, t):02d}"),
+                (TRACK_PITCH_COL, "N"),
             ]
             for col, char in cols:
-                cell_w = col_cell_width(col)
-                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (theme["selected"] if (cursor_x == col and cursor_y == row_idx) else 0)
-                safe_add(y, x, f"{char:>{cell_w}}", cell_attr)
-                x += cell_w
-        elif active_tab == 2:
-            seq_pan = seq.seq_track_pan[t]
-            seq_vol = seq.seq_track_volume[t]
-            seq_prob = seq.seq_track_probability[t]
-            seq_pitch = seq.seq_track_pitch[t]
-            aud_pan = seq.get_audio_track_pan(seq.view_pattern, t)
-            aud_vol = seq.get_audio_track_volume(seq.view_pattern, t)
-            safe_add(y, x, "  ", row_attr)
-            x += 2
-
-            mix_cells = [
-                (0, f"P{seq_pan}", row_attr),
-                (1, f"V{seq_vol}", row_attr),
-                (2, f"●{seq_prob}", row_attr),
-                (3, f"↔{seq_pitch:02d}", row_attr),
-                (4, f"P{aud_pan}", row_attr),
-                (5, f"V{aud_vol}", row_attr),
-            ]
-            for idx, text, base_attr in mix_cells:
-                if idx == 4:
-                    safe_add(y, x, "     ", row_attr)
-                    x += 5
-                elif idx > 0:
-                    safe_add(y, x, "  ", row_attr)
-                    x += 2
-                cell_attr = base_attr | (theme["selected"] if (cursor_x == idx and cursor_y == row_idx) else 0)
-                safe_add(y, x, f"{text:>2}", cell_attr)
+                safe_add(y, x, "| ", theme["divider"])
                 x += 2
+                cell_w = col_cell_width(col)
+                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (curses.A_REVERSE if (cursor_x == col and cursor_y == row_idx) else 0)
+                safe_add(y, x, f" {char:>{cell_w}} ", cell_attr)
+                x += cell_w + 2
         else:
-            # --- Sequencer tab UI elements: load/preview + step grid + per-track params ---
-            # Sequencer view: load + preview are shown next to the track label (before steps).
-            load_char = "↓" if t != ACCENT_TRACK else " "
-            load_attr = row_attr
-            if cursor_x == LOAD_COL and cursor_y == t:
-                load_attr = load_attr | theme["selected"]
-            safe_add(y, x, f"{load_char:>1}", load_attr)
-            x += 1
-
-            preview_char = "▶" if t != ACCENT_TRACK else " "
-            preview_attr = row_attr
-            if cursor_x == PREVIEW_COL and cursor_y == t:
-                preview_attr = preview_attr | theme["selected"]
-            safe_add(y, x, f"{preview_char:>1}", preview_attr)
-            x += 1
-
-            # Sequencer grid: compact 1-char step cells.
-            for s in range(seq.max_step_count):
-                val = seq.grid[seq.view_pattern][t][s]
-                ratchet = seq.ratchet_grid[seq.view_pattern][t][s]
-                detune = seq.detune_grid[seq.view_pattern][t][s]
-                if edit_mode == "blocks":
-                    char = "▪" if val > 0 else "."
-                elif edit_mode == "ratchet":
-                    char = str(ratchet if val > 0 else ".")
-                elif edit_mode == "detune":
-                    char = str(detune) if val > 0 else "."
-                elif edit_mode == "pan":
-                    char = str(seq.pan_grid[seq.view_pattern][t][s]) if val > 0 else "."
-                else:
-                    char = str(val) if val > 0 else "."
-
-                if t == ACCENT_TRACK:
-                    if edit_mode == "blocks":
-                        char = "▪" if val > 0 else "."
+            for s in range(GRID_COLS):
+                if s == PREVIEW_COL:
+                    char = "▶" if t != ACCENT_TRACK else ""
+                    cell_attr = row_attr
+                elif s == LOAD_COL:
+                    char = "↓" if t != ACCENT_TRACK else ""
+                    cell_attr = row_attr
+                elif s == PAN_COL:
+                    if t == ACCENT_TRACK:
+                        char = ""
                     else:
-                        char = "1" if val > 0 else "."
-                    cell_attr = theme["accent"]
-                else:
-                    cell_attr = velocity_attr(val)
-
-                if s >= seq.pattern_length[seq.view_pattern]:
-                    cell_attr = theme["muted"]
-                elif val == 0 and (s % 4 == 0):
-                    # Highlight each beat-start dot so the rhythm grid is easier to read.
-                    cell_attr = theme["text"]
-                if cursor_x == s and cursor_y == t:
-                    cell_attr = cell_attr | theme["selected"]
-                safe_add(y, x, char, cell_attr)
-                x += 1
-
-            # Parameter area.
-            param_cols = [PROB_COL, GROUP_COL, TRACK_PITCH_COL]
-            for s in param_cols:
-                if s == PROB_COL:
+                        pan_val = seq.seq_track_pan[t]
+                        char = f"P{pan_val}"
+                    cell_attr = row_attr
+                elif s == HUMANIZE_COL:
+                    char = f"{seq.seq_track_humanize[t]}" if t != ACCENT_TRACK else ""
+                    cell_attr = row_attr
+                elif s == PROB_COL:
                     char = f"%{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 elif s == GROUP_COL:
                     char = str(seq.seq_track_group[t]) if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
-                else:
+                elif s == TRACK_PITCH_COL:
                     char = f"{seq.seq_track_pitch[t] + 12}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
+                else:
+                    val = seq.grid[seq.view_pattern][t][s]
+                    ratchet = seq.ratchet_grid[seq.view_pattern][t][s]
+                    if val == 0:
+                        char = "."
+                    elif ratchet > 1:
+                        char = f"{val}x{ratchet}"
+                    else:
+                        char = str(val)
+                    if t == ACCENT_TRACK:
+                        cell_attr = theme["accent"] | (curses.A_BOLD if val > 0 else 0)
+                    else:
+                        cell_attr = velocity_attr(val)
 
+                    if s >= seq.pattern_length[seq.view_pattern]:
+                        cell_attr = theme["muted"]
+
+                sep = "| " if s in [PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL] or (s < STEPS and s % 4 == 0) else "  "
+                safe_add(y, x, sep, theme["divider"])
+                x += len(sep)
                 cell_w = col_cell_width(s)
-                body = f"{char:>{cell_w}}"
+                body = f"[{char:>{cell_w}}]" if cursor_x == s and cursor_y == t else f" {char:>{cell_w}} "
                 if cursor_x == s and cursor_y == t:
-                    cell_attr = cell_attr | theme["selected"]
+                    cell_attr = cell_attr | curses.A_REVERSE
                 safe_add(y, x, body, cell_attr)
                 x += len(body)
 
@@ -585,88 +404,70 @@ def draw(
 
     prompt_line = ""
     help_line = ""
-
-    def current_preview_name():
-        """Return the current sample name for preview help text in Audio and Sequencer views."""
-        if active_tab == 1:
-            if cursor_y < TRACKS - 1 and track_order:
-                active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
-                return str(seq.get_audio_track_name(seq.view_pattern, active_track))
-            return "-"
-        if cursor_y < TRACKS - 1 and 0 <= cursor_y < len(seq.engine.sample_names):
-            return str(seq.engine.sample_names[cursor_y])
-        return "Accent track"
-    if pattern_params_focus and active_tab == 0:
-        pattern_nav_keys = ["length", "swing", "humanize", "mode"]
-        active_key = pattern_nav_keys[max(0, min(len(pattern_nav_keys) - 1, pattern_params_index))]
-        if active_key == "length":
-            help_line = "Pattern length"
-        elif active_key == "swing":
-            help_line = "Pattern swing"
-        elif active_key == "humanize":
-            help_line = "Pattern humanize"
-        else:
-            help_line = "Step mode (velocity, ratchet, blocks, detune, pan)"
-    elif header_focus:
+    if header_focus:
         if header_section == "tabs":
             help_line = "Tabs: Left/Right switch view tabs. Down enters header controls."
         elif header_param == "patterns":
-            help_line = "Enter opens pattern overlay."
+            help_line = "Header: Left/Right select field. Enter opens pattern overlay. Down returns to grid."
+        elif header_param == "pattern_bank":
+            help_line = "Header: Left/Right select field. Enter opens pattern bank browser. Down returns to grid."
+        elif header_param == "kit":
+            help_line = "Header: Left/Right select field. Enter opens kit browser. Down returns to grid."
+        elif header_param == "length":
+            if header_edit_active:
+                help_line = "Header edit: Left/Right or Up/Down changes LEN. Enter exits edit."
+            else:
+                help_line = "Header: Left/Right select field. Enter edits LEN. Down returns to grid."
         elif header_param == "bpm":
             if header_edit_active:
                 help_line = "Header edit: Left/Right or Up/Down changes BPM. Enter exits edit."
             else:
-                help_line = "BPM (tempo)."
-        elif header_param == "midi":
-            help_line = "Enter toggles MIDI OUT."
-        elif header_param == "file":
-            help_line = "Enter opens File menu."
-        elif header_param == "pattern":
-            help_line = "Enter opens Pattern menu."
-        elif header_param == "song":
-            help_line = "Enter toggles SONG mode."
-        elif header_param == "record":
-            help_line = "Record menu."
+                help_line = "Header: Left/Right select field. Enter edits BPM. Down returns to grid."
+        elif header_param == "swing":
+            if header_edit_active:
+                help_line = "Header edit: Left/Right or Up/Down changes swing. Enter exits edit."
+            else:
+                help_line = "Header: Left/Right select field. Enter edits swing. Down returns to grid."
+        elif header_param == "mode":
+            help_line = "Header: Left/Right select field. Enter toggles mode (velocity/ratchet). Down returns to grid."
+        elif header_param == "menu":
+            help_line = "Header: Left/Right select field. Enter opens menu. Down returns to grid."
+        elif header_param == "help":
+            help_line = "Header: Left/Right select field. Enter opens help. Down returns to grid."
         elif header_param == "chain_set":
-            help_line = "Enter sets song order."
+            help_line = "Header: Left/Right select field. Enter sets song order. Down returns to grid."
         else:
             if header_edit_active:
                 help_line = "Header edit: Left/Right or Up/Down tunes pitch. Enter exits edit."
             else:
-                help_line = "Enter edits pitch."
-    elif active_tab == 2 and cursor_x == 0:
-        help_line = "Mixer: Sequencer track pan (1-9). Type number to set."
-    elif active_tab == 2 and cursor_x == 1:
-        help_line = "Mixer: Sequencer track volume (0-9). Type number to set."
-    elif active_tab == 2 and cursor_x == 2:
-        help_line = "Mixer: Sequencer track probability (0-100). Type digits to set."
-    elif active_tab == 2 and cursor_x == 3:
-        help_line = "Mixer: Sequencer track pitch (0-24). Type digits to set."
-    elif active_tab == 2 and cursor_x == 4:
-        help_line = "Mixer: Audio track pan (1-9). Type number to set."
-    elif active_tab == 2 and cursor_x == 5:
-        help_line = "Mixer: Audio track volume (0-9). Type number to set."
+                help_line = "Header: Left/Right select field. Enter edits pitch. Down returns to grid."
     elif active_tab == 1 and cursor_x == 0:
         help_line = "Toggle track mode: Pattern/Song. Song tracks play only when SONG mode is ON."
+    elif active_tab == 1 and cursor_x == PREVIEW_COL:
+        help_line = "Preview sample"
     elif active_tab == 1 and cursor_x == LOAD_COL:
         help_line = "Load sample"
-    elif active_tab == 1 and cursor_x == PREVIEW_COL:
-        help_line = f"Preview sample: {current_preview_name()}"
-    elif active_tab == 1 and cursor_x == AUDIO_VOLUME_COL:
+    elif active_tab == 1 and cursor_x == PAN_COL:
+        help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
+    elif active_tab == 1 and cursor_x == HUMANIZE_COL:
         help_line = "Volume: 0..9. Type 0-9 to set."
     elif active_tab == 1 and cursor_x == PROB_COL:
         help_line = "Record input device / level monitor (2-pass capture)"
     elif active_tab == 1 and cursor_x == GROUP_COL:
         help_line = "Clear current audio track sample"
     elif active_tab == 1 and cursor_x == TRACK_PITCH_COL:
-        help_line = "Start shift: 0..50 (12=center). 1 step = 5ms. Higher trims sample start, lower adds delay."
+        help_line = "Rename current track sample"
     elif active_tab == 1 and cursor_y < TRACKS - 1:
         active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
         help_line = f"AUDIO TRACK SAMPLE: {seq.get_audio_track_name(seq.view_pattern, active_track)}"
+    elif cursor_x == PREVIEW_COL:
+        help_line = "Preview sample"
     elif cursor_x == LOAD_COL:
         help_line = "Load sample"
-    elif cursor_x == PREVIEW_COL:
-        help_line = f"Preview sample: {current_preview_name()}"
+    elif cursor_x == PAN_COL:
+        help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
+    elif cursor_x == HUMANIZE_COL:
+        help_line = "H Humanize: timing/velocity randomization per track (0-100). Type digits to set."
     elif cursor_x == PROB_COL:
         help_line = "% Probability: chance that a step triggers on this track (0-100). Type digits to set."
     elif cursor_x == GROUP_COL:
@@ -674,7 +475,7 @@ def draw(
     elif cursor_x == TRACK_PITCH_COL:
         help_line = "Track pitch: 0..24 scale (12 = no shift). Type digits to set."
     elif cursor_y < TRACKS - 1:
-        help_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (Enter on ▶ preview, Enter on ↓ load)"
+        help_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (P preview, Enter on ▶ preview, Enter on ↓ load)"
     else:
         help_line = "SAMPLE: Accent track (no sample file)"
 
@@ -689,47 +490,67 @@ def draw(
     else:
         prompt_line = help_line
 
-    # Always use global text transformation setting for the final prompt line
     if prompt_line:
-        prompt_col = 0
-        safe_add(area_prompt, prompt_col, prompt_line[:max(0, w - 1)], theme["prompt"], transform_case=True)
+        prompt_y = min(row_start + visible_rows, grid_bottom - 1)
+        safe_add(prompt_y, grid_content_x, prompt_line[:grid_right - grid_content_x], theme["hint"])
 
     # Always-visible current sample label at bottom-right of sequencer area.
-    # TODO: DELETE IF WANTED
-    # if active_tab == 1 and cursor_y < TRACKS - 1 and track_order:
-    #     active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
-    #     current_sample_name = seq.get_audio_track_name(seq.view_pattern, active_track)
-    # elif cursor_y < TRACKS - 1:
-    #     current_sample_name = seq.engine.sample_names[cursor_y]
-    # else:
-    #     current_sample_name = "Accent track"
-    # sample_label = f"SAMPLE: {current_sample_name}"
-    # sample_y = area_work_bottom - 1
-    # sample_x = max(area_work_left + 2, area_work_right - len(sample_label) - 1)
-    # safe_add(sample_y, sample_x, sample_label[: max(0, area_work_right - sample_x)], theme["muted"], transform_case=False)
+    if active_tab == 1 and cursor_y < TRACKS - 1 and track_order:
+        active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
+        current_sample_name = seq.get_audio_track_name(seq.view_pattern, active_track)
+    elif cursor_y < TRACKS - 1:
+        current_sample_name = seq.engine.sample_names[cursor_y]
+    else:
+        current_sample_name = "Accent track"
+    sample_label = f"SAMPLE: {current_sample_name}"
+    sample_y = grid_bottom - 1
+    sample_x = max(grid_left + 2, grid_right - len(sample_label) - 1)
+    safe_add(sample_y, sample_x, sample_label[: max(0, grid_right - sample_x)], theme["muted"])
 
-    if pattern_menu_active:
-        if pattern_menu_kind == "pattern":
-            items = PATTERN_MENU_ITEMS
-        else:
-            items = FILE_MENU_ITEMS
-        max_item_len = max((len(item) for item in items), default=10)
-        box_width = min(w - 4, max(24, max_item_len + 4))
-        box_height = min(h - 2, len(items) + 2)
-        anchor_x = top_menu_x.get(pattern_menu_kind, outer_left + 2)
-        box_left = max(1, min(anchor_x, w - box_width - 1))
-        box_top = outer_top + 1
+    if help_active:
+        visible_lines = [line for line in help_lines if line.strip() != ""]
+        if not visible_lines:
+            visible_lines = ["[keys]"]
+
+        header = f"HELP ({help_key_label}/Esc to close)"
+        content = [header, ""] + visible_lines
+        max_line_len = max(len(line) for line in content)
+        box_width = min(w - 6, max(40, max_line_len + 4))
+        box_height = min(h - 6, len(content) + 3)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
         box_bottom = box_top + box_height - 1
 
-        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
+        line_y = box_top + 1
+        for i, line in enumerate(content):
+            if line_y + i >= box_bottom:
+                break
+            safe_add(line_y + i, box_left + 2, line[: box_width - 4], theme["text"])
+
+    if pattern_menu_active:
+        items = PATTERN_MENU_ITEMS
+        title = f"MENU ({pattern_menu_key_label}/Esc close)"
+        max_item_len = max(len(title), *(len(item) for item in items))
+        box_width = min(w - 8, max(40, max_item_len + 6))
+        box_height = min(h - 4, len(items) + 4)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
+        box_right = box_left + box_width - 1
+        box_bottom = box_top + box_height - 1
+
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
+        for y in range(box_top + 1, box_bottom):
+            safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
+        safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
         for i, item in enumerate(items):
             item_attr = theme["text"]
             if i == pattern_menu_index:
-                item_attr = item_attr | theme["selected"]
-            safe_add(box_top + 1 + i, box_left + 2, item[: box_width - 4], item_attr)
+                item_attr = item_attr | curses.A_REVERSE
+            safe_add(box_top + 3 + i, box_left + 2, item[: box_width - 4], item_attr)
 
     if patterns_overlay_active:
         count = seq.pattern_count()
@@ -763,7 +584,7 @@ def draw(
         box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
         box_bottom = box_top + box_height - 1
-        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
@@ -777,7 +598,7 @@ def draw(
             y = box_top + 2 + (i - start)
             attr = theme["muted"] if row_is_empty[i] else theme["text"]
             if i == patterns_overlay_index:
-                attr = attr | theme["selected"]
+                attr = attr | curses.A_REVERSE
             safe_add(y, box_left + 2, rows[i][: box_width - 4], attr)
 
     if chop_overlay_active:
@@ -796,144 +617,94 @@ def draw(
         box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
         box_bottom = box_top + box_height - 1
-        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
         src = os.path.basename(seq.chop_preview_path) if seq.chop_preview_path else "-"
-        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"], transform_case=False)
+        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"])
         for i, row in enumerate(rows):
             y = box_top + 3 + i
             if y >= box_bottom:
                 break
             attr = theme["text"]
             if i == chop_overlay_index:
-                attr = attr | theme["selected"]
+                attr = attr | curses.A_REVERSE
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
 
     if import_overlay_active:
         title = "IMPORT AUDIO (Arrows move, <-/-> track, Space preview, Enter select)"
         src = os.path.basename(import_overlay_path) if import_overlay_path else "-"
-        audio_mode_label = "Song" if (0 <= import_target_audio_track < (TRACKS - 1) and seq.audio_track_mode[import_target_audio_track] == 1) else f"Pattern {seq.view_pattern + 1}"
         rows = [
             "Chop audio to 8 drum tracks",
             f"Import to single drum track: {import_target_drum_track + 1}",
-            f"Import to audio track: {import_target_audio_track + 1} ({audio_mode_label})",
+            f"Import to audio track: {import_target_audio_track + 1} (Pattern {seq.view_pattern + 1})",
             "[ Cancel ]",
         ]
-        if import_overlay_can_delete_source:
-            rows.append("[ Cancel + Delete Recording ]")
         box_width = min(w - 8, 78)
-        box_height = min(h - 4, 11 if import_overlay_can_delete_source else 10)
+        box_height = min(h - 4, 10)
         box_left = max(1, (w - box_width) // 2)
         box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
         box_bottom = box_top + box_height - 1
-        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
-        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"], transform_case=False)
+        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"])
         for i, row in enumerate(rows):
             y = box_top + 3 + i
             if y >= box_bottom:
                 break
             attr = theme["text"]
             if i == import_overlay_index:
-                attr = attr | theme["selected"]
+                attr = attr | curses.A_REVERSE
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
 
     if record_overlay_active:
-        title = "RECORD SETTINGS"
+        title = "RECORD INPUT (Up/Down row, Left/Right change, Enter select)"
         devices = record_device_names if record_device_names else ["(no input devices)"]
         selected_dev = devices[record_device_index] if devices else "(no input devices)"
-        box_width = min(w - 8, 78)
-        box_height = min(h - 4, 12)
-        record_anchor_x = top_menu_x.get("record", outer_left + 2)
-        box_left = max(1, min(record_anchor_x, w - box_width - 1))
-        box_top = outer_top + 1
+        box_width = min(w - 8, 74)
+        box_height = min(h - 4, 14)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
         box_bottom = box_top + box_height - 1
-        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
 
-        def draw_options_line(y, label, options, selected_value, selected_row):
-            safe_add(y, box_left + 2, ">" if selected_row else " ", theme["text"])
-            safe_add(y, box_left + 4, label, theme["text"])
-            x = box_left + 4 + len(label)
-            for text, value in options:
-                selected = (value == selected_value)
-                attr = theme["text"] if selected else theme["muted"]
-                safe_add(y, x, text, attr)
-                x += len(text) + 2
+        dev_attr = theme["text"] | (curses.A_REVERSE if record_overlay_index == 0 else 0)
+        safe_add(box_top + 3, box_left + 2, f"Input: {selected_dev}"[: box_width - 4], dev_attr)
 
-        draw_options_line(
-            box_top + 3,
-            "Channels: ",
-            [("Mono", 1), ("Stereo", 2)],
-            record_channels,
-            record_overlay_index == 0,
-        )
-        safe_add(box_top + 4, box_left + 2, ">" if record_overlay_index == 1 else " ", theme["text"])
-        safe_add(box_top + 4, box_left + 4, f"Input Device: {selected_dev}"[: box_width - 6], theme["text"])
-        source_text = "Input Source: " + (record_input_sources[record_input_source_index]["label"] if record_input_sources and 0 <= record_input_source_index < len(record_input_sources) else "Default")
-        safe_add(box_top + 5, box_left + 2, ">" if record_overlay_index == 2 else " ", theme["text"])
-        safe_add(box_top + 5, box_left + 4, source_text[: box_width - 6], theme["text"], transform_case=False)
-        draw_options_line(
-            box_top + 6,
-            "Precount: ",
-            [("Off", 0), ("On", 1)],
-            1 if record_precount_enabled else 0,
-            record_overlay_index == 3,
-        )
-        draw_options_line(
-            box_top + 7,
-            "Precount pattern: ",
-            [(str(i + 1), i) for i in range(max(1, min(16, seq.pattern_count())))],
-            max(0, min(seq.pattern_count() - 1, int(record_precount_pattern))),
-            record_overlay_index == 4,
-        )
+        mode_y = box_bottom - 3
+        mode_base = theme["text"] | (curses.A_REVERSE if record_overlay_index == 1 else 0)
+        mono_attr = mode_base if record_channels == 1 else (theme["muted"] | (curses.A_REVERSE if record_overlay_index == 1 else 0))
+        stereo_attr = mode_base if record_channels == 2 else (theme["muted"] | (curses.A_REVERSE if record_overlay_index == 1 else 0))
+        safe_add(mode_y, box_left + 2, "Mode:", theme["text"])
+        safe_add(mode_y, box_left + 9, "MONO", mono_attr)
+        safe_add(mode_y, box_left + 16, "STEREO", stereo_attr)
 
-        if theme.get("record_input_metering_enabled", False):
-            meter_y = box_bottom - 2
-            meter_left = box_left + 2
-            meter_width = max(10, box_width - 26)
-            norm = max(0.0, min(1.0, (record_level_db + 60.0) / 60.0))
-            fill = int(round(norm * meter_width))
-            hot_start = max(0, int(round(meter_width * 0.82)))
-            if record_monitor_running:
-                db_text = f"{record_level_db:>5.1f} dBFS"
-            else:
-                db_text = "stopped"
-            safe_add(meter_y, meter_left, "IN [", theme["hint"])
-            meter_x = meter_left + 4
-            if fill > 0:
-                normal_fill = min(fill, hot_start)
-                hot_fill = max(0, fill - hot_start)
-                if normal_fill > 0:
-                    safe_add(meter_y, meter_x, "█" * normal_fill, theme["meter_fill"])
-                if hot_fill > 0:
-                    safe_add(meter_y, meter_x + normal_fill, "█" * hot_fill, theme["meter_hot"])
-            if fill < meter_width:
-                safe_add(meter_y, meter_x + fill, "░" * (meter_width - fill), theme["muted"])
-            safe_add(meter_y, meter_x + meter_width, "] ", theme["hint"])
-            safe_add(meter_y, meter_x + meter_width + 2, db_text[: max(0, box_width - 4)], theme["hint"])
+        meter_y = box_bottom - 2
+        meter_left = box_left + 2
+        meter_width = max(10, box_width - 20)
+        norm = max(0.0, min(1.0, (record_level_db + 60.0) / 60.0))
+        fill = int(round(norm * meter_width))
+        meter = ("#" * fill).ljust(meter_width, "-")
+        db_text = f"{record_level_db:>5.1f} dBFS" if record_monitor_running else "stopped"
+        safe_add(meter_y, meter_left, f"IN [{meter}] {db_text}"[: box_width - 4], theme["hint"])
         btn_y = box_bottom - 1
-        record_label = "[ Stop ]" if record_capture_active else "[ Record ]"
-        action_row = (record_overlay_index == 5)
-        cancel_attr = theme["text"] if (action_row and record_action_index == 0) else theme["muted"]
-        record_attr = theme["record"] if (action_row and record_action_index == 1) else theme["muted"]
-        safe_add(btn_y, box_left + 2, "[ Cancel ]", cancel_attr)
-        rec_x = box_right - len(record_label) - 2
-        safe_add(btn_y, rec_x, record_label, record_attr)
+        action_hl = (record_overlay_index == 2)
+        rec_attr = theme["record"] | (curses.A_REVERSE if action_hl and record_action_index == 0 else 0)
+        cancel_attr = theme["text"] | (curses.A_REVERSE if action_hl and record_action_index == 1 else 0)
+        safe_add(btn_y, box_left + 2, "[ Record ]", rec_attr)
+        safe_add(btn_y, box_left + 15, "[ Cancel ]", cancel_attr)
 
     if file_browser_active:
         if file_browser_mode == "pattern":
             mode_name = "PATTERN"
-        elif file_browser_mode == "pattern_steps":
-            mode_name = "PROJECT"
         elif file_browser_mode in ["sample", "audio_track"]:
             mode_name = "SAMPLE"
         else:
@@ -951,13 +722,13 @@ def draw(
         box_right = box_left + box_width - 1
         box_bottom = box_top + box_height - 1
 
-        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
 
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
         path_line = f"Path: {file_browser_path}"
-        safe_add(box_top + 2, box_left + 2, path_line[: box_width - 4], theme["muted"], transform_case=False)
+        safe_add(box_top + 2, box_left + 2, path_line[: box_width - 4], theme["muted"])
 
         max_rows = box_height - 4
         start = 0
@@ -970,8 +741,8 @@ def draw(
             label = visible_items[i]["name"]
             item_attr = theme["text"]
             if i == file_browser_index and file_browser_items:
-                item_attr = item_attr | theme["selected"]
-            safe_add(row, box_left + 2, label[: box_width - 4], item_attr, transform_case=False)
+                item_attr = item_attr | curses.A_REVERSE
+            safe_add(row, box_left + 2, label[: box_width - 4], item_attr)
 
     if audio_export_options_active:
         title = "AUDIO EXPORT OPTIONS (Arrows/Space change, Enter export, Esc cancel)"
@@ -988,7 +759,7 @@ def draw(
         box_top = max(1, (h - box_height) // 2)
         box_right = box_left + box_width - 1
         box_bottom = box_top + box_height - 1
-        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
@@ -1031,86 +802,18 @@ def draw(
             scope,
             audio_export_options_index == 3,
         )
-        export_attr = theme["text"] | (theme["selected"] if audio_export_options_index == (row_count - 1) else 0)
+        export_attr = theme["text"] | (curses.A_REVERSE if audio_export_options_index == (row_count - 1) else 0)
         safe_add(box_top + 8, box_left + 4, "[ Export -> Filename ]", export_attr)
 
-    if kit_export_options_active:
-        title = "KIT EXPORT OPTIONS (Arrows/Space change, Enter export, Esc cancel)"
-        bit_depth = int(kit_export_options.get("bit_depth", 16))
-        sample_rate = int(kit_export_options.get("sample_rate", seq.engine.sr))
-        channels = int(kit_export_options.get("channels", 1))
-        row_count = 4
-        box_width = min(w - 8, 72)
-        box_height = 10
-        box_left = max(1, (w - box_width) // 2)
-        box_top = max(1, (h - box_height) // 2)
-        box_right = box_left + box_width - 1
-        box_bottom = box_top + box_height - 1
-        draw_box(box_left, box_top, box_right, box_bottom, theme["frame"])
-        for y in range(box_top + 1, box_bottom):
-            safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
-        safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
-        safe_add(box_top + 2, box_left + 2, "Use arrows to pick values.", theme["muted"])
-
-        def draw_kit_options_line(y, label, options, selected_value, selected_row):
-            safe_add(y, box_left + 2, ">" if selected_row else " ", theme["text"])
-            safe_add(y, box_left + 4, label, theme["text"])
-            x = box_left + 4 + len(label)
-            for text, value in options:
-                selected = (value == selected_value)
-                attr = theme["text"] if selected else theme["muted"]
-                if selected_row and selected:
-                    attr = attr | theme["selected"]
-                safe_add(y, x, text, attr)
-                x += len(text) + 2
-
-        draw_kit_options_line(
-            box_top + 4,
-            "Bit depth: ",
-            [("8-bit", 8), ("16-bit", 16)],
-            bit_depth,
-            kit_export_options_index == 0,
-        )
-        draw_kit_options_line(
-            box_top + 5,
-            "Sample rate: ",
-            [("11025", 11025), ("22050", 22050), ("44100", 44100), ("48000", 48000)],
-            sample_rate,
-            kit_export_options_index == 1,
-        )
-        draw_kit_options_line(
-            box_top + 6,
-            "Channels: ",
-            [("Mono  ", 1), ("Stereo", 2)],
-            channels,
-            kit_export_options_index == 2,
-        )
-        export_attr = theme["text"] | (theme["selected"] if kit_export_options_index == (row_count - 1) else 0)
-        safe_add(box_top + 7, box_left + 4, "[ Export Kit -> Folder ]", export_attr)
-
-    # Footer row sits above area_prompt.
-    footer_row = outer_bottom
+    # Bottom-left transport indicator on the outer border.
     transport_icon = "▶" if seq.playing else "▢"
-    transport_attr = frame_attr
-    safe_add(footer_row, outer_left + 2, transport_icon, transport_attr)
+    transport_attr = theme["frame"]
+    safe_add(outer_bottom, outer_left + 2, transport_icon, transport_attr)
     compact_pattern_line = " ".join(pattern_line.split())
     footer_patterns = f"PATTERNS {compact_pattern_line}"
     footer_song = f"SONG {song_line}"
-    footer_x = outer_left + 6
-    max_w = max(0, outer_right - (outer_left + 8))
-    patterns_attr = theme["tertiary_on"] if not seq.chain_enabled else theme["tertiary_off"]
-    song_attr = theme["tertiary_on"] if seq.chain_enabled else theme["tertiary_off"]
-    safe_add(footer_row, footer_x, footer_patterns[:max_w], patterns_attr)
-    footer_x += len(footer_patterns)
-    safe_add(footer_row, footer_x, "   "[:max(0, max_w - len(footer_patterns))], frame_attr)
-    footer_x += 3
-    safe_add(footer_row, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
-    project_dir = os.path.basename(os.path.dirname(seq.pattern_path)) if seq.pattern_path else ""
-    if not project_dir:
-        project_dir = "."
-    project_label = f" {project_dir} "
-    project_x = max(outer_left + 2, outer_right - len(project_label) - 2)
-    safe_add(footer_row, project_x, project_label, theme["muted"])
+    footer_text = f"{footer_patterns}   {footer_song}"
+    safe_add(outer_bottom, outer_left + 6, footer_text[: max(0, outer_right - (outer_left + 8))], theme["frame"])
 
     stdscr.refresh()
 
@@ -1120,16 +823,19 @@ class Controller:
     def __init__(self, sequencer, keymap):
         self.seq = sequencer
         self.keymap = keymap
-        self.record_input_metering_enabled = False
         self.cursor_x = 0
         self.cursor_y = 0
-        self.edit_mode = "blocks"
+        self.edit_mode = "velocity"
         self.clear_confirm = False
         self.esc_confirm = False
+        self.pattern_save_active = False
+        self.pattern_save_input = ""
+        self.pattern_load_active = False
+        self.pattern_load_input = ""
         self.kit_load_active = False
         self.kit_load_input = ""
-        self.project_save_as_active = False
-        self.project_save_as_input = ""
+        self.pack_save_active = False
+        self.pack_save_input = ""
         self.audio_export_active = False
         self.audio_export_input = ""
         self.audio_export_options_active = False
@@ -1140,15 +846,6 @@ class Controller:
             "scope": "pattern",
         }
         self.audio_export_options_index = 0
-        self.kit_export_active = False
-        self.kit_export_input = ""
-        self.kit_export_options_active = False
-        self.kit_export_options = {
-            "bit_depth": 16,
-            "sample_rate": self.seq.engine.sr,
-            "channels": 1,
-        }
-        self.kit_export_options_index = 0
         self.humanize_edit_active = False
         self.humanize_edit_input = ""
         self.probability_edit_active = False
@@ -1160,8 +857,8 @@ class Controller:
         self.track_rename_active = False
         self.track_rename_input = ""
         self.pattern_menu_active = False
-        self.pattern_menu_kind = "file"
         self.pattern_menu_index = 0
+        self.help_active = False
         self.file_browser_active = False
         self.file_browser_mode = None
         self.file_browser_target_track = None
@@ -1171,11 +868,8 @@ class Controller:
         self.header_focus = False
         self.header_section = "params"
         self.header_edit_active = False
-        self.pattern_params_focus = False
-        self.pattern_params_edit_active = False
-        self.pattern_params_index = 0
         self.active_tab = 0
-        self.header_params = ["file", "pattern", "song", "record", "bpm", "pitch", "midi"]
+        self.header_params = ["pattern_bank", "kit", "bpm", "length", "swing", "pitch", "mode", "menu", "help"]
         self.header_param_index = 0
         self.inline_value_buffer = ""
         self.inline_value_target = None  # (row, col)
@@ -1186,7 +880,6 @@ class Controller:
         self.import_overlay_active = False
         self.import_overlay_index = 0
         self.import_overlay_path = None
-        self.import_overlay_can_delete_source = False
         self.import_target_drum_track = 0
         self.import_target_audio_track = 0
         self.chop_overlay_active = False
@@ -1200,140 +893,25 @@ class Controller:
         self.record_device_sample_rates = []
         self.record_device_channels = []
         self.record_device_index = 0
-        self.record_input_sources = []
-        self.record_input_source_index = 0
         self.record_overlay_index = 0
-        self.record_action_index = 1
+        self.record_action_index = 0
         self.record_channels = 1
-        self.record_precount_enabled = True
-        self.record_precount_pattern = 0
         self.record_level_db = -60.0
-        self.record_level_peak_db = -60.0
         self.record_monitor_running = False
-        self._record_monitor_stream = None
-        self.record_monitor_info = ""
         self._record_stream = None
         self.record_capture_active = False
         self.record_capture_stage = "idle"
         self.record_capture_pattern = 0
-        self.record_capture_scope = "pattern"
-        self.record_capture_phase_start = 0.0
-        self.record_capture_precount_seconds = 0.0
-        self.record_capture_take_seconds = 0.0
-        self.record_capture_precount_loops = 0
-        self.record_capture_take_loops = 1
-        self.record_capture_loop_count = 0
-        self.record_capture_context_track = None
-        self.record_capture_context_audio = False
         self.record_capture_track = 0
         self.record_capture_last_step = 0
         self.record_capture_chunks = []
         self.record_capture_sr = 0
-        self.record_level_tick = 0
-        self.record_capture_input_indices = [0]
-        self.record_capture_channels = 1
-        self.record_stream_blocksize = 2048
-        self.record_capture_buffer = None
-        self.record_capture_write = 0
-        self.record_capture_capacity = 0
-        self.record_capture_duration_seconds = 0.0
-        self.record_capture_started_at = 0.0
-        self.record_capture_trim_seconds = 0.0
-        self.record_capture_controls_transport = True
-        self.record_capture_end_time = 0.0
-        self.record_use_external_capture = False
-        self.record_capture_started_playback = False
-        self.clear_audio_confirm_active = False
-        self.clear_audio_force_confirm_active = False
-        self.clear_audio_confirm_pattern = 0
-        self.clear_audio_confirm_track = 0
-        self.clear_audio_confirm_path = None
-        self.clipboard_import_confirm_active = False
-        self.clipboard_import_text = ""
-        self.clipboard_import_count = 0
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
 
     def move_cursor(self, dx, dy):
-        nav = self._sequencer_nav_cols()
-        if self.cursor_x in nav:
-            idx = (nav.index(self.cursor_x) + dx) % len(nav)
-            self.cursor_x = nav[idx]
+        self.cursor_x = (self.cursor_x + dx) % GRID_COLS
         self.cursor_y = (self.cursor_y + dy) % TRACKS
-
-    def _sequencer_nav_cols(self):
-        """Sequencer navigation order matching visual layout (load, preview, steps, params)."""
-        return [LOAD_COL, PREVIEW_COL] + list(range(self.seq.max_step_count)) + [PROB_COL, GROUP_COL, TRACK_PITCH_COL]
-
-    def _audio_nav_cols(self):
-        """Audio tab navigation order matching visual layout."""
-        return [0, LOAD_COL, PREVIEW_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
-
-    def _sequencer_beat_cols(self):
-        """Return beat-start step columns for current visible pattern length."""
-        try:
-            current_len = int(self.seq.pattern_length[self.seq.view_pattern])
-        except Exception:
-            current_len = self.seq.max_step_count
-        step_span = max(1, min(self.seq.max_step_count, current_len))
-        cols = list(range(0, step_span, 4))
-        return cols if cols else [0]
-
-    def _cycle_edit_mode(self):
-        """Rotate sequencer edit mode through all available step views."""
-        modes = ["velocity", "ratchet", "blocks", "detune", "pan"]
-        try:
-            idx = modes.index(self.edit_mode)
-        except ValueError:
-            idx = 0
-        self.edit_mode = modes[(idx + 1) % len(modes)]
-
-    def _pattern_param_keys(self):
-        """Ordered keys for work-area pattern parameter navigation."""
-        return ["length", "swing", "humanize", "mode"]
-
-    def _pattern_param_current(self):
-        keys = self._pattern_param_keys()
-        if not keys:
-            return "length"
-        idx = max(0, min(len(keys) - 1, self.pattern_params_index))
-        return keys[idx]
-
-    def _adjust_pattern_param(self, delta):
-        """Apply +/- adjustment to the currently focused work-area pattern parameter."""
-        key = self._pattern_param_current()
-        if key == "length":
-            self.seq.change_current_pattern_length(delta)
-        elif key == "swing":
-            self.seq.change_current_pattern_swing(delta)
-        elif key == "humanize":
-            self.seq.change_current_pattern_humanize(delta)
-        elif key == "mode":
-            if delta > 0:
-                self._cycle_edit_mode()
-            elif delta < 0:
-                # Reverse cycle for left/back edits.
-                modes = ["velocity", "ratchet", "blocks", "detune", "pan"]
-                try:
-                    idx = modes.index(self.edit_mode)
-                except ValueError:
-                    idx = 0
-                self.edit_mode = modes[(idx - 1) % len(modes)]
-
-    def _set_active_tab(self, tab_index):
-        """Switch active top tab and clamp cursor for that view."""
-        self.active_tab = max(0, min(2, int(tab_index)))
-        if self.active_tab != 0:
-            self.pattern_params_focus = False
-            self.pattern_params_edit_active = False
-        if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
-            self.cursor_x = PROB_COL
-        if self.active_tab in [1, 2]:
-            self.cursor_y = min(self.cursor_y, TRACKS - 2)
-        if self.active_tab == 1 and self.cursor_x not in [LOAD_COL, PREVIEW_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL, 0]:
-            self.cursor_x = LOAD_COL
-        if self.active_tab == 2 and self.cursor_x > 5:
-            self.cursor_x = 0
 
     def _tracks_order(self):
         """Return display order for Audio view (Pattern lanes first, Song lanes after)."""
@@ -1378,42 +956,31 @@ class Controller:
             value = int(self.inline_value_buffer)
         except ValueError:
             value = digit
-        if col == PROB_COL:
+        if col == HUMANIZE_COL:
+            value = max(0, min(100, value))
+            self.seq.set_track_humanize(self.cursor_y, value)
+        elif col == PROB_COL:
             value = max(0, min(100, value))
             self.seq.set_track_probability(self.cursor_y, value)
         elif col == TRACK_PITCH_COL:
             value = max(0, min(24, value))
             self.seq.set_track_pitch_ui(self.cursor_y, value)
 
-    def _apply_inline_audio_track_value(self, col, digit):
-        """Apply inline numeric typing for Audio-view parameter columns."""
-        track_idx = self._track_for_row(self.cursor_y)
-        now = time.time()
-        target = (self.cursor_y, col)
-        if self.inline_value_target != target or (now - self.inline_value_time) > 1.0:
-            self.inline_value_buffer = ""
+    def _close_pattern_dialog(self):
+        self.pattern_load_active = False
+        self.pattern_load_input = ""
 
-        self.inline_value_target = target
-        self.inline_value_time = now
-        self.inline_value_buffer = (self.inline_value_buffer + str(digit))[-3:]
-
-        try:
-            value = int(self.inline_value_buffer)
-        except ValueError:
-            value = digit
-
-        if col == AUDIO_VOLUME_COL:
-            self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, max(0, min(9, value)))
-        elif col == TRACK_PITCH_COL:
-            self.seq.set_audio_track_shift(self.seq.view_pattern, track_idx, max(0, min(50, value)))
+    def _close_pattern_save_dialog(self):
+        self.pattern_save_active = False
+        self.pattern_save_input = ""
 
     def _close_kit_dialog(self):
         self.kit_load_active = False
         self.kit_load_input = ""
 
-    def _close_project_save_as_dialog(self):
-        self.project_save_as_active = False
-        self.project_save_as_input = ""
+    def _close_pack_dialog(self):
+        self.pack_save_active = False
+        self.pack_save_input = ""
 
     def _close_audio_export_dialog(self):
         self.audio_export_active = False
@@ -1422,14 +989,6 @@ class Controller:
 
     def _close_audio_export_options_dialog(self):
         self.audio_export_options_active = False
-
-    def _close_kit_export_dialog(self):
-        self.kit_export_active = False
-        self.kit_export_input = ""
-        self.kit_export_options_active = False
-
-    def _close_kit_export_options_dialog(self):
-        self.kit_export_options_active = False
 
     def _close_humanize_dialog(self):
         self.humanize_edit_active = False
@@ -1445,7 +1004,6 @@ class Controller:
 
     def _close_pattern_menu(self):
         self.pattern_menu_active = False
-        self.pattern_menu_kind = "file"
 
     def _close_chop_overlay(self):
         """Close chop preview/apply overlay."""
@@ -1457,18 +1015,16 @@ class Controller:
         self.import_overlay_active = False
         self.import_overlay_index = 0
         self.import_overlay_path = None
-        self.import_overlay_can_delete_source = False
 
-    def _open_import_overlay(self, path, can_delete_source=False):
+    def _open_import_overlay(self, path):
         """Open import action overlay for a dropped/pasted WAV path."""
-        src = _normalize_dropped_path(path)
+        src = os.path.expanduser(path.strip())
         if not os.path.isfile(src) or not src.lower().endswith(".wav"):
             self.status_message = "Select a .wav file to import"
             return False
         self.import_overlay_active = True
         self.import_overlay_index = 0
         self.import_overlay_path = src
-        self.import_overlay_can_delete_source = bool(can_delete_source)
         self.drop_path_active = False
         self.drop_path_input = ""
         if self.active_tab == 1:
@@ -1481,46 +1037,238 @@ class Controller:
         return True
 
     def _refresh_record_devices(self):
-        recorder.refresh_record_devices(self)
-
-    def _refresh_record_input_sources(self):
-        recorder.refresh_record_input_sources(self)
-
-    def _current_record_input_indices(self):
-        return recorder.current_record_input_indices(self)
-
-    def _extract_record_input(self, indata):
-        return recorder.extract_record_input(self, indata)
+        """Load available input devices for record overlay selection."""
+        names = []
+        ids = []
+        sample_rates = []
+        channels = []
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            devices = []
+        for idx, dev in enumerate(devices):
+            try:
+                max_in = int(dev.get("max_input_channels", 0))
+                if max_in > 0:
+                    names.append(f"{idx}: {dev.get('name', 'Input')}")
+                    ids.append(idx)
+                    sample_rates.append(int(round(float(dev.get("default_samplerate", self.seq.engine.sr)))))
+                    channels.append(max_in)
+            except Exception:
+                continue
+        self.record_device_names = names
+        self.record_device_ids = ids
+        self.record_device_sample_rates = sample_rates
+        self.record_device_channels = channels
+        if self.record_device_index >= len(ids):
+            self.record_device_index = max(0, len(ids) - 1)
 
     def _record_level_callback(self, indata, frames, time_info, status):
-        recorder.record_level_callback(self, indata, frames, time_info, status)
+        """Input stream callback: compute current dBFS level for UI meter."""
+        try:
+            mono = np.asarray(indata, dtype=np.float32)
+            if mono.ndim == 2:
+                mono = mono.mean(axis=1)
+            rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size > 0 else 0.0
+            if rms <= 1e-9:
+                db = -60.0
+            else:
+                db = max(-60.0, min(0.0, 20.0 * np.log10(rms)))
+            self.record_level_db = db
+        except Exception:
+            self.record_level_db = -60.0
 
     def _record_capture_callback(self, indata, frames, time_info, status):
-        recorder.record_capture_callback(self, indata, frames, time_info, status)
+        """Input callback for loop capture: update meter and collect pass-2 audio."""
+        self._record_level_callback(indata, frames, time_info, status)
+        if not self.record_capture_active or self.record_capture_stage != "recording":
+            return
+        try:
+            chunk = np.asarray(indata, dtype=np.float32)
+            if chunk.ndim == 2:
+                want_channels = 2 if int(self.record_channels) >= 2 else 1
+                if want_channels == 1:
+                    chunk = chunk.mean(axis=1)
+                else:
+                    if chunk.shape[1] == 1:
+                        chunk = np.repeat(chunk, 2, axis=1)
+                    elif chunk.shape[1] > 2:
+                        chunk = chunk[:, :2]
+            if chunk.size > 0:
+                self.record_capture_chunks.append(np.copy(chunk))
+        except Exception:
+            pass
 
     def _stop_record_monitor(self):
-        recorder.stop_record_monitor(self)
+        """Stop and dispose current input monitor stream."""
+        if self._record_stream is not None:
+            try:
+                self._record_stream.stop()
+            except Exception:
+                pass
+            try:
+                self._record_stream.close()
+            except Exception:
+                pass
+        self._record_stream = None
+        self.record_monitor_running = False
 
     def _start_record_monitor(self):
-        recorder.start_record_monitor(self)
+        """Start input monitor stream for currently selected device."""
+        self._stop_record_monitor()
+        if not self.record_device_ids:
+            self.record_level_db = -60.0
+            return
+        dev_id = self.record_device_ids[self.record_device_index]
+        dev_sr = self.record_device_sample_rates[self.record_device_index]
+        channels = max(1, min(int(self.record_channels), self.record_device_channels[self.record_device_index]))
+        try:
+            self._record_stream = sd.InputStream(
+                device=dev_id,
+                channels=channels,
+                samplerate=dev_sr,
+                callback=self._record_level_callback,
+                blocksize=512,
+            )
+            self._record_stream.start()
+            self.record_monitor_running = True
+            self.record_capture_sr = int(dev_sr)
+        except Exception as exc:
+            self.record_monitor_running = False
+            self.status_message = f"Record monitor failed: {exc}"
 
     def _start_record_capture_stream(self):
-        return recorder.start_record_capture_stream(self)
+        """Start input stream for capture mode on selected device."""
+        self._stop_record_monitor()
+        if not self.record_device_ids:
+            self.status_message = "No input device"
+            return False
+        dev_id = self.record_device_ids[self.record_device_index]
+        dev_sr = self.record_device_sample_rates[self.record_device_index]
+        channels = max(1, min(int(self.record_channels), self.record_device_channels[self.record_device_index]))
+        try:
+            self._record_stream = sd.InputStream(
+                device=dev_id,
+                channels=channels,
+                samplerate=dev_sr,
+                callback=self._record_capture_callback,
+                blocksize=512,
+            )
+            self._record_stream.start()
+            self.record_monitor_running = True
+            self.record_capture_sr = int(dev_sr)
+            return True
+        except Exception as exc:
+            self.record_monitor_running = False
+            self.status_message = f"Record failed: {exc}"
+            return False
 
-    def _open_record_overlay(self, target_track=None, from_audio_view=False):
-        recorder.open_record_overlay(self, target_track=target_track, from_audio_view=from_audio_view)
+    def _open_record_overlay(self):
+        """Open record device overlay and start live input level monitoring."""
+        self._refresh_record_devices()
+        self.record_overlay_active = True
+        self.record_overlay_index = 0
+        self.record_action_index = 0
+        self.record_level_db = -60.0
+        self._start_record_monitor()
 
     def _close_record_overlay(self):
-        recorder.close_record_overlay(self)
+        """Close record overlay and stop input monitor."""
+        self.record_overlay_active = False
+        self._stop_record_monitor()
 
     def _cancel_record_capture(self, reason="Recording canceled"):
-        recorder.cancel_record_capture(self, reason=reason)
+        """Abort any active two-pass recording session."""
+        if self.record_capture_active:
+            self.record_capture_active = False
+            self.record_capture_stage = "idle"
+            self.record_capture_chunks = []
+            self._stop_record_monitor()
+            self.status_message = reason
 
     def _finish_record_capture(self):
-        recorder.finish_record_capture(self)
+        """Finalize pass-2 capture and store it in current pattern audio track slot."""
+        self.record_capture_active = False
+        self.record_capture_stage = "idle"
+        chunks = self.record_capture_chunks
+        self.record_capture_chunks = []
+        self._stop_record_monitor()
+        if not chunks:
+            self.status_message = "Record failed: no audio captured"
+            return
+        recorded = np.concatenate(chunks).astype(np.float32)
+        if recorded.size <= 1:
+            self.status_message = "Record failed: no audio captured"
+            return
+        src_sr = int(self.record_capture_sr) if self.record_capture_sr > 0 else int(self.seq.engine.sr)
+        dst_sr = int(self.seq.engine.sr)
+        channels = 2 if (recorded.ndim == 2 and recorded.shape[1] >= 2) else 1
+        if channels == 2:
+            if src_sr != dst_sr:
+                left = self.seq._resample_mono_linear(recorded[:, 0], src_sr, dst_sr)
+                right = self.seq._resample_mono_linear(recorded[:, 1], src_sr, dst_sr)
+                n = min(len(left), len(right))
+                recorded = np.column_stack((left[:n], right[:n])).astype(np.float32)
+            mono = recorded.mean(axis=1).astype(np.float32)
+        else:
+            mono = recorded.reshape(-1).astype(np.float32)
+            if src_sr != dst_sr:
+                mono = self.seq._resample_mono_linear(mono, src_sr, dst_sr)
+        rec_dir = os.path.join(os.getcwd(), "recordings")
+        os.makedirs(rec_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(self.seq.pattern_name))[0] or "pattern"
+        rec_idx = 1
+        while True:
+            name = f"{base}_rec{rec_idx}.wav"
+            out_path = os.path.join(rec_dir, name)
+            if not os.path.exists(out_path):
+                break
+            rec_idx += 1
+        out_src = recorded if channels == 2 else mono
+        out = np.clip(out_src * 32767.0, -32768, 32767).astype(np.int16)
+        wavfile.write(out_path, dst_sr, out)
+        track = self.record_capture_track
+        if self.seq.audio_track_mode[track] == 1:
+            self.seq.audio_track_free_sample_paths[track] = out_path
+            self.seq.audio_track_free_sample_names[track] = name
+            self.seq.audio_track_free_samples[track] = mono
+            self.seq.audio_track_free_channels[track] = channels
+        else:
+            self.seq.audio_track_slot_sample_paths[self.record_capture_pattern][track] = out_path
+            self.seq.audio_track_slot_sample_names[self.record_capture_pattern][track] = name
+            self.seq.audio_track_slot_samples[self.record_capture_pattern][track] = mono
+            self.seq.audio_track_slot_channels[self.record_capture_pattern][track] = channels
+        self.seq.dirty = True
+        sr_hint = f" (SR {src_sr}->{dst_sr})" if src_sr != dst_sr else ""
+        self.status_message = f"Recorded {name}{sr_hint}"
 
     def _arm_record_capture(self):
-        recorder.arm_record_capture(self)
+        """Start two-pass recording: 1st loop pre-roll, 2nd loop capture."""
+        if self.active_tab != 1 or self.cursor_y >= (TRACKS - 1):
+            self.status_message = "Recording works in Audio view on track rows"
+            return
+        if self.seq.chain_enabled:
+            self.status_message = "Disable SONG before recording"
+            return
+        track = self._track_for_row(self.cursor_y)
+        self._cancel_record_capture("")
+        if not self._start_record_capture_stream():
+            return
+        self.record_capture_active = True
+        self.record_capture_stage = "preroll"
+        self.record_capture_pattern = self.seq.view_pattern
+        self.record_capture_track = track
+        self.record_capture_last_step = self.seq.step
+        self.record_capture_chunks = []
+
+        if self.seq.playing:
+            self.seq.toggle_playback()
+        self.seq.select_pattern(self.record_capture_pattern)
+        self.seq.step = 0
+        self.seq.next_pattern = None
+        self.seq.pending_events.clear()
+        self.seq.toggle_playback()
+        self.status_message = "Record armed: pass 1 pre-roll, pass 2 capture"
 
     def _try_open_chop_overlay(self, path):
         """Prepare chops from a dropped/pasted path and open chop overlay."""
@@ -1537,7 +1285,7 @@ class Controller:
         """Auto-open import overlay shortly after a dropped path appears complete."""
         if not self.drop_path_active:
             return False
-        src = _normalize_dropped_path(self.drop_path_input)
+        src = self.drop_path_input.strip().strip('"').strip("'").replace("\\ ", " ")
         if not src.lower().endswith(".wav"):
             return False
         if (time.perf_counter() - self.drop_path_last_input_time) < 0.15:
@@ -1576,7 +1324,7 @@ class Controller:
             if e.is_dir(follow_symlinks=False):
                 dirs.append(e)
             elif e.is_file(follow_symlinks=False):
-                if self.file_browser_mode in ["pattern", "pattern_steps"] and e.name.lower().endswith(".json"):
+                if self.file_browser_mode == "pattern" and e.name.lower().endswith(".json"):
                     files.append(e)
                 elif self.file_browser_mode in ["sample", "audio_track"] and e.name.lower().endswith(".wav"):
                     files.append(e)
@@ -1608,16 +1356,15 @@ class Controller:
         self.file_browser_path = os.path.abspath(start_path)
         self.file_browser_active = True
         self.file_browser_index = 0
+        self.pattern_load_active = False
+        self.pattern_load_input = ""
         self.kit_load_active = False
         self.kit_load_input = ""
-        self.project_save_as_active = False
-        self.project_save_as_input = ""
+        self.pack_save_active = False
+        self.pack_save_input = ""
         self.audio_export_active = False
         self.audio_export_input = ""
         self.audio_export_options_active = False
-        self.kit_export_active = False
-        self.kit_export_input = ""
-        self.kit_export_options_active = False
         self.humanize_edit_active = False
         self.humanize_edit_input = ""
         self.probability_edit_active = False
@@ -1664,12 +1411,6 @@ class Controller:
             self._close_file_browser()
             return
 
-        if self.file_browser_mode == "pattern_steps":
-            ok, message = self.seq.import_pattern_steps_from_project(item["path"])
-            self.status_message = message
-            self._close_file_browser()
-            return
-
         if self.file_browser_mode == "kit":
             return
 
@@ -1696,7 +1437,27 @@ class Controller:
             return
 
     def _tick_record_capture(self):
-        recorder.tick_record_capture(self)
+        """Advance two-pass recording state machine using sequencer step wrap events."""
+        if not self.record_capture_active:
+            return
+        if not self.seq.playing:
+            self._cancel_record_capture("Recording canceled (playback stopped)")
+            return
+        if self.seq.pattern != self.record_capture_pattern:
+            self._cancel_record_capture("Recording canceled (pattern changed)")
+            return
+        current_step = int(self.seq.step)
+        wrapped = current_step < int(self.record_capture_last_step)
+        if wrapped:
+            if self.record_capture_stage == "preroll":
+                self.record_capture_stage = "recording"
+                self.record_capture_chunks = []
+                self.status_message = "Recording pass 2..."
+            elif self.record_capture_stage == "recording":
+                self.seq.toggle_playback()
+                self._finish_record_capture()
+                return
+        self.record_capture_last_step = current_step
 
     def _close_swing_dialog(self):
         self.swing_edit_active = False
@@ -1706,101 +1467,71 @@ class Controller:
         self.track_rename_active = False
         self.track_rename_input = ""
 
-    def _open_clear_audio_confirm(self, pattern_index, track):
-        """Open Y/N confirmation prompt for clearing an audio track sample."""
-        self.clear_audio_confirm_active = True
-        self.clear_audio_force_confirm_active = False
-        self.clear_audio_confirm_pattern = int(pattern_index)
-        self.clear_audio_confirm_track = int(track)
-        self.clear_audio_confirm_path = self.seq.get_audio_track_path(pattern_index, track)
-
-    def _close_clipboard_import_confirm(self):
-        """Close clipboard-import confirmation prompt state."""
-        self.clipboard_import_confirm_active = False
-        self.clipboard_import_text = ""
-        self.clipboard_import_count = 0
-
-    def _menu_items(self):
-        """Return currently active top-menu item list."""
-        if self.pattern_menu_kind == "pattern":
-            return PATTERN_MENU_ITEMS
-        return FILE_MENU_ITEMS
-
-    def _open_top_menu(self, kind):
-        """Open top-level menu by kind: file or pattern."""
-        if kind not in ["file", "pattern"]:
-            kind = "file"
-        self.pattern_menu_kind = kind
-        self.pattern_menu_active = True
-        self.pattern_menu_index = 0
-
-    def _focus_header_menu_button(self, kind):
-        """Return header focus to a specific top menu button."""
-        if kind not in ["file", "pattern"]:
-            kind = "file"
-        self.header_focus = True
-        self.header_section = "params"
-        self.header_edit_active = False
-        try:
-            self.header_param_index = self.header_params.index(kind)
-        except ValueError:
-            self.header_param_index = 0
-
     def _run_pattern_menu_action(self):
-        if self.pattern_menu_kind == "pattern":
-            if self.pattern_menu_index == 0:
-                self.patterns_overlay_active = True
-                self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
-                self.patterns_overlay_delete_confirm_index = -1
-                ok, message = True, ""
-            elif self.pattern_menu_index == 1:
-                ok, message = self.seq.add_pattern_after_current(copy_from_view=False)
-            elif self.pattern_menu_index == 2:
-                clip_text = _read_system_clipboard_text()
-                ok_parse, parse_message, parsed = self.seq.parse_patterns_from_text(clip_text)
-                if not ok_parse:
-                    ok, message = False, f"Clipboard import failed: {parse_message}"
-                else:
-                    self.clipboard_import_confirm_active = True
-                    self.clipboard_import_text = clip_text
-                    self.clipboard_import_count = len(parsed)
-                    ok, message = True, ""
-            elif self.pattern_menu_index == 3:
-                self._open_file_browser("pattern_steps")
-                ok, message = True, ""
-            elif self.pattern_menu_index == 4:
-                text = self.seq.export_patterns_to_text()
-                copied, copy_error = _write_system_clipboard_text(text)
-                if copied:
-                    ok, message = True, f"Copied {self.seq.pattern_count()} patterns to clipboard"
-                else:
-                    ok, message = False, f"Copy failed: {copy_error}"
-            elif self.pattern_menu_index == 5:
-                self.seq.clear_current_pattern()
-                ok, message = True, f"Cleared pattern {self.seq.view_pattern + 1}"
-            elif self.pattern_menu_index == 6:
-                ok, message = self.seq.copy_current_pattern()
-            elif self.pattern_menu_index == 7:
-                ok, message = self.seq.paste_to_current_pattern()
-            else:
-                ok, message = False, "Invalid Pattern menu option"
-            self.status_message = message
-            return
-
         if self.pattern_menu_index == 0:
-            ok, message = self.seq.new_project("new_project.json")
+            ok, message = self.seq.copy_current_pattern()
         elif self.pattern_menu_index == 1:
+            ok, message = self.seq.paste_to_current_pattern()
+        elif self.pattern_menu_index == 2:
+            self.seq.clear_current_pattern()
+            ok, message = True, f"Cleared pattern {self.seq.view_pattern + 1}"
+        elif self.pattern_menu_index == 3:
+            self.pattern_save_active = True
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
+            self.audio_export_options_active = False
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            self.swing_edit_active = False
+            self.swing_edit_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
+            ok, message = True, ""
+        elif self.pattern_menu_index == 4:
             self._open_file_browser("pattern")
             ok, message = True, ""
-        elif self.pattern_menu_index == 2:
-            try:
-                self.seq.save()
-                ok, message = True, f"Saved {os.path.basename(self.seq.pattern_path)}"
-            except Exception as exc:
-                ok, message = False, f"Save failed: {exc}"
-        elif self.pattern_menu_index == 3:
-            self.project_save_as_active = True
-            self.project_save_as_input = ""
+        elif self.pattern_menu_index == 5:
+            self._open_file_browser("kit")
+            ok, message = True, ""
+        elif self.pattern_menu_index == 6:
+            ok, message = self.seq.toggle_chain()
+        elif self.pattern_menu_index == 7:
+            self.swing_edit_active = True
+            self.swing_edit_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.kit_load_active = False
+            self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
+            self.audio_export_active = False
+            self.audio_export_input = ""
+            self.audio_export_options_active = False
+            self.chain_edit_active = False
+            self.chain_edit_input = ""
+            self.humanize_edit_active = False
+            self.humanize_edit_input = ""
+            self.probability_edit_active = False
+            self.probability_edit_input = ""
+            ok, message = True, ""
+        elif self.pattern_menu_index == 8:
+            self.pack_save_active = True
+            self.pack_save_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
             self.audio_export_active = False
@@ -1814,25 +1545,10 @@ class Controller:
             self.humanize_edit_input = ""
             self.probability_edit_active = False
             self.probability_edit_input = ""
-            self.kit_export_active = False
-            self.kit_export_input = ""
-            self.kit_export_options_active = False
             ok, message = True, ""
-        elif self.pattern_menu_index == 4:
-            self.kit_export_options_active = True
-            self.kit_export_options_index = 0
-            self.kit_export_options = {
-                "bit_depth": 16,
-                "sample_rate": self.seq.engine.sr,
-                "channels": 1,
-            }
-            self.kit_export_active = False
-            self.kit_export_input = ""
-            ok, message = True, ""
-        elif self.pattern_menu_index == 5:
-            self._open_file_browser("kit")
-            ok, message = True, ""
-        elif self.pattern_menu_index == 6:
+        elif self.pattern_menu_index == 9:
+            ok, message = self.seq.toggle_midi_out()
+        else:
             self.audio_export_options_active = True
             self.audio_export_options_index = 0
             self.audio_export_options = {
@@ -1843,10 +1559,14 @@ class Controller:
             }
             self.audio_export_active = False
             self.audio_export_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
-            self.project_save_as_active = False
-            self.project_save_as_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.chain_edit_active = False
             self.chain_edit_input = ""
             self.swing_edit_active = False
@@ -1855,148 +1575,69 @@ class Controller:
             self.humanize_edit_input = ""
             self.probability_edit_active = False
             self.probability_edit_input = ""
-            self.kit_export_active = False
-            self.kit_export_input = ""
-            self.kit_export_options_active = False
             ok, message = True, ""
-        else:
-            ok, message = False, "Invalid File menu option"
         self.status_message = message
 
     def handle_key(self, key):
         """Handle a single key event. Returns False when app should exit."""
         event_tokens = _event_tokens(key)
         key_code = key if isinstance(key, int) else ord(key)
-        if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
-            self.cursor_x = PROB_COL
         if key_code != 27 and self.esc_confirm:
             self.esc_confirm = False
         if self.status_message and key_code != -1:
             self.status_message = ""
-        if self.active_tab in [1, 2] and self.cursor_y >= (TRACKS - 1):
+        if self.active_tab == 1 and self.cursor_y >= (TRACKS - 1):
             self.cursor_y = TRACKS - 2
 
-        if self.clear_audio_confirm_active:
-            if key_code == 27:
-                self.clear_audio_confirm_active = False
-                self.clear_audio_force_confirm_active = False
-                self.status_message = "Clear canceled"
-                return True
-            if self.clear_audio_force_confirm_active:
-                if isinstance(key, str) and key.lower() in ["y", "n"]:
-                    if key.lower() == "y":
-                        ok, message = self.seq.force_delete_audio_path(self.clear_audio_confirm_path)
-                        self.status_message = message
-                    else:
-                        self.status_message = "Force delete canceled (file kept)"
-                    self.clear_audio_confirm_active = False
-                    self.clear_audio_force_confirm_active = False
-                    return True
-            else:
-                if isinstance(key, str) and key.lower() in ["y", "n"]:
-                    delete_file = (key.lower() == "y")
-                    ok, message, needs_force = self.seq.clear_audio_track_sample(
-                        self.clear_audio_confirm_pattern,
-                        self.clear_audio_confirm_track,
-                        delete_file=delete_file,
-                    )
-                    self.status_message = message
-                    if needs_force:
-                        self.clear_audio_force_confirm_active = True
-                    else:
-                        self.clear_audio_confirm_active = False
-                        self.clear_audio_force_confirm_active = False
-                    return True
-            return True
-
-        if self.clipboard_import_confirm_active:
-            if key_code == 27:
-                self._close_clipboard_import_confirm()
-                self.status_message = "Clipboard import canceled"
-                return True
-            if isinstance(key, str) and key.lower() in ["y", "n"]:
-                if key.lower() == "y":
-                    ok, message = self.seq.import_patterns_from_text(self.clipboard_import_text)
-                    self.status_message = message
-                else:
-                    self.status_message = "Clipboard import canceled"
-                self._close_clipboard_import_confirm()
-                return True
+        if self.help_active:
+            if key_code == 27 or self.keymap.matches("help_menu", event_tokens):
+                self.help_active = False
             return True
 
         if self.record_overlay_active:
-            if self.keymap.matches("record_menu", event_tokens):
-                if self.record_capture_active:
-                    if self.seq.playing:
-                        self.seq.toggle_playback()
-                    self._finish_record_capture()
-                else:
-                    self._close_record_overlay()
-                    self.status_message = "Record menu closed"
-                return True
-            row_count = 6
             if key_code == 27:
                 self._close_record_overlay()
                 return True
             if key_code == curses.KEY_UP:
-                self.record_overlay_index = (self.record_overlay_index - 1) % row_count
+                self.record_overlay_index = (self.record_overlay_index - 1) % 3
                 return True
             if key_code == curses.KEY_DOWN:
-                self.record_overlay_index = (self.record_overlay_index + 1) % row_count
+                self.record_overlay_index = (self.record_overlay_index + 1) % 3
                 return True
             if key_code in [ord("m"), ord("M")]:
                 self.record_channels = 1
-                self._start_record_monitor()
                 return True
             if key_code in [ord("s"), ord("S")]:
                 self.record_channels = 2
-                self._start_record_monitor()
                 return True
             if key_code in [curses.KEY_LEFT, curses.KEY_RIGHT, 32]:
                 direction = -1 if key_code == curses.KEY_LEFT else 1
                 if key_code == 32:
                     direction = 1
                 if self.record_overlay_index == 0:
-                    self.record_channels = 2 if self.record_channels == 1 else 1
-                    self._refresh_record_input_sources()
-                    self._start_record_monitor()
-                elif self.record_overlay_index == 1:
                     if self.record_device_ids:
                         self.record_device_index = (self.record_device_index + direction) % len(self.record_device_ids)
-                        self._refresh_record_input_sources()
-                        self.record_input_source_index = 0
                         self._start_record_monitor()
-                elif self.record_overlay_index == 2:
-                    if self.record_input_sources:
-                        self.record_input_source_index = (self.record_input_source_index + direction) % len(self.record_input_sources)
-                    self._start_record_monitor()
-                elif self.record_overlay_index == 3:
-                    self.record_precount_enabled = not self.record_precount_enabled
-                elif self.record_overlay_index == 4:
-                    count = max(1, self.seq.pattern_count())
-                    self.record_precount_pattern = (self.record_precount_pattern + direction) % count
-                elif self.record_overlay_index == 5:
+                elif self.record_overlay_index == 1:
+                    self.record_channels = 2 if self.record_channels == 1 else 1
+                else:
                     self.record_action_index = 0 if self.record_action_index == 1 else 1
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
-                if self.record_overlay_index == 5:
-                    if self.record_action_index == 0:
-                        self._close_record_overlay()
-                        self.status_message = "Record menu closed"
-                    else:
-                        if self.record_capture_active:
-                            if self.seq.playing:
-                                self.seq.toggle_playback()
-                            self._finish_record_capture()
-                        else:
-                            self._arm_record_capture()
+                if self.record_overlay_index != 2:
+                    self.record_overlay_index = min(2, self.record_overlay_index + 1)
                     return True
-                self.record_overlay_index = min(row_count - 1, self.record_overlay_index + 1)
+                if self.record_action_index == 0:
+                    self._close_record_overlay()
+                    self._arm_record_capture()
+                else:
+                    self._close_record_overlay()
+                    self.status_message = "Record canceled"
                 return True
             return True
 
         if self.import_overlay_active:
-            max_index = 4 if self.import_overlay_can_delete_source else 3
+            max_index = 3
             if key_code == 27:
                 self._close_import_overlay()
                 self.status_message = "Import canceled"
@@ -2057,18 +1698,6 @@ class Controller:
                     self.status_message = message
                     self._close_import_overlay()
                     return True
-                if self.import_overlay_can_delete_source and self.import_overlay_index == 4:
-                    delete_path = path
-                    self._close_import_overlay()
-                    try:
-                        if delete_path and os.path.isfile(delete_path):
-                            os.remove(delete_path)
-                            self.status_message = "Import canceled and recording deleted"
-                        else:
-                            self.status_message = "Recording file was already missing"
-                    except Exception as exc:
-                        self.status_message = f"Delete failed: {exc}"
-                    return True
                 self._close_import_overlay()
                 self.status_message = "Import canceled"
                 return True
@@ -2112,7 +1741,8 @@ class Controller:
                 self.status_message = "Drop canceled"
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
-                dropped = _normalize_dropped_path(self.drop_path_input)
+                dropped = self.drop_path_input.strip().strip('"').strip("'")
+                dropped = dropped.replace("\\ ", " ")
                 self.drop_path_active = False
                 self.drop_path_input = ""
                 if dropped:
@@ -2249,60 +1879,6 @@ class Controller:
                 return True
             return True
 
-        if self.kit_export_options_active:
-            row_count = 4
-            if key_code == 27:
-                self._close_kit_export_options_dialog()
-                return True
-            if key_code == curses.KEY_UP:
-                self.kit_export_options_index = (self.kit_export_options_index - 1) % row_count
-                return True
-            if key_code == curses.KEY_DOWN:
-                self.kit_export_options_index = (self.kit_export_options_index + 1) % row_count
-                return True
-            if key_code in [10, 13, curses.KEY_ENTER]:
-                if self.kit_export_options_index == 3:
-                    self.kit_export_options_active = False
-                    self.kit_export_active = True
-                    self.kit_export_input = ""
-                    return True
-                key_code = curses.KEY_RIGHT
-
-            if key_code in [curses.KEY_LEFT, curses.KEY_RIGHT, 32]:
-                direction = -1 if key_code == curses.KEY_LEFT else 1
-                if key_code == 32:
-                    direction = 1
-
-                if self.kit_export_options_index == 0:
-                    bit_depths = [8, 16]
-                    cur = int(self.kit_export_options.get("bit_depth", 16))
-                    try:
-                        idx = bit_depths.index(cur)
-                    except ValueError:
-                        idx = 1
-                    idx = (idx + direction) % len(bit_depths)
-                    self.kit_export_options["bit_depth"] = bit_depths[idx]
-                elif self.kit_export_options_index == 1:
-                    rates = [11025, 22050, 44100, 48000]
-                    cur = int(self.kit_export_options.get("sample_rate", 44100))
-                    try:
-                        idx = rates.index(cur)
-                    except ValueError:
-                        idx = rates.index(44100)
-                    idx = (idx + direction) % len(rates)
-                    self.kit_export_options["sample_rate"] = rates[idx]
-                elif self.kit_export_options_index == 2:
-                    chans = [1, 2]
-                    cur = int(self.kit_export_options.get("channels", 1))
-                    try:
-                        idx = chans.index(cur)
-                    except ValueError:
-                        idx = 0
-                    idx = (idx + direction) % len(chans)
-                    self.kit_export_options["channels"] = chans[idx]
-                return True
-            return True
-
         if self.file_browser_active:
             if key_code == 27:
                 self._close_file_browser()
@@ -2352,20 +1928,14 @@ class Controller:
             return True
 
         if self.pattern_menu_active:
-            menu_items = self._menu_items()
-            close_by_hotkey = self.keymap.matches("file_menu", event_tokens)
-            if self.pattern_menu_kind == "pattern":
-                close_by_hotkey = close_by_hotkey or self.keymap.matches("pattern_menu", event_tokens)
-            if key_code == 27 or close_by_hotkey:
-                menu_kind = self.pattern_menu_kind
+            if key_code == 27 or self.keymap.matches("pattern_menu", event_tokens):
                 self._close_pattern_menu()
-                self._focus_header_menu_button(menu_kind)
                 return True
             if key_code == curses.KEY_UP:
-                self.pattern_menu_index = (self.pattern_menu_index - 1) % len(menu_items)
+                self.pattern_menu_index = (self.pattern_menu_index - 1) % len(PATTERN_MENU_ITEMS)
                 return True
             if key_code == curses.KEY_DOWN:
-                self.pattern_menu_index = (self.pattern_menu_index + 1) % len(menu_items)
+                self.pattern_menu_index = (self.pattern_menu_index + 1) % len(PATTERN_MENU_ITEMS)
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
                 self._run_pattern_menu_action()
@@ -2373,7 +1943,7 @@ class Controller:
                 return True
             if ord("1") <= key_code <= ord("9"):
                 idx = key_code - ord("1")
-                if idx < len(menu_items):
+                if idx < len(PATTERN_MENU_ITEMS):
                     self.pattern_menu_index = idx
                     self._run_pattern_menu_action()
                     self._close_pattern_menu()
@@ -2381,34 +1951,31 @@ class Controller:
             return True
 
         if key_code == curses.KEY_RIGHT:
-            if self.pattern_params_focus and self.active_tab == 0:
-                if self.pattern_params_edit_active:
-                    self._adjust_pattern_param(+1)
-                else:
-                    keys = self._pattern_param_keys()
-                    self.pattern_params_index = (self.pattern_params_index + 1) % len(keys)
-                return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab + 1) % 3)
+                    self.active_tab = (self.active_tab + 1) % 3
+                    if self.active_tab == 1:
+                        self.cursor_y = min(self.cursor_y, TRACKS - 2)
+                        if self.cursor_x > TRACK_PITCH_COL:
+                            self.cursor_x = PREVIEW_COL
                     return True
                 if self.header_edit_active:
                     param = self.header_params[self.header_param_index]
-                    if param in ["file", "pattern", "song", "record", "midi"]:
+                    if param in ["pattern_bank", "kit", "mode", "menu", "help"]:
                         return True
                     elif param == "bpm":
                         self.seq.change_bpm(+1)
+                    elif param == "length":
+                        self.seq.change_current_pattern_length(+1)
+                    elif param == "swing":
+                        self.seq.change_current_pattern_swing(+1)
                     else:
                         self.seq.change_pitch_semitones(+1)
                 else:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = self._audio_nav_cols()
-                    idx = cols.index(self.cursor_x) if self.cursor_x in cols else 0
-                    self.cursor_x = cols[(idx + 1) % len(cols)]
-                elif self.active_tab == 2:
-                    cols = [0, 1, 2, 3, 4, 5]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
                     nxt = cols[0]
                     for c in cols:
                         if c > self.cursor_x:
@@ -2416,42 +1983,34 @@ class Controller:
                             break
                     self.cursor_x = nxt
                 else:
-                    cols = self._sequencer_nav_cols()
-                    if self.cursor_x in cols:
-                        idx = cols.index(self.cursor_x)
-                    else:
-                        idx = 0
-                    self.cursor_x = cols[(idx + 1) % len(cols)]
+                    self.move_cursor(1, 0)
             return True
         if key_code == curses.KEY_LEFT:
-            if self.pattern_params_focus and self.active_tab == 0:
-                if self.pattern_params_edit_active:
-                    self._adjust_pattern_param(-1)
-                else:
-                    keys = self._pattern_param_keys()
-                    self.pattern_params_index = (self.pattern_params_index - 1) % len(keys)
-                return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab - 1) % 3)
+                    self.active_tab = (self.active_tab - 1) % 3
+                    if self.active_tab == 1:
+                        self.cursor_y = min(self.cursor_y, TRACKS - 2)
+                        if self.cursor_x > TRACK_PITCH_COL:
+                            self.cursor_x = PREVIEW_COL
                     return True
                 if self.header_edit_active:
                     param = self.header_params[self.header_param_index]
-                    if param in ["file", "pattern", "song", "record", "midi"]:
+                    if param in ["pattern_bank", "kit", "mode", "menu", "help"]:
                         return True
                     elif param == "bpm":
                         self.seq.change_bpm(-1)
+                    elif param == "length":
+                        self.seq.change_current_pattern_length(-1)
+                    elif param == "swing":
+                        self.seq.change_current_pattern_swing(-1)
                     else:
                         self.seq.change_pitch_semitones(-1)
                 else:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = self._audio_nav_cols()
-                    idx = cols.index(self.cursor_x) if self.cursor_x in cols else 0
-                    self.cursor_x = cols[(idx - 1) % len(cols)]
-                elif self.active_tab == 2:
-                    cols = [0, 1, 2, 3]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
                     prev = cols[-1]
                     for c in reversed(cols):
                         if c < self.cursor_x:
@@ -2459,185 +2018,113 @@ class Controller:
                             break
                     self.cursor_x = prev
                 else:
-                    cols = self._sequencer_nav_cols()
-                    if self.cursor_x in cols:
-                        idx = cols.index(self.cursor_x)
-                    else:
-                        idx = 0
-                    self.cursor_x = cols[(idx - 1) % len(cols)]
+                    self.move_cursor(-1, 0)
             return True
         if key_code == curses.KEY_UP:
-            if self.pattern_params_focus and self.active_tab == 0:
-                self.pattern_params_edit_active = False
-                self.pattern_params_focus = False
-                self.header_focus = True
-                self.header_section = "tabs"
-                self.header_edit_active = False
-                return True
             if self.header_focus:
                 if self.header_section == "params" and self.header_edit_active:
                     param = self.header_params[self.header_param_index]
                     if param == "bpm":
                         self.seq.change_bpm(+1)
+                    elif param == "length":
+                        self.seq.change_current_pattern_length(+1)
+                    elif param == "swing":
+                        self.seq.change_current_pattern_swing(+1)
                     elif param == "pitch":
                         self.seq.change_pitch_semitones(+1)
-                elif self.header_section == "tabs":
-                    self.header_section = "params"
+                elif self.header_section == "params":
+                    self.header_section = "tabs"
                 return True
             if self.cursor_y == 0:
-                if self.active_tab == 0:
-                    self.pattern_params_focus = True
-                    self.pattern_params_edit_active = False
-                else:
-                    self.header_focus = True
-                    self.header_section = "tabs"
-                    self.header_edit_active = False
+                self.header_focus = True
+                self.header_section = "tabs"
+                self.header_edit_active = False
             else:
-                if self.active_tab in [1, 2]:
+                if self.active_tab == 1:
                     self.cursor_y = max(0, self.cursor_y - 1)
                 else:
                     self.move_cursor(0, -1)
             return True
         if key_code == curses.KEY_DOWN:
-            if self.pattern_params_focus and self.active_tab == 0:
-                if self.pattern_params_edit_active:
-                    self._adjust_pattern_param(-1)
-                else:
-                    self.pattern_params_focus = False
-                return True
             if self.header_focus:
-                if self.header_section == "params":
-                    if self.header_edit_active:
-                        param = self.header_params[self.header_param_index]
-                        if param == "bpm":
-                            self.seq.change_bpm(-1)
-                        elif param == "pitch":
-                            self.seq.change_pitch_semitones(-1)
-                    else:
-                        self.header_section = "tabs"
+                if self.header_section == "tabs":
+                    self.header_section = "params"
+                elif self.header_edit_active:
+                    param = self.header_params[self.header_param_index]
+                    if param == "bpm":
+                        self.seq.change_bpm(-1)
+                    elif param == "length":
+                        self.seq.change_current_pattern_length(-1)
+                    elif param == "swing":
+                        self.seq.change_current_pattern_swing(-1)
+                    elif param == "pitch":
+                        self.seq.change_pitch_semitones(-1)
                 else:
                     self.header_focus = False
                     self.header_section = "params"
                     self.header_edit_active = False
-                    if self.active_tab == 0:
-                        self.pattern_params_focus = True
-                        self.pattern_params_edit_active = False
             else:
-                if self.active_tab in [1, 2]:
+                if self.active_tab == 1:
                     self.cursor_y = min(TRACKS - 2, self.cursor_y + 1)
                 else:
                     self.move_cursor(0, 1)
             return True
         if "TAB" in event_tokens or key_code == 9:
-            if self.pattern_params_focus and self.active_tab == 0:
-                keys = self._pattern_param_keys()
-                self.pattern_params_index = (self.pattern_params_index + 1) % len(keys)
-                return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab + 1) % 3)
+                    self.active_tab = (self.active_tab + 1) % 3
                 elif not self.header_edit_active:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = self._audio_nav_cols()
-                idx = cycle.index(self.cursor_x) if self.cursor_x in cycle else -1
-                self.cursor_x = cycle[(idx + 1) % len(cycle)]
-                return True
-            elif self.active_tab == 2:
-                cycle = [0, 1, 2, 3, 4, 5]
-                next_idx = (cycle.index(self.cursor_x) + 1) % len(cycle) if self.cursor_x in cycle else 0
-                self.cursor_x = cycle[next_idx]
-                return True
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             else:
-                if 0 <= self.cursor_x < self.seq.max_step_count:
-                    # In sequencer step grid, Tab hops by beat-starts rather than every step.
-                    beat_cols = self._sequencer_beat_cols()
-                    if self.cursor_x == beat_cols[-1]:
-                        # From last beat, exit grid to first parameter column.
-                        self.cursor_x = LOAD_COL
-                        return True
-                    if self.cursor_x in beat_cols:
-                        idx = beat_cols.index(self.cursor_x)
-                    else:
-                        idx = -1
-                        for i, col in enumerate(beat_cols):
-                            if col > self.cursor_x:
-                                idx = i - 1
-                                break
-                        if idx < -1:
-                            idx = -1
-                    self.cursor_x = beat_cols[(idx + 1) % len(beat_cols)]
-                    return True
-                cycle = self._sequencer_nav_cols()
-                idx = cycle.index(self.cursor_x) if self.cursor_x in cycle else -1
-                self.cursor_x = cycle[(idx + 1) % len(cycle)]
-                return True
+                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+            next_idx = 0
+            for i, col in enumerate(cycle):
+                if col > self.cursor_x:
+                    next_idx = i
+                    break
+            else:
+                next_idx = 0
+            self.cursor_x = cycle[next_idx]
+            return True
         if "BTAB" in event_tokens or key_code == curses.KEY_BTAB:
-            if self.pattern_params_focus and self.active_tab == 0:
-                keys = self._pattern_param_keys()
-                self.pattern_params_index = (self.pattern_params_index - 1) % len(keys)
-                return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab - 1) % 3)
+                    self.active_tab = (self.active_tab - 1) % 3
                 elif not self.header_edit_active:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = self._audio_nav_cols()
-                idx = cycle.index(self.cursor_x) if self.cursor_x in cycle else 0
-                self.cursor_x = cycle[(idx - 1) % len(cycle)]
-                return True
-            elif self.active_tab == 2:
-                cycle = [0, 1, 2, 3, 4, 5]
-                prev_idx = (cycle.index(self.cursor_x) - 1) % len(cycle) if self.cursor_x in cycle else len(cycle) - 1
-                self.cursor_x = cycle[prev_idx]
-                return True
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             else:
-                if 0 <= self.cursor_x < self.seq.max_step_count:
-                    # Reverse beat-hop for Shift+Tab while cursor is inside sequencer steps.
-                    beat_cols = self._sequencer_beat_cols()
-                    if self.cursor_x in beat_cols:
-                        idx = beat_cols.index(self.cursor_x)
-                    else:
-                        idx = 0
-                        for i, col in enumerate(beat_cols):
-                            if col >= self.cursor_x:
-                                idx = i
-                                break
-                        else:
-                            idx = 0
-                    self.cursor_x = beat_cols[(idx - 1) % len(beat_cols)]
-                    return True
-                cycle = self._sequencer_nav_cols()
-                idx = cycle.index(self.cursor_x) if self.cursor_x in cycle else 0
-                self.cursor_x = cycle[(idx - 1) % len(cycle)]
-                return True
+                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+            prev_idx = len(cycle) - 1
+            for i in range(len(cycle) - 1, -1, -1):
+                if cycle[i] < self.cursor_x:
+                    prev_idx = i
+                    break
+            self.cursor_x = cycle[prev_idx]
+            return True
         if key_code == 27:  # ESC
-            if self.pattern_params_edit_active:
-                self.pattern_params_edit_active = False
-                return True
-            if self.pattern_params_focus:
-                self.pattern_params_focus = False
-                return True
             if self.header_edit_active:
                 self.header_edit_active = False
                 return True
             if self.chain_edit_active:
                 self._close_chain_dialog()
                 return True
+            if self.pattern_save_active:
+                self._close_pattern_save_dialog()
+                return True
             if self.kit_load_active:
                 self._close_kit_dialog()
                 return True
-            if self.project_save_as_active:
-                self._close_project_save_as_dialog()
+            if self.pack_save_active:
+                self._close_pack_dialog()
                 return True
             if self.audio_export_active:
                 self._close_audio_export_dialog()
-                return True
-            if self.kit_export_active:
-                self._close_kit_export_dialog()
                 return True
             if self.track_rename_active:
                 self._close_track_rename_dialog()
@@ -2645,28 +2132,47 @@ class Controller:
             if self.audio_export_options_active:
                 self._close_audio_export_options_dialog()
                 return True
-            if self.kit_export_options_active:
-                self._close_kit_export_options_dialog()
-                return True
             if self.humanize_edit_active:
                 self._close_humanize_dialog()
                 return True
             if self.probability_edit_active:
                 self._close_probability_dialog()
                 return True
+            if self.pattern_load_active:
+                self._close_pattern_dialog()
+                return True
             if self.swing_edit_active:
                 self._close_swing_dialog()
                 return True
-            if self.clipboard_import_confirm_active:
-                self._close_clipboard_import_confirm()
-                return True
             if self.clear_confirm:
                 self.clear_confirm = False
+                return True
+            if self.edit_mode == "ratchet":
+                self.edit_mode = "velocity"
                 return True
             if self.esc_confirm:
                 return False
             self.esc_confirm = True
             self.status_message = "Press Esc again to exit."
+            return True
+
+        if self.pattern_load_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.load_project_file(self.pattern_load_input)
+                self.status_message = message
+                self._close_pattern_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.pattern_load_input = self.pattern_load_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.pattern_load_input) < 120:
+                    self.pattern_load_input += key
+                return True
+
             return True
 
         if self.chain_edit_active:
@@ -2707,6 +2213,25 @@ class Controller:
 
             return True
 
+        if self.pattern_save_active:
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                ok, message = self.seq.save_project_file(self.pattern_save_input)
+                self.status_message = message
+                self._close_pattern_save_dialog()
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.pattern_save_input = self.pattern_save_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                if len(self.pattern_save_input) < 120:
+                    self.pattern_save_input += key
+                return True
+
+            return True
+
         if self.kit_load_active:
             if key_code in [10, 13, curses.KEY_ENTER]:
                 ok, message = self.seq.load_kit_folder(self.kit_load_input)
@@ -2726,21 +2251,21 @@ class Controller:
 
             return True
 
-        if self.project_save_as_active:
+        if self.pack_save_active:
             if key_code in [10, 13, curses.KEY_ENTER]:
-                ok, message = self.seq.save_project_as(self.project_save_as_input)
+                ok, message = self.seq.save_pack(self.pack_save_input)
                 self.status_message = message
-                self._close_project_save_as_dialog()
+                self._close_pack_dialog()
                 return True
 
             backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
             if key_code in backspace_keys or key in ["\b", "\x7f"]:
-                self.project_save_as_input = self.project_save_as_input[:-1]
+                self.pack_save_input = self.pack_save_input[:-1]
                 return True
 
             if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
-                if len(self.project_save_as_input) < 120:
-                    self.project_save_as_input += key
+                if len(self.pack_save_input) < 120:
+                    self.pack_save_input += key
                 return True
 
             return True
@@ -2767,28 +2292,6 @@ class Controller:
 
             return True
 
-        if self.kit_export_active:
-            if key_code in [10, 13, curses.KEY_ENTER]:
-                ok, message = self.seq.export_current_kit(
-                    self.kit_export_input,
-                    options=self.kit_export_options,
-                )
-                self.status_message = message
-                self._close_kit_export_dialog()
-                return True
-
-            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
-            if key_code in backspace_keys or key in ["\b", "\x7f"]:
-                self.kit_export_input = self.kit_export_input[:-1]
-                return True
-
-            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
-                if len(self.kit_export_input) < 120:
-                    self.kit_export_input += key
-                return True
-
-            return True
-
         if self.humanize_edit_active:
             if key_code in [10, 13, curses.KEY_ENTER]:
                 try:
@@ -2797,8 +2300,11 @@ class Controller:
                     self.status_message = "Humanize must be 0-100"
                     self._close_humanize_dialog()
                     return True
-                self.seq.set_current_pattern_humanize(value)
-                self.status_message = f"Pattern humanize: {max(0, min(100, value))}"
+                if self.cursor_y == ACCENT_TRACK:
+                    self.status_message = "Accent track has no humanize"
+                else:
+                    self.seq.set_track_humanize(self.cursor_y, value)
+                    self.status_message = f"Track {self.cursor_y + 1} humanize: {max(0, min(100, value))}"
                 self._close_humanize_dialog()
                 return True
 
@@ -2884,44 +2390,23 @@ class Controller:
             self.patterns_overlay_active = True
             self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
             self.patterns_overlay_delete_confirm_index = -1
-        elif self.keymap.matches("file_menu", event_tokens):
-            self.header_focus = False
-            self.header_section = "params"
-            self.header_edit_active = False
-            self._open_top_menu("file")
-            self.kit_load_active = False
-            self.kit_load_input = ""
-            self.project_save_as_active = False
-            self.project_save_as_input = ""
-            self.audio_export_active = False
-            self.audio_export_input = ""
-            self.audio_export_options_active = False
-            self.kit_export_active = False
-            self.kit_export_input = ""
-            self.kit_export_options_active = False
-            self.humanize_edit_active = False
-            self.humanize_edit_input = ""
-            self.probability_edit_active = False
-            self.probability_edit_input = ""
-            self.chain_edit_active = False
-            self.chain_edit_input = ""
-            self.swing_edit_active = False
-            self.swing_edit_input = ""
         elif self.keymap.matches("pattern_menu", event_tokens):
             self.header_focus = False
             self.header_section = "params"
             self.header_edit_active = False
-            self._open_top_menu("pattern")
+            self.pattern_menu_active = True
+            self.pattern_menu_index = 0
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
-            self.project_save_as_active = False
-            self.project_save_as_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
             self.audio_export_options_active = False
-            self.kit_export_active = False
-            self.kit_export_input = ""
-            self.kit_export_options_active = False
             self.humanize_edit_active = False
             self.humanize_edit_input = ""
             self.probability_edit_active = False
@@ -2930,19 +2415,11 @@ class Controller:
             self.chain_edit_input = ""
             self.swing_edit_active = False
             self.swing_edit_input = ""
-        elif self.keymap.matches("record_menu", event_tokens):
+        elif self.keymap.matches("help_menu", event_tokens):
             self.header_focus = False
             self.header_section = "params"
             self.header_edit_active = False
-            if self.record_overlay_active:
-                if self.record_capture_active:
-                    if self.seq.playing:
-                        self.seq.toggle_playback()
-                    self._finish_record_capture()
-                else:
-                    self._close_record_overlay()
-            else:
-                self._open_record_overlay()
+            self.help_active = True
         elif self.keymap.matches("pattern_copy", event_tokens):
             ok, message = self.seq.copy_current_pattern()
             self.status_message = message
@@ -2950,10 +2427,14 @@ class Controller:
             ok, message = self.seq.paste_to_current_pattern()
             self.status_message = message
         elif self.keymap.matches("pattern_export", event_tokens):
-            self.project_save_as_active = True
-            self.project_save_as_input = ""
+            self.pattern_save_active = True
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
             self.audio_export_options_active = False
@@ -2968,10 +2449,12 @@ class Controller:
             self.status_message = ""
         elif self.keymap.matches("pattern_load", event_tokens):
             self._open_file_browser("pattern")
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
-            self.project_save_as_active = False
-            self.project_save_as_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
             self.audio_export_options_active = False
@@ -2986,8 +2469,12 @@ class Controller:
             self.status_message = ""
         elif self.keymap.matches("kit_load", event_tokens):
             self._open_file_browser("kit")
-            self.project_save_as_active = False
-            self.project_save_as_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
             self.audio_export_options_active = False
@@ -3003,10 +2490,14 @@ class Controller:
         elif self.keymap.matches("chain_edit", event_tokens):
             self.chain_edit_active = True
             self.chain_edit_input = ""
+            self.pattern_save_active = False
+            self.pattern_save_input = ""
+            self.pattern_load_active = False
+            self.pattern_load_input = ""
             self.kit_load_active = False
             self.kit_load_input = ""
-            self.project_save_as_active = False
-            self.project_save_as_input = ""
+            self.pack_save_active = False
+            self.pack_save_input = ""
             self.audio_export_active = False
             self.audio_export_input = ""
             self.audio_export_options_active = False
@@ -3021,7 +2512,11 @@ class Controller:
             ok, message = self.seq.toggle_chain()
             self.status_message = message
         elif self.keymap.matches("mode_toggle", event_tokens):
-            self._cycle_edit_mode()
+            if self.cursor_x < STEPS:
+                if self.edit_mode == "velocity":
+                    self.edit_mode = "ratchet"
+                else:
+                    self.edit_mode = "velocity"
         elif self.keymap.matches("pattern_length_dec", event_tokens):
             self.seq.change_current_pattern_length(-1)
         elif self.keymap.matches("pattern_length_inc", event_tokens):
@@ -3033,8 +2528,9 @@ class Controller:
         elif key_code in [
             ord('!'), ord('@'), ord('#'), ord('$'),
             ord('"'), 164,  # common Shift+2 / Shift+4 on some EU layouts
+            curses.KEY_F1, curses.KEY_F2, curses.KEY_F3, curses.KEY_F4
         ]:
-            if self.cursor_x < self.seq.max_step_count and self.cursor_y != ACCENT_TRACK:
+            if self.cursor_x < STEPS and self.cursor_y != ACCENT_TRACK:
                 quick_ratchet = {
                     ord('!'): 1,
                     ord('@'): 2,
@@ -3042,43 +2538,36 @@ class Controller:
                     ord('$'): 4,
                     ord('"'): 2,
                     164: 4,
+                    curses.KEY_F1: 1,
+                    curses.KEY_F2: 2,
+                    curses.KEY_F3: 3,
+                    curses.KEY_F4: 4
                 }[key_code]
                 self.seq.quick_set_ratchet(self.cursor_y, self.cursor_x, quick_ratchet)
-                self.move_cursor(1, 0)
         elif key_code in range(ord('0'), ord('9') + 1):
             velocity = key_code - ord('0')
             track_idx = self._track_for_row(self.cursor_y) if self.active_tab == 1 else self.cursor_y
-            if self.active_tab == 2:
-                track_idx = max(0, min(TRACKS - 2, self.cursor_y))
-                if self.cursor_x == 0 and velocity > 0:
-                    self.seq.set_track_pan(track_idx, velocity)
-                elif self.cursor_x == 1:
-                    self.seq.set_track_volume(track_idx, velocity)
-                elif self.cursor_x == 2:
-                    self._apply_inline_track_value(PROB_COL, velocity)
-                elif self.cursor_x == 3:
-                    self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
-                elif self.cursor_x == 4 and velocity > 0:
+            if self.active_tab == 1 and self.cursor_x == PAN_COL:
+                if self.cursor_y != ACCENT_TRACK and velocity > 0:
                     self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, velocity)
-                elif self.cursor_x == 5:
-                    self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
-                return True
-            if self.active_tab == 1 and self.cursor_x == AUDIO_VOLUME_COL:
+            elif self.active_tab == 1 and self.cursor_x == HUMANIZE_COL:
                 if self.cursor_y != ACCENT_TRACK:
-                    self._apply_inline_audio_track_value(AUDIO_VOLUME_COL, velocity)
+                    self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
             elif self.active_tab == 1 and self.cursor_x == PROB_COL:
                 pass
-            elif self.active_tab == 1 and self.cursor_x == TRACK_PITCH_COL:
-                if self.cursor_y != ACCENT_TRACK:
-                    self._apply_inline_audio_track_value(TRACK_PITCH_COL, velocity)
             elif self.cursor_x == PREVIEW_COL:
                 pass
+            elif self.cursor_x == PAN_COL:
+                if velocity > 0:
+                    self.seq.set_track_pan(self.cursor_y, velocity)
             elif self.cursor_x == GROUP_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.set_track_group(self.cursor_y, velocity)
             elif self.cursor_x == TRACK_PITCH_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
+            elif self.cursor_x == HUMANIZE_COL:
+                self._apply_inline_track_value(HUMANIZE_COL, velocity)
             elif self.cursor_x == PROB_COL:
                 self._apply_inline_track_value(PROB_COL, velocity)
             elif self.cursor_x == LOAD_COL:
@@ -3088,28 +2577,11 @@ class Controller:
                     self.seq.set_step_velocity(self.cursor_y, self.cursor_x, velocity)
                 elif 1 <= velocity <= 4:
                     self.seq.set_step_ratchet(self.cursor_y, self.cursor_x, velocity)
-                self.move_cursor(1, 0)
-            elif self.edit_mode == "detune":
-                if self.cursor_y != ACCENT_TRACK:
-                    self.seq.set_step_detune(self.cursor_y, self.cursor_x, velocity)
-                self.move_cursor(1, 0)
-            elif self.edit_mode == "pan":
-                if self.cursor_y != ACCENT_TRACK:
-                    self.seq.set_step_pan(self.cursor_y, self.cursor_x, velocity)
-                self.move_cursor(1, 0)
             else:
                 self.seq.set_step_velocity(self.cursor_y, self.cursor_x, velocity)
                 if velocity > 0:
                     self.seq.set_last_velocity(velocity)
-                self.move_cursor(1, 0)
         elif key_code in [10, 13, curses.KEY_ENTER]:
-            if self.pattern_params_focus and self.active_tab == 0:
-                current = self._pattern_param_current()
-                if current == "mode":
-                    self._cycle_edit_mode()
-                else:
-                    self.pattern_params_edit_active = not self.pattern_params_edit_active
-                return True
             if self.header_focus:
                 if self.header_section == "tabs":
                     if self.active_tab == 0:
@@ -3117,54 +2589,54 @@ class Controller:
                     elif self.active_tab == 1:
                         self.status_message = "Audio view"
                     else:
-                        self.status_message = "Mixer view"
+                        self.status_message = "Mixer view (coming soon)"
                     return True
                 param = self.header_params[self.header_param_index]
-                if param == "file":
-                    self._open_top_menu("file")
-                    self.header_focus = False
-                    self.header_section = "params"
-                    self.header_edit_active = False
-                elif param == "pattern":
-                    self._open_top_menu("pattern")
-                    self.header_focus = False
-                    self.header_section = "params"
-                    self.header_edit_active = False
-                elif param == "song":
-                    ok, message = self.seq.toggle_chain()
-                    self.status_message = message
-                    self.header_edit_active = False
-                elif param == "record":
-                    if self.record_overlay_active:
-                        if self.record_capture_active:
-                            if self.seq.playing:
-                                self.seq.toggle_playback()
-                            self._finish_record_capture()
-                        else:
-                            self._close_record_overlay()
-                    else:
-                        self._open_record_overlay()
-                    self.header_focus = False
-                    self.header_section = "params"
-                    self.header_edit_active = False
-                elif param == "patterns":
+                if param == "patterns":
                     self.patterns_overlay_active = True
                     self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
                     self.patterns_overlay_delete_confirm_index = -1
                     self.header_focus = False
                     self.header_section = "params"
                     self.header_edit_active = False
-                elif param == "midi":
-                    ok, message = self.seq.toggle_midi_out()
-                    self.status_message = message
+                elif param == "pattern_bank":
+                    self._open_file_browser("pattern")
+                    self.header_focus = False
+                    self.header_section = "params"
+                    self.header_edit_active = False
+                elif param == "kit":
+                    self._open_file_browser("kit")
+                    self.header_focus = False
+                    self.header_section = "params"
+                    self.header_edit_active = False
+                elif param == "mode":
+                    if self.edit_mode == "velocity":
+                        self.edit_mode = "ratchet"
+                    else:
+                        self.edit_mode = "velocity"
+                    self.header_edit_active = False
+                elif param == "menu":
+                    self.pattern_menu_active = True
+                    self.pattern_menu_index = 0
+                    self.header_focus = False
+                    self.header_section = "params"
+                    self.header_edit_active = False
+                elif param == "help":
+                    self.help_active = True
+                    self.header_focus = False
+                    self.header_section = "params"
                     self.header_edit_active = False
                 elif param == "chain_set":
                     self.chain_edit_active = True
                     self.chain_edit_input = ""
+                    self.pattern_save_active = False
+                    self.pattern_save_input = ""
+                    self.pattern_load_active = False
+                    self.pattern_load_input = ""
                     self.kit_load_active = False
                     self.kit_load_input = ""
-                    self.project_save_as_active = False
-                    self.project_save_as_input = ""
+                    self.pack_save_active = False
+                    self.pack_save_input = ""
                     self.audio_export_active = False
                     self.audio_export_input = ""
                     self.audio_export_options_active = False
@@ -3195,24 +2667,33 @@ class Controller:
                 elif self.cursor_x == LOAD_COL:
                     if self.cursor_y != ACCENT_TRACK:
                         self._open_file_browser("audio_track", target_track=track_idx)
-                elif self.cursor_x == AUDIO_VOLUME_COL:
+                elif self.cursor_x == PAN_COL:
+                    self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, 5)
+                elif self.cursor_x == HUMANIZE_COL:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, 9)
                 elif self.cursor_x == PROB_COL:
-                    self._open_record_overlay(target_track=track_idx, from_audio_view=True)
+                    self._open_record_overlay()
                 elif self.cursor_x == GROUP_COL:
-                    self._open_clear_audio_confirm(self.seq.view_pattern, track_idx)
+                    ok, message = self.seq.clear_audio_track_sample(self.seq.view_pattern, track_idx)
+                    self.status_message = message
                 elif self.cursor_x == TRACK_PITCH_COL:
-                    self.seq.set_audio_track_shift(self.seq.view_pattern, track_idx, 12)
+                    self.track_rename_active = True
+                    self.track_rename_input = ""
                 return True
-            if self.active_tab == 2:
-                self.status_message = "Mixer: type 1-9 for pan, 0-9 for volume"
-                return True
-            if self.cursor_x == LOAD_COL:
-                if self.cursor_y != ACCENT_TRACK:
-                    self._open_file_browser("sample", target_track=self.cursor_y)
-            elif self.cursor_x == PREVIEW_COL:
+            if self.cursor_x == PREVIEW_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.preview_row(self.cursor_y)
+            elif self.cursor_x == PAN_COL:
+                self.seq.set_track_pan(self.cursor_y, 5)
+            elif self.cursor_x == LOAD_COL:
+                if self.cursor_y != ACCENT_TRACK:
+                    self._open_file_browser("sample", target_track=self.cursor_y)
+            elif self.cursor_x == HUMANIZE_COL:
+                if self.cursor_y == ACCENT_TRACK:
+                    self.status_message = "Accent track has no humanize"
+                else:
+                    self.humanize_edit_active = True
+                    self.humanize_edit_input = ""
             elif self.cursor_x == PROB_COL:
                 if self.cursor_y == ACCENT_TRACK:
                     self.status_message = "Accent track has no probability"
@@ -3225,16 +2706,16 @@ class Controller:
                 self.status_message = "Track pitch: type 0..24 (12 = no shift)"
             else:
                 self.seq.toggle_step(self.cursor_y, self.cursor_x)
-                self.move_cursor(1, 0)
+        elif key_code in [ord('p'), ord('P')]:
+            if self.active_tab == 1:
+                if self.cursor_y != ACCENT_TRACK:
+                    ok, message = self.seq.preview_audio_track_slot(self.seq.view_pattern, self._track_for_row(self.cursor_y))
+                    self.status_message = message
+            else:
+                self.seq.preview_row(self.cursor_y)
         elif self.keymap.matches("mute_row", event_tokens):
             if self.active_tab == 0:
                 self.seq.toggle_mute_row(self.cursor_y)
-        elif self.keymap.matches("tab_1", event_tokens):
-            self._set_active_tab(0)
-        elif self.keymap.matches("tab_2", event_tokens):
-            self._set_active_tab(1)
-        elif self.keymap.matches("tab_3", event_tokens):
-            self._set_active_tab(2)
         elif self.keymap.matches("pattern_prev", event_tokens):
             self.seq.select_pattern(max(0, self.seq.view_pattern - 1))
         elif self.keymap.matches("pattern_next", event_tokens):
@@ -3248,42 +2729,30 @@ class Controller:
         return True
 
 # ---------- INPUT ----------
-def ui_loop(stdscr, seq, colors=None):
+def ui_loop(stdscr, seq):
     """Main curses event/render loop."""
     curses.set_escdelay(25)
     curses.curs_set(0)
     stdscr.nodelay(True)
 
-    _colors = colors if isinstance(colors, dict) else {}
-    record_input_metering_raw = str(_colors.get("rec_input_metering", "off")).strip().lower()
-    record_input_metering_enabled = record_input_metering_raw in {"1", "true", "yes", "on"}
     theme = {
         "frame": 0,
-        "title": 0,
+        "title": curses.A_BOLD,
         "text": 0,
-        "hint": 0,
-        "prompt": 0,
-        "selected": curses.A_REVERSE,
+        "hint": curses.A_BOLD,
         "divider": 0,
-        "playhead": 0,
+        "playhead": curses.A_BOLD,
         "muted": curses.A_DIM,
-        "accent": 0,
-        "chain_on": 0,
+        "accent": curses.A_BOLD,
+        "chain_on": curses.A_BOLD,
         "chain_off": curses.A_DIM,
-        "pattern_manual": 0,
+        "pattern_manual": curses.A_BOLD,
         "pattern_chain_off": curses.A_DIM,
         "velocity_low": 0,
-        "velocity_high": 0,
-        "midi_on": 0,
+        "velocity_high": curses.A_BOLD,
+        "midi_on": curses.A_BOLD,
         "midi_off": curses.A_DIM,
-        "record": 0,
-        "meter_fill": 0,
-        "meter_hot": 0,
-        "tertiary_on": 0,
-        "tertiary_off": curses.A_DIM,
-        "record_input_metering_enabled": record_input_metering_enabled,
-        "text_bold_enabled": False,
-        "text_uppercase_enabled": True,
+        "record": curses.A_BOLD,
     }
     if curses.has_colors():
         curses.start_color()
@@ -3291,101 +2760,42 @@ def ui_loop(stdscr, seq, colors=None):
             curses.use_default_colors()
         except curses.error:
             pass
-        color_map = {
-            "black": curses.COLOR_BLACK,
-            "red": curses.COLOR_RED,
-            "green": curses.COLOR_GREEN,
-            "yellow": curses.COLOR_YELLOW,
-            "blue": curses.COLOR_BLUE,
-            "magenta": curses.COLOR_MAGENTA,
-            "cyan": curses.COLOR_CYAN,
-            "white": curses.COLOR_WHITE,
-        }
+        curses.init_pair(1, curses.COLOR_CYAN, -1)    # frames
+        curses.init_pair(2, curses.COLOR_WHITE, -1)   # text
+        curses.init_pair(3, curses.COLOR_GREEN, -1)   # playhead
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)  # accent/high velocity
+        curses.init_pair(5, curses.COLOR_BLUE, -1)    # dividers
+        curses.init_pair(6, curses.COLOR_RED, -1)     # record
 
-        def resolve_color(name, default_name):
-            raw = str(name or default_name).strip().lower()
-            is_bright = False
-            for prefix in ("bright_", "intense_"):
-                if raw.startswith(prefix):
-                    raw = raw[len(prefix):]
-                    is_bright = True
-                    break
-            return color_map.get(raw, color_map[default_name]), is_bright
-
-        def pair_attr(pair_id, base_attr=0, bright=False):
-            attr = curses.color_pair(pair_id) | base_attr
-            return attr
-
-        primary_color, primary_bright = resolve_color(_colors.get("color_primary", "cyan"), "cyan")
-        text_color, text_bright = resolve_color(_colors.get("color_text", "white"), "white")
-        playhead_color, playhead_bright = resolve_color(_colors.get("color_accent", "green"), "green")
-        accent_color, accent_bright = resolve_color(_colors.get("color_accent", "yellow"), "yellow")
-        divider_color, divider_bright = resolve_color(_colors.get("color_divider", "blue"), "blue")
-        record_color, record_bright = resolve_color(_colors.get("color_record", "red"), "red")
-        meter_color, meter_bright = resolve_color(_colors.get("color_meter", "green"), "green")
-        selection_fg_color, _selection_fg_bright = resolve_color(_colors.get("color_selection_fg", "white"), "white")
-        selection_bg_color, _selection_bg_bright = resolve_color(_colors.get("color_selection_bg", "blue"), "blue")
-        tertiary_color, tertiary_bright = resolve_color(_colors.get("color_tertiary", "yellow"), "yellow")
-        text_bold_raw = str(_colors.get("text_bold", "off")).strip().lower()
-        text_uppercase_raw = str(_colors.get("text_uppercase", "on")).strip().lower()
-        text_bold_enabled = text_bold_raw in {"1", "true", "yes", "on"}
-        text_uppercase_enabled = text_uppercase_raw in {"1", "true", "yes", "on"}
-
-        curses.init_pair(1, primary_color, -1)               # primary (frame/prompt)
-        curses.init_pair(2, text_color, -1)                  # text
-        curses.init_pair(3, playhead_color, -1)              # playhead / chain_on / midi_on
-        curses.init_pair(4, accent_color, -1)                # accent / hint / high velocity
-        curses.init_pair(5, divider_color, -1)               # dividers
-        curses.init_pair(6, record_color, -1)                # record / meter_hot
-        curses.init_pair(7, meter_color, -1)                 # meter fill
-        curses.init_pair(8, selection_fg_color, selection_bg_color)  # selected text
-        curses.init_pair(9, tertiary_color, -1)              # tertiary (footer PATTERNS/SONG)
-
-        theme["frame"] = pair_attr(1, bright=primary_bright)
-        theme["title"] = pair_attr(1, bright=primary_bright)
-        theme["prompt"] = pair_attr(1, bright=primary_bright)
-        theme["selected"] = curses.A_REVERSE
-        theme["text"] = pair_attr(2, bright=text_bright)
-        theme["hint"] = pair_attr(4, bright=accent_bright)
-        theme["divider"] = pair_attr(5, bright=divider_bright)
-        theme["playhead"] = pair_attr(3, bright=playhead_bright)
-        theme["muted"] = pair_attr(2, curses.A_DIM, bright=text_bright)
-        theme["accent"] = pair_attr(4, bright=accent_bright)
-        theme["chain_on"] = pair_attr(3, bright=playhead_bright)
-        theme["chain_off"] = pair_attr(2, curses.A_DIM, bright=text_bright)
-        theme["pattern_manual"] = pair_attr(3, bright=playhead_bright)
-        theme["pattern_chain_off"] = pair_attr(2, curses.A_DIM, bright=text_bright)
-        theme["velocity_low"] = pair_attr(2, curses.A_DIM, bright=text_bright)
-        theme["velocity_high"] = pair_attr(2, bright=text_bright)
-        theme["midi_on"] = pair_attr(3, bright=playhead_bright)
-        theme["midi_off"] = pair_attr(2, curses.A_DIM, bright=text_bright)
-        theme["record"] = pair_attr(6, bright=record_bright)
-        theme["meter_fill"] = pair_attr(7, bright=meter_bright)
-        theme["meter_hot"] = pair_attr(6, bright=record_bright)
-        theme["tertiary_on"] = pair_attr(9, bright=tertiary_bright)
-        theme["tertiary_off"] = pair_attr(9, curses.A_DIM, bright=tertiary_bright)
-        theme["record_input_metering_enabled"] = record_input_metering_enabled
-        theme["text_bold_enabled"] = text_bold_enabled
-        theme["text_uppercase_enabled"] = text_uppercase_enabled
+        theme["frame"] = curses.color_pair(1)
+        theme["title"] = curses.color_pair(1) | curses.A_BOLD
+        theme["text"] = curses.color_pair(2)
+        theme["hint"] = curses.color_pair(4) | curses.A_BOLD
+        theme["divider"] = curses.color_pair(5)
+        theme["playhead"] = curses.color_pair(3) | curses.A_BOLD
+        theme["muted"] = curses.color_pair(2) | curses.A_DIM
+        theme["accent"] = curses.color_pair(4) | curses.A_BOLD
+        theme["chain_on"] = curses.color_pair(3) | curses.A_BOLD
+        theme["chain_off"] = curses.color_pair(2) | curses.A_DIM
+        theme["pattern_manual"] = curses.color_pair(3) | curses.A_BOLD
+        theme["pattern_chain_off"] = curses.color_pair(2) | curses.A_DIM
+        theme["velocity_low"] = curses.color_pair(2) | curses.A_DIM
+        theme["velocity_high"] = curses.color_pair(2) | curses.A_BOLD
+        theme["midi_on"] = curses.color_pair(3) | curses.A_BOLD
+        theme["midi_off"] = curses.color_pair(2) | curses.A_DIM
+        theme["record"] = curses.color_pair(6) | curses.A_BOLD
 
     keymap = Keymap()
-    tab_1_binding = str(_colors.get("hotkey_tab_1", "F1")).strip() or "F1"
-    tab_2_binding = str(_colors.get("hotkey_tab_2", "F2")).strip() or "F2"
-    tab_3_binding = str(_colors.get("hotkey_tab_3", "F3")).strip() or "F3"
-    keymap.set_binding("tab_1", tab_1_binding)
-    keymap.set_binding("tab_2", tab_2_binding)
-    keymap.set_binding("tab_3", tab_3_binding)
     controller = Controller(seq, keymap)
-    controller.record_input_metering_enabled = record_input_metering_enabled
-    file_menu_label = keymap.label("file_menu")
+    help_lines = keymap.file_lines()
+    help_key_label = keymap.label("help_menu")
+    pattern_menu_label = keymap.label("pattern_menu")
     mode_key_label = keymap.label("mode_toggle")
-    tab_1_label = keymap.label("tab_1")
-    tab_2_label = keymap.label("tab_2")
-    tab_3_label = keymap.label("tab_3")
     clear_key_label = keymap.label("clear_pattern")
     length_dec_label = keymap.label("pattern_length_dec")
     length_inc_label = keymap.label("pattern_length_inc")
     chain_edit_label = keymap.label("chain_edit")
+    pattern_export_label = keymap.label("pattern_export")
 
     should_draw = True
     last_step = -1
@@ -3404,7 +2814,7 @@ def ui_loop(stdscr, seq, colors=None):
             if not controller.handle_key(key):
                 controller._stop_record_monitor()
                 if seq.dirty:
-                    seq.save_autosave()
+                    seq.save()
                     seq.dirty = False
                 return
             should_draw = True
@@ -3413,30 +2823,6 @@ def ui_loop(stdscr, seq, colors=None):
                 should_draw = True
 
         controller._tick_record_capture()
-        if controller.record_overlay_active and not controller.record_capture_active:
-            wants_monitor = controller.record_input_metering_enabled and not seq.playing
-            if wants_monitor and not controller.record_monitor_running:
-                controller._start_record_monitor()
-                should_draw = True
-            elif not wants_monitor and controller.record_monitor_running:
-                controller._stop_record_monitor()
-                controller.record_level_db = -60.0
-                should_draw = True
-
-        # Engine-duplex monitor path does not use a separate input stream callback,
-        # so update meter values here while overlay monitoring is active.
-        if (
-            controller.record_overlay_active
-            and controller.record_monitor_running
-            and controller._record_monitor_stream is None
-            and seq.engine.using_duplex
-            and seq.engine.input_available
-        ):
-            db = float(seq.engine.get_input_level_db())
-            controller.record_level_db = max(-60.0, min(0.0, db))
-            controller.record_level_peak_db = controller.record_level_db
-            controller.record_level_tick = int(controller.record_level_tick) + 1
-            should_draw = True
 
         ui_state = (
             controller.cursor_x,
@@ -3444,16 +2830,15 @@ def ui_loop(stdscr, seq, colors=None):
             controller.header_focus,
             controller.header_section,
             controller.header_param_index,
-            controller.pattern_params_focus,
-            controller.pattern_params_index,
-            controller.pattern_params_edit_active,
             controller.active_tab,
             controller.header_edit_active,
             controller.edit_mode,
             controller.clear_confirm,
             controller.esc_confirm,
+            controller.pattern_save_active,
+            controller.pattern_load_active,
             controller.kit_load_active,
-            controller.project_save_as_active,
+            controller.pack_save_active,
             controller.audio_export_active,
             controller.audio_export_options_active,
             controller.audio_export_options_index,
@@ -3461,24 +2846,12 @@ def ui_loop(stdscr, seq, colors=None):
             controller.audio_export_options["sample_rate"],
             controller.audio_export_options["channels"],
             controller.audio_export_options.get("scope", "pattern"),
-            controller.kit_export_active,
-            controller.kit_export_options_active,
-            controller.kit_export_options_index,
-            controller.kit_export_options["bit_depth"],
-            controller.kit_export_options["sample_rate"],
-            controller.kit_export_options["channels"],
             controller.humanize_edit_active,
             controller.probability_edit_active,
             controller.track_rename_active,
             controller.chain_edit_active,
             controller.swing_edit_active,
-            controller.clear_audio_confirm_active,
-            controller.clear_audio_force_confirm_active,
-            controller.clipboard_import_confirm_active,
-            controller.clipboard_import_count,
-            controller.clipboard_import_text,
             controller.pattern_menu_active,
-            controller.pattern_menu_kind,
             controller.pattern_menu_index,
             controller.patterns_overlay_active,
             controller.patterns_overlay_index,
@@ -3486,7 +2859,6 @@ def ui_loop(stdscr, seq, colors=None):
             controller.import_overlay_active,
             controller.import_overlay_index,
             controller.import_overlay_path,
-            controller.import_overlay_can_delete_source,
             controller.import_target_drum_track,
             controller.import_target_audio_track,
             controller.chop_overlay_active,
@@ -3494,32 +2866,28 @@ def ui_loop(stdscr, seq, colors=None):
             controller.record_overlay_active,
             tuple(controller.record_device_names),
             controller.record_device_index,
-            tuple(src.get("label", "") for src in controller.record_input_sources),
-            controller.record_input_source_index,
             controller.record_overlay_index,
             controller.record_action_index,
             controller.record_channels,
-            controller.record_precount_enabled,
-            controller.record_precount_pattern,
             round(controller.record_level_db, 1),
             controller.record_monitor_running,
-            int(controller.record_level_tick),
-            controller.record_monitor_info,
             controller.record_capture_active,
             controller.record_capture_stage,
             controller.record_capture_pattern,
             controller.record_capture_track,
             controller.drop_path_active,
             controller.drop_path_input,
+            controller.help_active,
             controller.file_browser_active,
             controller.file_browser_mode,
             controller.file_browser_path,
             tuple(item["name"] for item in controller.file_browser_items),
             controller.file_browser_index,
+            controller.pattern_save_input,
+            controller.pattern_load_input,
             controller.kit_load_input,
-            controller.project_save_as_input,
+            controller.pack_save_input,
             controller.audio_export_input,
-            controller.kit_export_input,
             controller.humanize_edit_input,
             controller.probability_edit_input,
             controller.track_rename_input,
@@ -3529,7 +2897,6 @@ def ui_loop(stdscr, seq, colors=None):
             seq.bpm,
             seq.pattern_length[seq.view_pattern],
             seq.pattern_swing[seq.view_pattern],
-            seq.pattern_humanize[seq.view_pattern],
             seq.midi_out_enabled,
             seq.pattern,
             seq.view_pattern,
@@ -3560,16 +2927,18 @@ def ui_loop(stdscr, seq, colors=None):
         if should_draw:
             if controller.drop_path_active:
                 prompt_text = f"Import .wav path (auto-opens options, Esc cancels): {controller.drop_path_input}"
+            elif controller.pattern_save_active:
+                prompt_text = f"Save pattern bank filename (Esc cancels): {controller.pattern_save_input}"
             elif controller.chain_edit_active:
                 prompt_text = f"Give song sequence ({chain_edit_label}, Esc cancels): {controller.chain_edit_input}"
+            elif controller.pattern_load_active:
+                prompt_text = f"Give pattern bank filename (Esc cancels): {controller.pattern_load_input}"
             elif controller.kit_load_active:
                 prompt_text = f"Give sample folder name (Esc cancels): {controller.kit_load_input}"
-            elif controller.project_save_as_active:
-                prompt_text = f"Save Project As folder name (Esc cancels): {controller.project_save_as_input}"
+            elif controller.pack_save_active:
+                prompt_text = f"Save pack folder name (Esc cancels): {controller.pack_save_input}"
             elif controller.audio_export_active:
                 prompt_text = f"Export audio filename (Esc cancels): {controller.audio_export_input}"
-            elif controller.kit_export_active:
-                prompt_text = f"Export kit folder name (Esc cancels): {controller.kit_export_input}"
             elif controller.humanize_edit_active:
                 prompt_text = f"Humanize 0-100 (Esc cancels): {controller.humanize_edit_input}"
             elif controller.probability_edit_active:
@@ -3578,23 +2947,6 @@ def ui_loop(stdscr, seq, colors=None):
                 prompt_text = f"Rename track sample (Esc cancels): {controller.track_rename_input}"
             elif controller.swing_edit_active:
                 prompt_text = f"Swing 0-10 (Esc cancels): {controller.swing_edit_input}"
-            elif controller.clear_audio_confirm_active:
-                path_name = os.path.basename(controller.clear_audio_confirm_path) if controller.clear_audio_confirm_path else "(no file)"
-                if controller.clear_audio_force_confirm_active:
-                    prompt_text = f"File used elsewhere. Force delete everywhere? Y/N (Esc cancels): {path_name}"
-                else:
-                    prompt_text = f"Delete sample file too? Y/N (Esc cancels): {path_name}"
-            elif controller.clipboard_import_confirm_active:
-                if controller.clipboard_import_count > 1:
-                    prompt_text = (
-                        f"Import {controller.clipboard_import_count} patterns from clipboard? "
-                        "This replaces all pattern step data, keeps each pattern's own length, and enables song mode. Y/N (Esc cancels)"
-                    )
-                else:
-                    prompt_text = (
-                        "Import 1 pattern from clipboard? This replaces all pattern step data "
-                        "with the imported pattern length. Y/N (Esc cancels)"
-                    )
             else:
                 prompt_text = ""
 
@@ -3606,18 +2958,14 @@ def ui_loop(stdscr, seq, colors=None):
                 controller.header_focus,
                 controller.header_section,
                 controller.header_params[controller.header_param_index],
-                controller.pattern_params_focus,
-                controller.pattern_params_index,
-                controller.pattern_params_edit_active,
                 controller.active_tab,
                 controller.header_edit_active,
                 controller.edit_mode,
                 controller.clear_confirm,
                 controller.esc_confirm,
                 prompt_text,
-                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.chain_edit_active and not controller.kit_load_active and not controller.project_save_as_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.kit_export_active and not controller.kit_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active and not controller.clear_audio_confirm_active and not controller.clipboard_import_confirm_active else "",
+                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.pattern_save_active and not controller.chain_edit_active and not controller.pattern_load_active and not controller.kit_load_active and not controller.pack_save_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active else "",
                 controller.pattern_menu_active,
-                controller.pattern_menu_kind,
                 controller.pattern_menu_index,
                 controller.patterns_overlay_active,
                 controller.patterns_overlay_index,
@@ -3625,7 +2973,6 @@ def ui_loop(stdscr, seq, colors=None):
                 controller.import_overlay_active,
                 controller.import_overlay_index,
                 controller.import_overlay_path,
-                controller.import_overlay_can_delete_source,
                 controller.import_target_drum_track,
                 controller.import_target_audio_track,
                 controller.chop_overlay_active,
@@ -3633,19 +2980,15 @@ def ui_loop(stdscr, seq, colors=None):
                 controller.record_overlay_active,
                 controller.record_device_names,
                 controller.record_device_index,
-                controller.record_input_sources,
-                controller.record_input_source_index,
                 controller.record_overlay_index,
                 controller.record_action_index,
                 controller.record_channels,
-                controller.record_precount_enabled,
-                controller.record_precount_pattern,
                 controller.record_level_db,
                 controller.record_monitor_running,
-                controller.record_level_tick,
-                controller.record_monitor_info,
-                controller.record_capture_active,
-                file_menu_label,
+                pattern_menu_label,
+                controller.help_active,
+                help_lines,
+                help_key_label,
                 controller.file_browser_active,
                 controller.file_browser_mode,
                 controller.file_browser_path,
@@ -3654,13 +2997,7 @@ def ui_loop(stdscr, seq, colors=None):
                 controller.audio_export_options_active,
                 controller.audio_export_options,
                 controller.audio_export_options_index,
-                controller.kit_export_options_active,
-                controller.kit_export_options,
-                controller.kit_export_options_index,
                 mode_key_label,
-                tab_1_label,
-                tab_2_label,
-                tab_3_label,
                 clear_key_label,
                 length_dec_label,
                 length_inc_label,
