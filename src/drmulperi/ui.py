@@ -14,6 +14,7 @@ from .config import (
     PATTERN_MENU_ITEMS,
     PATTERNS,
     REC_COL,
+    TRACK_LABEL_COL,
     TRACK_PITCH_COL,
     TRACKS,
 )
@@ -170,6 +171,10 @@ def draw(
     length_dec_label,
     length_inc_label,
     ui_options,
+    track_params_dialog_active,
+    track_params_dialog_track,
+    track_params_dialog_index,
+    track_params_dialog_input,
     theme
 ):
     """Render full terminal UI frame from current sequencer/controller state."""
@@ -231,6 +236,16 @@ def draw(
         for y in range(y0 + 1, y1):
             safe_add(y, x0, "│", attr)
             safe_add(y, x1, "│", attr)
+
+    def draw_dim_overlay():
+        """Draw a dimmed overlay across the screen, preserving top menubar and prompt row."""
+        dim_attr = curses.A_DIM
+        # Dim from row 1 to row h-2, leaving top menubar (row 0) and prompt/help row (h-1) undimmed.
+        for y in range(1, max(1, h - 1)):
+            try:
+                stdscr.addstr(y, 0, " " * w, dim_attr)
+            except curses.error:
+                pass
 
     # terminal size check for outlined layout (minimum size to show all UI elements with borders and spacing).
     min_layout_h = 16
@@ -355,13 +370,16 @@ def draw(
         pattern_param_table = [
             ("length", "Steps", str(seq.pattern_length[seq.view_pattern]), 8),
             ("swing", "Swing", str(seq.current_pattern_swing_ui()), 7),
-            ("humanize", "Human", str(seq.current_pattern_humanize()), 7),
+            ("humanize", "", "HUMAN", 7),
             ("mode", "Mode", mode.title(), 8),
         ]
         px = area_work_content_x
         for idx, (item_key, item_header, item_value, cell_w) in enumerate(pattern_param_table):
-            safe_add(area_work_controls_y, px, f"{item_header:<{cell_w}}", theme["muted"])
+            if item_header:
+                safe_add(area_work_controls_y, px, f"{item_header:<{cell_w}}", theme["muted"])
             value_attr = theme["text"]
+            if item_key == "humanize" and seq.current_pattern_humanize_enabled():
+                value_attr = theme["accent"]
             if pattern_params_focus and pattern_params_index == idx:
                 value_attr = value_attr | theme["selected"]
                 if pattern_params_edit_active:
@@ -463,6 +481,8 @@ def draw(
         )
         if t < TRACKS - 1 and not seq.muted_rows[t] and trigger_arr[t] > now_pc:
             label_attr = theme["playhead"]
+        if active_tab == 0 and cursor_x == TRACK_LABEL_COL and cursor_y == t:
+            label_attr = label_attr | theme["selected"]
         safe_add(y, x, row_label, label_attr)
         x += len(row_label)
 
@@ -528,15 +548,8 @@ def draw(
                 safe_add(y, x, f"{text:>{cell_w}}", cell_attr)
                 x += cell_w
         else:
-            # --- Sequencer tab UI elements: load/preview + step grid + per-track params ---
-            # Sequencer view: load + preview are shown next to the track label (before steps).
-            load_char = "↓" if t != ACCENT_TRACK else " "
-            load_attr = row_attr
-            if cursor_x == LOAD_COL and cursor_y == t:
-                load_attr = load_attr | theme["selected"]
-            safe_add(y, x, f"{load_char:>1}", load_attr)
-            x += 1 + seq_col_gap
-
+            # --- Sequencer tab UI elements: preview + step grid + per-track params ---
+            # Sequencer view: preview is shown next to the track label (before steps).
             preview_char = "▶" if t != ACCENT_TRACK else " "
             preview_attr = row_attr
             if cursor_x == PREVIEW_COL and cursor_y == t:
@@ -585,26 +598,6 @@ def draw(
                     cell_attr = cell_attr | theme["selected"]
                 safe_add(y, x, char, cell_attr)
                 x += 1 + seq_col_gap
-
-            # Parameter area.
-            param_cols = [REC_COL, CLEAR_COL, TRACK_PITCH_COL]
-            for s in param_cols:
-                if s == REC_COL:
-                    char = f"{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
-                    cell_attr = row_attr
-                elif s == CLEAR_COL:
-                    char = str(seq.seq_track_group[t]) if t != ACCENT_TRACK else ""
-                    cell_attr = row_attr
-                else:
-                    char = f"{seq.seq_track_pitch[t] + 12}" if t != ACCENT_TRACK else ""
-                    cell_attr = row_attr
-
-                cell_w = col_cell_width(s)
-                body = f"{char:>{cell_w}}"
-                if cursor_x == s and cursor_y == t:
-                    cell_attr = cell_attr | theme["selected"]
-                safe_add(y, x, body, cell_attr)
-                x += len(body) + seq_col_gap
 
     # --- Export tab inline content ---
     if active_tab == 3:
@@ -671,11 +664,11 @@ def draw(
         pattern_nav_keys = ["length", "swing", "humanize", "mode"]
         active_key = pattern_nav_keys[max(0, min(len(pattern_nav_keys) - 1, pattern_params_index))]
         if active_key == "length":
-            help_line = "Pattern length"
+            help_line = "Pattern steps: type digits to set immediately"
         elif active_key == "swing":
-            help_line = "Pattern swing"
+            help_line = "Pattern swing (0-10): type digits to set immediately"
         elif active_key == "humanize":
-            help_line = "Pattern humanize"
+            help_line = f"Pattern humanize toggle: Enter toggles OFF/ON (ON = {int(getattr(seq, 'humanize_amount', 50))}%)"
         else:
             help_line = "Step mode (velocity, ratchet, blocks, detune, pan)"
     elif header_focus:
@@ -792,6 +785,8 @@ def draw(
     # safe_add(sample_y, sample_x, sample_label[: max(0, area_work_right - sample_x)], theme["muted"], transform_case=False)
 
     if pattern_menu_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         if pattern_menu_kind == "pattern":
             items = PATTERN_MENU_ITEMS
         else:
@@ -835,6 +830,8 @@ def draw(
                     safe_add(box_top + 1 + i, box_left + 2 + x_pos + 1, "X", item_attr | curses.A_UNDERLINE)
 
     if patterns_overlay_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         count = seq.pattern_count()
         title = "PATTERNS (A:Add, D:Duplicate, X:Delete)"
         rows = []
@@ -884,6 +881,8 @@ def draw(
             safe_add(y, box_left + 2, rows[i][: box_width - 4], attr)
 
     if chop_overlay_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         title = "IMPORT CHOPS (Space preview, Enter action)"
         rows = []
         for i in range(8):
@@ -915,6 +914,8 @@ def draw(
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
 
     if import_overlay_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         title = "IMPORT AUDIO (Arrows move, <-/-> track, Space preview, Enter select)"
         src = os.path.basename(import_overlay_path) if import_overlay_path else "-"
         audio_mode_label = "Song" if (0 <= import_target_audio_track < (TRACKS - 1) and seq.audio_track_mode[import_target_audio_track] == 1) else f"Pattern {seq.view_pattern + 1}"
@@ -947,6 +948,8 @@ def draw(
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
 
     if record_overlay_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         title = "RECORD SETTINGS"
         devices = record_device_names if record_device_names else ["(no input devices)"]
         selected_dev = devices[record_device_index] if devices else "(no input devices)"
@@ -1033,6 +1036,8 @@ def draw(
         safe_add(btn_y, rec_x, record_label, record_attr)
 
     if file_browser_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         if file_browser_mode == "pattern":
             mode_name = "PATTERN"
         elif file_browser_mode == "pattern_steps":
@@ -1077,6 +1082,8 @@ def draw(
             safe_add(row, box_left + 2, label[: box_width - 4], item_attr, transform_case=False)
 
     if audio_export_options_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         title = "AUDIO EXPORT OPTIONS (Arrows/Space change, Enter export, Esc cancel)"
         bit_depth = int(audio_export_options.get("bit_depth", 16))
         sample_rate = int(audio_export_options.get("sample_rate", seq.engine.sr))
@@ -1138,6 +1145,8 @@ def draw(
         safe_add(box_top + 8, box_left + 4, "[ Export -> Filename ]", export_attr)
 
     if kit_export_options_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
         title = "KIT EXPORT OPTIONS (Arrows/Space change, Enter export, Esc cancel)"
         bit_depth = int(kit_export_options.get("bit_depth", 16))
         sample_rate = int(kit_export_options.get("sample_rate", seq.engine.sr))
@@ -1191,29 +1200,79 @@ def draw(
         export_attr = theme["text"] | (theme["selected"] if kit_export_options_index == (row_count - 1) else 0)
         safe_add(box_top + 7, box_left + 4, "[ Export Kit -> Folder ]", export_attr)
 
+    footer_dim_active = ui_options.get("dim_overlay_enabled", True) and (
+        pattern_menu_active
+        or patterns_overlay_active
+        or chop_overlay_active
+        or import_overlay_active
+        or record_overlay_active
+        or file_browser_active
+        or audio_export_options_active
+        or kit_export_options_active
+        or track_params_dialog_active
+    )
     # Footer row sits above area_prompt.
-    footer_row = outer_bottom
-    transport_icon = "▶" if seq.playing else "▢"
-    transport_attr = frame_attr
-    safe_add(footer_row, outer_left + 2, transport_icon, transport_attr)
-    compact_pattern_line = " ".join(pattern_line.split())
-    footer_patterns = f"PATTERNS {compact_pattern_line}"
-    footer_song = f"SONG {song_line}"
-    footer_x = outer_left + 6
-    max_w = max(0, outer_right - (outer_left + 8))
-    patterns_attr = theme["tertiary_on"] if not seq.chain_enabled else theme["tertiary_off"]
-    song_attr = theme["tertiary_on"] if seq.chain_enabled else theme["tertiary_off"]
-    safe_add(footer_row, footer_x, footer_patterns[:max_w], patterns_attr)
-    footer_x += len(footer_patterns)
-    safe_add(footer_row, footer_x, "   "[:max(0, max_w - len(footer_patterns))], frame_attr)
-    footer_x += 3
-    safe_add(footer_row, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
-    project_dir = os.path.basename(os.path.dirname(seq.pattern_path)) if seq.pattern_path else ""
-    if not project_dir:
-        project_dir = "."
-    project_label = f" {project_dir} "
-    project_x = max(outer_left + 2, outer_right - len(project_label) - 2)
-    safe_add(footer_row, project_x, project_label, theme["muted"])
+    # Keep it fully covered by dim overlay when any modal is active.
+    if not footer_dim_active:
+        footer_row = outer_bottom
+        transport_icon = "▶" if seq.playing else "▢"
+        transport_attr = frame_attr
+        safe_add(footer_row, outer_left + 2, transport_icon, transport_attr)
+        compact_pattern_line = " ".join(pattern_line.split())
+        footer_patterns = f"PATTERNS {compact_pattern_line}"
+        footer_song = f"SONG {song_line}"
+        footer_x = outer_left + 6
+        max_w = max(0, outer_right - (outer_left + 8))
+        patterns_attr = theme["tertiary_on"] if not seq.chain_enabled else theme["tertiary_off"]
+        song_attr = theme["tertiary_on"] if seq.chain_enabled else theme["tertiary_off"]
+        safe_add(footer_row, footer_x, footer_patterns[:max_w], patterns_attr)
+        footer_x += len(footer_patterns)
+        safe_add(footer_row, footer_x, "   "[:max(0, max_w - len(footer_patterns))], frame_attr)
+        footer_x += 3
+        safe_add(footer_row, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
+        project_dir = os.path.basename(os.path.dirname(seq.pattern_path)) if seq.pattern_path else ""
+        if not project_dir:
+            project_dir = "."
+        project_label = f" {project_dir} "
+        project_x = max(outer_left + 2, outer_right - len(project_label) - 2)
+        safe_add(footer_row, project_x, project_label, theme["muted"])
+
+
+    # Track params dialog
+    if track_params_dialog_active:
+        if ui_options.get("dim_overlay_enabled", True):
+            draw_dim_overlay()
+        title = "TRACK PARAMETERS"
+        track_name = "Accent" if track_params_dialog_track == ACCENT_TRACK else f"Track {track_params_dialog_track + 1}"
+        params = [
+            ("Pan (1-9)", str(seq.seq_track_pan[track_params_dialog_track])),
+            ("Volume (0-9)", str(seq.seq_track_volume[track_params_dialog_track])),
+            ("Probability (0-9)", str(seq.seq_track_probability[track_params_dialog_track])),
+            ("Group (0-9)", str(seq.seq_track_group[track_params_dialog_track])),
+            ("Pitch (0-24)", str(seq.seq_track_pitch[track_params_dialog_track] + 12)),
+            ("Load Sample", "Press Enter"),
+        ]
+        box_width = min(w - 8, 50)
+        box_height = min(h - 4, 14)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
+        box_right = box_left + box_width - 1
+        box_bottom = box_top + box_height - 1
+        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        for y in range(box_top + 1, box_bottom):
+            safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
+        safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
+        safe_add(box_top + 2, box_left + 2, track_name[: box_width - 4], theme["muted"])
+        for i, (param_label, current_value) in enumerate(params):
+            y = box_top + 3 + i
+            if y >= box_bottom:
+                break
+            attr = theme["text"]
+            if i == track_params_dialog_index:
+                attr = attr | theme["selected"]
+            value_text = track_params_dialog_input if (i == track_params_dialog_index and track_params_dialog_input != "") else current_value
+            line = f"{param_label}: {value_text}"
+            safe_add(y, box_left + 2, line[: box_width - 4], attr)
 
     stdscr.refresh()
 
@@ -1260,6 +1319,10 @@ class Controller:
         self.humanize_edit_input = ""
         self.probability_edit_active = False
         self.probability_edit_input = ""
+        self.track_params_dialog_active = False
+        self.track_params_dialog_track = 0
+        self.track_params_dialog_index = 0
+        self.track_params_dialog_input = ""
         self.chain_edit_active = False
         self.chain_edit_input = ""
         self.swing_edit_active = False
@@ -1281,6 +1344,7 @@ class Controller:
         self.pattern_params_focus = False
         self.pattern_params_edit_active = False
         self.pattern_params_index = 0
+        self.pattern_params_input = ""
         self.active_tab = 0
         self.header_params = ["file", "pattern", "song", "record", "bpm", "pitch", "midi"]
         self.header_param_index = 0
@@ -1371,8 +1435,8 @@ class Controller:
         self.cursor_y = (self.cursor_y + dy) % TRACKS
 
     def _sequencer_nav_cols(self):
-        """Sequencer navigation order matching visual layout (load, preview, steps, params)."""
-        return [LOAD_COL, PREVIEW_COL] + list(range(self.seq.max_step_count)) + [REC_COL, CLEAR_COL, TRACK_PITCH_COL]
+        """Sequencer navigation order matching visual layout (track, preview, steps)."""
+        return [TRACK_LABEL_COL, PREVIEW_COL] + list(range(self.seq.max_step_count))
 
     def _audio_nav_cols(self):
         """Audio tab navigation order matching visual layout."""
@@ -1408,15 +1472,44 @@ class Controller:
         idx = max(0, min(len(keys) - 1, self.pattern_params_index))
         return keys[idx]
 
+    def _clear_pattern_param_input(self):
+        self.pattern_params_input = ""
+
+    def _apply_pattern_param_input(self):
+        """Apply numeric input buffer to focused Steps/Swing control immediately."""
+        key = self._pattern_param_current()
+        text = (self.pattern_params_input or "").strip()
+        if key not in ["length", "swing"] or not text:
+            return
+        try:
+            value = int(text)
+        except ValueError:
+            return
+
+        if key == "length":
+            target = max(1, min(self.seq.max_step_count, value))
+            current = int(self.seq.pattern_length[self.seq.view_pattern])
+            delta = target - current
+            if delta != 0:
+                self.seq.change_current_pattern_length(delta)
+            self.status_message = f"Pattern steps: {target}"
+        elif key == "swing":
+            target = max(0, min(10, value))
+            self.seq.set_current_pattern_swing_ui(target)
+            self.status_message = f"Pattern swing: {target}"
+
     def _adjust_pattern_param(self, delta):
         """Apply +/- adjustment to the currently focused work-area pattern parameter."""
+        self._clear_pattern_param_input()
         key = self._pattern_param_current()
         if key == "length":
             self.seq.change_current_pattern_length(delta)
         elif key == "swing":
             self.seq.change_current_pattern_swing(delta)
         elif key == "humanize":
-            self.seq.change_current_pattern_humanize(delta)
+            self.seq.toggle_current_pattern_humanize()
+            state = "ON" if self.seq.current_pattern_humanize_enabled() else "OFF"
+            self.status_message = f"Pattern humanize: {state}"
         elif key == "mode":
             if delta > 0:
                 self._cycle_edit_mode()
@@ -1435,6 +1528,7 @@ class Controller:
         if self.active_tab != 0:
             self.pattern_params_focus = False
             self.pattern_params_edit_active = False
+            self._clear_pattern_param_input()
         if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
             self.cursor_x = REC_COL
         if self.active_tab in [1, 2]:
@@ -1591,6 +1685,52 @@ class Controller:
     def _close_probability_dialog(self):
         self.probability_edit_active = False
         self.probability_edit_input = ""
+
+    def _close_track_params_dialog(self):
+        self.track_params_dialog_active = False
+        self.track_params_dialog_track = 0
+        self.track_params_dialog_index = 0
+        self.track_params_dialog_input = ""
+
+    def _apply_track_params_dialog(self):
+        """Apply current track-parameter dialog value to sequencer state."""
+        track = int(self.track_params_dialog_track)
+        if track == ACCENT_TRACK:
+            self.status_message = "Accent track has no track parameters"
+            return
+
+        # Index 5 is Load Sample, which opens file browser (no value input needed)
+        if self.track_params_dialog_index == 5:
+            self._open_file_browser("sample", target_track=track)
+            self._close_track_params_dialog()
+            return
+
+        try:
+            value = int((self.track_params_dialog_input or "").strip())
+        except ValueError:
+            self.status_message = "Enter numeric value"
+            return
+
+        if self.track_params_dialog_index == 0:
+            value = max(1, min(9, value))
+            self.seq.set_track_pan(track, value)
+            self.status_message = f"Track {track + 1} pan: {value}"
+        elif self.track_params_dialog_index == 1:
+            value = max(0, min(9, value))
+            self.seq.set_track_volume(track, value)
+            self.status_message = f"Track {track + 1} volume: {value}"
+        elif self.track_params_dialog_index == 2:
+            value = max(0, min(9, value))
+            self.seq.set_track_probability(track, value)
+            self.status_message = f"Track {track + 1} probability: {value}"
+        elif self.track_params_dialog_index == 3:
+            value = max(0, min(9, value))
+            self.seq.set_track_group(track, value)
+            self.status_message = f"Track {track + 1} group: {value}"
+        else:
+            value = max(0, min(24, value))
+            self.seq.set_track_pitch_ui(track, value)
+            self.status_message = f"Track {track + 1} pitch: {value}"
 
     def _tap_tempo(self):
         """Register a tap and update BPM from average interval of last 4 taps."""
@@ -2577,6 +2717,42 @@ class Controller:
                     return True
             return True
 
+        # Track-parameter dialog input has priority over global cursor/navigation handlers.
+        if self.track_params_dialog_active:
+            if key_code == 27:  # ESC
+                self._close_track_params_dialog()
+                return True
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                # For Load Sample field, open file browser; for others, apply and close.
+                if self.track_params_dialog_index == 5:
+                    self._apply_track_params_dialog()
+                else:
+                    self._close_track_params_dialog()
+                return True
+            if key_code in [curses.KEY_RIGHT, curses.KEY_DOWN, 9]:
+                self.track_params_dialog_index = (self.track_params_dialog_index + 1) % 6
+                self.track_params_dialog_input = ""
+                return True
+            if key_code in [curses.KEY_LEFT, curses.KEY_UP, curses.KEY_BTAB]:
+                self.track_params_dialog_index = (self.track_params_dialog_index - 1) % 6
+                self.track_params_dialog_input = ""
+                return True
+
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.track_params_dialog_input = self.track_params_dialog_input[:-1]
+                return True
+
+            if isinstance(key, str) and key.isdigit():
+                max_len = 2 if self.track_params_dialog_index == 4 else 1
+                if len(self.track_params_dialog_input) < max_len:
+                    self.track_params_dialog_input += key
+                # Apply immediately without Enter.
+                self._apply_track_params_dialog()
+                return True
+            return True
+
+        # Global navigation handlers (arrow keys + tab) start here.
         if key_code == curses.KEY_RIGHT:
             if self.pattern_params_focus and self.active_tab == 0:
                 if self.pattern_params_edit_active:
@@ -2584,6 +2760,7 @@ class Controller:
                 else:
                     keys = self._pattern_param_keys()
                     self.pattern_params_index = (self.pattern_params_index + 1) % len(keys)
+                    self._clear_pattern_param_input()
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
@@ -2630,6 +2807,7 @@ class Controller:
                 else:
                     keys = self._pattern_param_keys()
                     self.pattern_params_index = (self.pattern_params_index - 1) % len(keys)
+                    self._clear_pattern_param_input()
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
@@ -2672,6 +2850,7 @@ class Controller:
         if key_code == curses.KEY_UP:
             if self.pattern_params_focus and self.active_tab == 0:
                 self.pattern_params_edit_active = False
+                self._clear_pattern_param_input()
                 self.pattern_params_focus = False
                 self.header_focus = True
                 self.header_section = "tabs"
@@ -2692,6 +2871,7 @@ class Controller:
                 if self.active_tab == 0:
                     self.pattern_params_focus = True
                     self.pattern_params_edit_active = False
+                    self._clear_pattern_param_input()
                 else:
                     self.header_focus = True
                     self.header_section = "tabs"
@@ -2709,6 +2889,7 @@ class Controller:
                 if self.pattern_params_edit_active:
                     self._adjust_pattern_param(-1)
                 else:
+                    self._clear_pattern_param_input()
                     self.pattern_params_focus = False
                 return True
             if self.header_focus:
@@ -2728,6 +2909,7 @@ class Controller:
                     if self.active_tab == 0:
                         self.pattern_params_focus = True
                         self.pattern_params_edit_active = False
+                        self._clear_pattern_param_input()
             else:
                 if self.active_tab in [1, 2]:
                     self.cursor_y = min(TRACKS - 2, self.cursor_y + 1)
@@ -2740,6 +2922,7 @@ class Controller:
             if self.pattern_params_focus and self.active_tab == 0:
                 keys = self._pattern_param_keys()
                 self.pattern_params_index = (self.pattern_params_index + 1) % len(keys)
+                self._clear_pattern_param_input()
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
@@ -2785,6 +2968,7 @@ class Controller:
             if self.pattern_params_focus and self.active_tab == 0:
                 keys = self._pattern_param_keys()
                 self.pattern_params_index = (self.pattern_params_index - 1) % len(keys)
+                self._clear_pattern_param_input()
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
@@ -2826,11 +3010,20 @@ class Controller:
                 idx = cycle.index(self.cursor_x) if self.cursor_x in cycle else 0
                 self.cursor_x = cycle[(idx - 1) % len(cycle)]
                 return True
+        backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+        if self.pattern_params_focus and self.active_tab == 0 and self._pattern_param_current() in ["length", "swing"]:
+            if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                self.pattern_params_input = self.pattern_params_input[:-1]
+                if self.pattern_params_input:
+                    self._apply_pattern_param_input()
+                return True
         if key_code == 27:  # ESC
             if self.pattern_params_edit_active:
                 self.pattern_params_edit_active = False
+                self._clear_pattern_param_input()
                 return True
             if self.pattern_params_focus:
+                self._clear_pattern_param_input()
                 self.pattern_params_focus = False
                 return True
             if self.header_edit_active:
@@ -2868,6 +3061,9 @@ class Controller:
                 return True
             if self.swing_edit_active:
                 self._close_swing_dialog()
+                return True
+            if self.track_params_dialog_active:
+                self._close_track_params_dialog()
                 return True
             if self.clipboard_import_confirm_active:
                 self._close_clipboard_import_confirm()
@@ -3259,6 +3455,21 @@ class Controller:
                 self.move_cursor(1, 0)
         elif key_code in range(ord('0'), ord('9') + 1):
             velocity = key_code - ord('0')
+            if self.pattern_params_focus and self.active_tab == 0:
+                current = self._pattern_param_current()
+                max_lens = {
+                    "length": len(str(self.seq.max_step_count)),
+                    "swing": 2,
+                }
+                if current in max_lens:
+                    max_len = max_lens[current]
+                    digit = chr(key_code)
+                    if len(self.pattern_params_input) >= max_len:
+                        self.pattern_params_input = digit
+                    else:
+                        self.pattern_params_input += digit
+                    self._apply_pattern_param_input()
+                    return True
             # BPM live typing: when BPM header param is selected, digits update BPM directly.
             if self.header_focus and self.header_section == "params" and self.header_params[self.header_param_index] == "bpm":
                 self.bpm_input += chr(key_code)
@@ -3336,6 +3547,10 @@ class Controller:
                 current = self._pattern_param_current()
                 if current == "mode":
                     self._cycle_edit_mode()
+                elif current == "humanize":
+                    self.seq.toggle_current_pattern_humanize()
+                    state = "ON" if self.seq.current_pattern_humanize_enabled() else "OFF"
+                    self.status_message = f"Pattern humanize: {state}"
                 else:
                     self.pattern_params_edit_active = not self.pattern_params_edit_active
                 return True
@@ -3451,22 +3666,14 @@ class Controller:
                     self.audio_export_active = True
                     self.audio_export_input = ""
                 return True
-            if self.cursor_x == LOAD_COL:
-                if self.cursor_y != ACCENT_TRACK:
-                    self._open_file_browser("sample", target_track=self.cursor_y)
-            elif self.cursor_x == PREVIEW_COL:
+            if self.cursor_x == PREVIEW_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.preview_row(self.cursor_y)
-            elif self.cursor_x == REC_COL:
-                if self.cursor_y == ACCENT_TRACK:
-                    self.status_message = "Accent track has no probability"
-                else:
-                    self.probability_edit_active = True
-                    self.probability_edit_input = ""
-            elif self.cursor_x == CLEAR_COL:
-                self.status_message = "Set group with number keys 0-9 (0 = off)"
-            elif self.cursor_x == TRACK_PITCH_COL:
-                self.status_message = "Track pitch: type 0..24 (12 = no shift)"
+            elif self.cursor_x == TRACK_LABEL_COL:
+                self.track_params_dialog_active = True
+                self.track_params_dialog_track = self.cursor_y
+                self.track_params_dialog_index = 0
+                self.track_params_dialog_input = ""
             else:
                 self.seq.toggle_step(self.cursor_y, self.cursor_x)
                 self.move_cursor(1, 0)
@@ -3514,6 +3721,8 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
     playhead_divider_enabled = playhead_divider_raw in {"1", "true", "yes", "on"}
     show_steps_outside_pattern_raw = str(_colors.get("show_steps_outside_pattern", "on")).strip().lower()
     show_steps_outside_pattern_enabled = show_steps_outside_pattern_raw in {"1", "true", "yes", "on"}
+    dim_overlay_enabled_raw = str(_colors.get("dim_overlay_enabled", "on")).strip().lower()
+    dim_overlay_enabled = dim_overlay_enabled_raw in {"1", "true", "yes", "on"}
     theme = {
         "frame": 0,
         "title": 0,
@@ -3548,6 +3757,7 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
         "seq_grid_wide_enabled": seq_grid_wide_enabled,
         "playhead_divider_enabled": playhead_divider_enabled,
         "show_steps_outside_pattern_enabled": show_steps_outside_pattern_enabled,
+        "dim_overlay_enabled": dim_overlay_enabled,
     }
     if curses.has_colors():
         curses.start_color()
@@ -3845,6 +4055,16 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 prompt_text = f"Rename track sample (Esc cancels): {controller.track_rename_input}"
             elif controller.swing_edit_active:
                 prompt_text = f"Swing 0-10 (Esc cancels): {controller.swing_edit_input}"
+            elif controller.track_params_dialog_active:
+                param_names = ["Pan 1-9", "Volume 0-9", "Probability 0-9", "Group 0-9", "Pitch 0-24", "Load Sample"]
+                track_name = "Accent" if controller.track_params_dialog_track == ACCENT_TRACK else f"Track {controller.track_params_dialog_track + 1}"
+                if controller.track_params_dialog_index == 5:
+                    prompt_text = f"{track_name} Load Sample - Press Enter to browse samples"
+                else:
+                    prompt_text = (
+                        f"{track_name} {param_names[controller.track_params_dialog_index]} "
+                        f"(Type to apply, Tab/Arrows switch, Enter/Esc close): {controller.track_params_dialog_input}"
+                    )
             elif controller.clear_audio_confirm_active:
                 path_name = os.path.basename(controller.clear_audio_confirm_path) if controller.clear_audio_confirm_path else "(no file)"
                 if controller.clear_audio_force_confirm_active:
@@ -3882,7 +4102,7 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 controller.clear_confirm,
                 controller.esc_confirm,
                 prompt_text,
-                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.chain_edit_active and not controller.kit_load_active and not controller.project_save_as_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.kit_export_active and not controller.kit_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active and not controller.clear_audio_confirm_active and not controller.clipboard_import_confirm_active else "",
+                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.chain_edit_active and not controller.kit_load_active and not controller.project_save_as_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.kit_export_active and not controller.kit_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active and not controller.track_params_dialog_active and not controller.clear_audio_confirm_active and not controller.clipboard_import_confirm_active else "",
                 controller.pattern_menu_active,
                 controller.pattern_menu_kind,
                 controller.pattern_menu_index,
@@ -3936,6 +4156,10 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 length_dec_label,
                 length_inc_label,
                 ui_options,
+                controller.track_params_dialog_active,
+                controller.track_params_dialog_track,
+                controller.track_params_dialog_index,
+                controller.track_params_dialog_input,
                 theme
             )
 

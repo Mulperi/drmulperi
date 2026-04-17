@@ -4,6 +4,7 @@ TRACKS = 9
 CHAIN_MAX_STEPS = 16
 # Column IDs for parameter columns in the sequencer grid.
 # Negative values never collide with step indices (0..max_step_count-1).
+TRACK_LABEL_COL = -6
 LOAD_COL        = -1
 PREVIEW_COL     = -2
 REC_COL        = -3

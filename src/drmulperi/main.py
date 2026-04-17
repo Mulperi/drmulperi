@@ -142,6 +142,7 @@ def _load_ui_settings(path=SETTINGS_PATH):
         "seq_grid_wide": "off",
         "playhead_divider": "on",
         "show_steps_outside_pattern": "on",
+        "humanize_amount": "50",
     }
     colors = {}
     for key, default in defaults.items():
@@ -229,6 +230,7 @@ def main(path=SETTINGS_PATH):
         default_step_count=configured_default_step_count,
         max_step_count=configured_max_step_count,
         default_pattern_count=configured_default_pattern_count,
+        humanize_amount=configured_colors.get("humanize_amount", "50"),
     )
     if not project_arg and not pattern_arg and not positional_arg:
         # Default startup should be a truly empty project.
