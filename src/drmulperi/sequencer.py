@@ -9,6 +9,7 @@ import warnings
 
 import numpy as np
 from scipy.io import wavfile
+from scipy.signal import sosfilt, butter
 
 from .audio_engine import AudioEngine, MidiOut
 from .config import (
@@ -81,7 +82,7 @@ class Sequencer:
         self.seq_track_pan = [5 for _ in range(TRACKS)]
         self.seq_track_volume = [9 for _ in range(TRACKS)]
         self.seq_track_humanize = [0 for _ in range(TRACKS)]
-        self.seq_track_probability = [100 for _ in range(TRACKS)]
+        self.seq_track_probability = [0 for _ in range(TRACKS)]
         self.seq_track_group = [0 for _ in range(TRACKS)]
         self.seq_track_pitch = [0 for _ in range(TRACKS)]
         self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
@@ -976,7 +977,7 @@ class Sequencer:
         self.seq_track_pan = [5 for _ in range(TRACKS)]
         self.seq_track_volume = [9 for _ in range(TRACKS)]
         self.seq_track_humanize = [0 for _ in range(TRACKS)]
-        self.seq_track_probability = [100 for _ in range(TRACKS)]
+        self.seq_track_probability = [0 for _ in range(TRACKS)]
         self.seq_track_group = [0 for _ in range(TRACKS)]
         self.seq_track_pitch = [0 for _ in range(TRACKS)]
         self.pattern_length = [self.default_step_count for _ in range(n)]
@@ -1379,7 +1380,7 @@ class Sequencer:
             bit_depth = int(opts.get("bit_depth", 16))
         except (TypeError, ValueError):
             bit_depth = 16
-        bit_depth = 8 if bit_depth == 8 else 16
+        bit_depth = 8 if bit_depth == 8 else (12 if bit_depth == 12 else 16)
 
         try:
             target_sr = int(opts.get("sample_rate", self.engine.sr))
@@ -1410,6 +1411,10 @@ class Sequencer:
             try:
                 if bit_depth == 8:
                     wav_data = np.clip(((out + 1.0) * 127.5), 0, 255).astype(np.uint8)
+                elif bit_depth == 12:
+                    quantized = np.round(out * 2047.0).astype(np.int32)
+                    quantized = np.clip(quantized, -2048, 2047)
+                    wav_data = (quantized * 16).astype(np.int16)
                 else:
                     wav_data = np.clip(out * 32767.0, -32768, 32767).astype(np.int16)
                 wavfile.write(dst, target_sr, wav_data)
@@ -1444,7 +1449,7 @@ class Sequencer:
             bit_depth = int(opts.get("bit_depth", 16))
         except (TypeError, ValueError):
             bit_depth = 16
-        bit_depth = 8 if bit_depth == 8 else 16
+        bit_depth = 8 if bit_depth == 8 else (12 if bit_depth == 12 else 16)
 
         try:
             target_sr = int(opts.get("sample_rate", self.engine.sr))
@@ -1554,6 +1559,10 @@ class Sequencer:
                     mix[start:start + n, 0] += chunk * pan_l
                     mix[start:start + n, 1] += chunk * pan_r
 
+        # Apply EQ before normalization so shelves don't cause clipping.
+        if opts.get("eq_enabled"):
+            mix = self._apply_export_eq(mix, sr, opts)
+
         # Louder export: normalize peak to near full scale.
         peak = float(np.max(np.abs(mix))) if mix.size > 0 else 0.0
         if peak > 1e-9:
@@ -1577,6 +1586,10 @@ class Sequencer:
 
         if bit_depth == 8:
             out_wav = np.clip(((out + 1.0) * 127.5), 0, 255).astype(np.uint8)
+        elif bit_depth == 12:
+            quantized = np.round(out * 2047.0).astype(np.int32)
+            quantized = np.clip(quantized, -2048, 2047)
+            out_wav = (quantized * 16).astype(np.int16)
         else:
             out_wav = (out * 32767.0).astype(np.int16)
 
@@ -1587,6 +1600,83 @@ class Sequencer:
         chan_label = "mono" if channels == 1 else "stereo"
         scope_label = "song" if scope == "chain" else "pattern"
         return True, f"Exported audio: {os.path.basename(path)} ({scope_label}, {target_sr}Hz, {bit_depth}-bit, {chan_label})"
+
+    @staticmethod
+    def _apply_export_eq(audio: np.ndarray, sr: int, opts=None) -> np.ndarray:
+        """Apply EQ (shelving filters) and optional tape warble.
+        
+        opts dict keys:
+            eq_low_freq, eq_low_gain, eq_high_freq, eq_high_gain: EQ parameters
+            tape_enabled: if True, apply subtle pitch warble like vintage tape
+        """
+        opts = opts or {}
+        
+        def _shelf_sos(freq, gain_db, shelf_type, sr):
+            """Build a first-order shelving filter as SOS (second-order sections)."""
+            A = 10.0 ** (gain_db / 40.0)
+            w0 = 2.0 * np.pi * freq / sr
+            if shelf_type == "low":
+                b0 = A * ((A + 1) - (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2))
+                b1 = 2 * A * ((A - 1) - (A + 1) * np.cos(w0))
+                b2 = A * ((A + 1) - (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2))
+                a0 = (A + 1) + (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2)
+                a1 = -2 * ((A - 1) + (A + 1) * np.cos(w0))
+                a2 = (A + 1) + (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2)
+            else:  # high
+                b0 = A * ((A + 1) + (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2))
+                b1 = -2 * A * ((A - 1) + (A + 1) * np.cos(w0))
+                b2 = A * ((A + 1) + (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2))
+                a0 = (A + 1) - (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2)
+                a1 = 2 * ((A - 1) - (A + 1) * np.cos(w0))
+                a2 = (A + 1) - (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * np.sin(w0) / np.sqrt(2)
+            return np.array([[b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]])
+
+        float_audio = np.asarray(audio, dtype=np.float32)
+        stereo = float_audio.ndim == 2
+        if not stereo:
+            float_audio = float_audio[:, np.newaxis]
+
+        # Get EQ parameters from opts or defaults
+        eq_low_freq = float(opts.get("eq_low_freq", 70))
+        eq_low_gain = float(opts.get("eq_low_gain", 4))
+        eq_high_freq = float(opts.get("eq_high_freq", 9000))
+        eq_high_gain = float(opts.get("eq_high_gain", 3))
+        
+        bass_sos = _shelf_sos(eq_low_freq, eq_low_gain, "low", sr)
+        treble_sos = _shelf_sos(eq_high_freq, eq_high_gain, "high", sr)
+
+        out = np.empty_like(float_audio)
+        for ch in range(float_audio.shape[1]):
+            ch_data = float_audio[:, ch]
+            ch_data = sosfilt(bass_sos, ch_data).astype(np.float32)
+            ch_data = sosfilt(treble_sos, ch_data).astype(np.float32)
+            out[:, ch] = ch_data
+
+        # Apply tape warble: subtle pitch modulation with low-frequency LFO
+        if opts.get("tape_enabled"):
+            tape_lfo_freq = 0.3  # Hz: slow flutter/wow
+            tape_depth = 0.002  # ±0.2% pitch variation (max ~2 cents)
+            t = np.arange(len(out)) / sr
+            lfo = tape_depth * (0.5 * np.sin(2 * np.pi * tape_lfo_freq * t) + 0.3 * np.sin(2 * np.pi * 0.7 * tape_lfo_freq * t))
+            
+            for ch in range(out.shape[1]):
+                ch_data = out[:, ch]
+                # Simple pitch-shift via variable resampling: stretch/compress each grain
+                warped = np.zeros_like(ch_data)
+                for i in range(1, len(ch_data)):
+                    rate_mod = 1.0 + lfo[i]
+                    idx = i / rate_mod
+                    if idx < len(ch_data) - 1:
+                        idx_floor = int(idx)
+                        idx_frac = idx - idx_floor
+                        warped[i] = ((1 - idx_frac) * ch_data[idx_floor] + idx_frac * ch_data[min(idx_floor + 1, len(ch_data) - 1)])
+                    else:
+                        warped[i] = ch_data[i]
+                out[:, ch] = warped
+
+        if not stereo:
+            out = out[:, 0]
+        return out
 
     def render_record_backing(self, precount_pattern, take_pattern, scope="pattern", include_precount=True):
         """Render a deterministic record backing buffer (precount + take) at engine sample rate.
@@ -1825,8 +1915,11 @@ class Sequencer:
 
                             if vel > 0:
                                 prob = self.seq_track_probability[t]
-                                if prob < 100 and (random.random() * 100.0) >= prob:
-                                    continue
+                                if prob > 0:
+                                    # prob 0=100%, 9=10%; map to actual percent: 100 - prob*10
+                                    threshold = 100 - prob * 10
+                                    if (random.random() * 100.0) >= threshold:
+                                        continue
 
                                 v = vel / 9.0
 
@@ -3083,7 +3176,7 @@ class Sequencer:
     def set_track_probability(self, track, value):
         if track == ACCENT_TRACK:
             return
-        self.seq_track_probability[track] = max(0, min(100, int(value)))
+        self.seq_track_probability[track] = max(0, min(9, int(value)))
         self.dirty = True
 
     def set_track_group(self, track, value):

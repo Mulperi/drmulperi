@@ -3,7 +3,7 @@ import configparser
 import curses
 import os
 
-from .config import DEFAULT_KIT_PATH, DEFAULT_SETTINGS, SETTINGS_PATH
+from .config import DEFAULT_SETTINGS, SETTINGS_PATH
 from .sequencer import Sequencer
 from .ui import ui_loop
 
@@ -56,12 +56,41 @@ def _load_audio_settings(path=SETTINGS_PATH):
     return sample_rate, duplex_raw
 
 
+def _load_export_settings(path=SETTINGS_PATH):
+    """Load export (EQ/tape) settings from settings.ini."""
+    parser = configparser.ConfigParser()
+    parser.read(path)
+    section = parser["export"] if "export" in parser else {}
+    try:
+        eq_low_freq = float(section.get("eq_low_freq", "70"))
+        eq_low_freq = max(20, min(20000, eq_low_freq))
+    except (ValueError, TypeError):
+        eq_low_freq = 70.0
+    try:
+        eq_low_gain = float(section.get("eq_low_gain", "4"))
+        eq_low_gain = max(-24, min(24, eq_low_gain))
+    except (ValueError, TypeError):
+        eq_low_gain = 4.0
+    try:
+        eq_high_freq = float(section.get("eq_high_freq", "9000"))
+        eq_high_freq = max(20, min(20000, eq_high_freq))
+    except (ValueError, TypeError):
+        eq_high_freq = 9000.0
+    try:
+        eq_high_gain = float(section.get("eq_high_gain", "3"))
+        eq_high_gain = max(-24, min(24, eq_high_gain))
+    except (ValueError, TypeError):
+        eq_high_gain = 3.0
+    return {"eq_low_freq": eq_low_freq, "eq_low_gain": eq_low_gain, "eq_high_freq": eq_high_freq, "eq_high_gain": eq_high_gain}
+
+
+
 def _load_sequencer_settings(path=SETTINGS_PATH):
     """Load sequencer defaults from settings.ini."""
     parser = configparser.ConfigParser()
     parser.read(path)
     section = parser["sequencer"] if "sequencer" in parser else {}
-    default_kit = str(section.get("default_kit", DEFAULT_KIT_PATH)).strip()
+    default_kit = str(section.get("default_kit", "")).strip()
     raw_follow_song = str(section.get("follow_song", "off")).strip().lower()
     follow_song = raw_follow_song in {"1", "true", "yes", "on"}
     raw_default_step_count = section.get("default_step_count", "16")
@@ -104,9 +133,15 @@ def _load_ui_settings(path=SETTINGS_PATH):
         "hotkey_tab_1": "F1",
         "hotkey_tab_2": "F2",
         "hotkey_tab_3": "F3",
+        "hotkey_tab_4": "x",
         "text_bold": "off",
         "text_uppercase": "on",
         "rec_input_metering": "off",
+        "large_blocks": "off",
+        "sort_audio_tracks_by_type": "on",
+        "seq_grid_wide": "off",
+        "playhead_divider": "on",
+        "show_steps_outside_pattern": "on",
     }
     colors = {}
     for key, default in defaults.items():
@@ -120,6 +155,7 @@ def main(path=SETTINGS_PATH):
     parser = argparse.ArgumentParser()
     configured_default_kit, configured_follow_song, configured_default_step_count, configured_max_step_count, configured_default_pattern_count = _load_sequencer_settings(path)
     configured_colors = _load_ui_settings(path)
+    configured_export = _load_export_settings(path)
     parser.add_argument(
         "--kit",
         default=configured_default_kit,
@@ -197,7 +233,7 @@ def main(path=SETTINGS_PATH):
     if not project_arg and not pattern_arg and not positional_arg:
         # Default startup should be a truly empty project.
         seq.new_project("new_project.json")
-    curses.wrapper(ui_loop, seq, configured_colors)
+    curses.wrapper(ui_loop, seq, configured_colors, configured_export)
 
 
 if __name__ == "__main__":

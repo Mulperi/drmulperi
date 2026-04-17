@@ -8,12 +8,12 @@ from urllib.parse import unquote, urlparse
 from .config import (
     ACCENT_TRACK,
     FILE_MENU_ITEMS,
-    GROUP_COL,
+    CLEAR_COL,
     LOAD_COL,
     PREVIEW_COL,
     PATTERN_MENU_ITEMS,
     PATTERNS,
-    PROB_COL,
+    REC_COL,
     TRACK_PITCH_COL,
     TRACKS,
 )
@@ -162,9 +162,13 @@ def draw(
     tab_1_label,
     tab_2_label,
     tab_3_label,
+    tab_4_label,
+    export_eq_enabled,
+    export_tape_enabled,
     clear_key_label,
     length_dec_label,
     length_inc_label,
+    ui_options,
     theme
 ):
     """Render full terminal UI frame from current sequencer/controller state."""
@@ -289,7 +293,7 @@ def draw(
             safe_add(outer_top, menu_x + 1, menu_label[1], menu_attr | curses.A_UNDERLINE)
         menu_x += len(menu_label) + 1
 
-    tabs = [("Sequencer", tab_1_label), ("Audio", tab_2_label), ("Mixer", tab_3_label)]
+    tabs = [("seq", tab_1_label), ("aud", tab_2_label), ("mix", tab_3_label), ("exp", tab_4_label)]
     tx = 3
     for i, (label, hotkey) in enumerate(tabs):
         tab_text = f"┌ {label} {hotkey} ┐"
@@ -345,25 +349,26 @@ def draw(
     safe_add(playhead_y, x, "  ", theme["text"])
     x += 2
 
-    pattern_param_table = [
-        ("length", "Steps", str(seq.pattern_length[seq.view_pattern]), 8),
-        ("swing", "Swing", str(seq.current_pattern_swing_ui()), 7),
-        ("humanize", "Human", str(seq.current_pattern_humanize()), 7),
-        ("mode", "Mode", mode.title(), 8),
-    ]
-    px = area_work_content_x
-    for idx, (item_key, item_header, item_value, cell_w) in enumerate(pattern_param_table):
-        safe_add(area_work_controls_y, px, f"{item_header:<{cell_w}}", theme["muted"])
-        value_attr = theme["text"]
-        if pattern_params_focus and pattern_params_index == idx:
-            value_attr = value_attr | theme["selected"]
-            if pattern_params_edit_active:
-                value_attr = value_attr | curses.A_UNDERLINE
-        safe_add(area_work_values_y, px, f"{item_value:<{cell_w}}", value_attr)
-        px += cell_w + 2
+    if active_tab == 0:
+        pattern_param_table = [
+            ("length", "Steps", str(seq.pattern_length[seq.view_pattern]), 8),
+            ("swing", "Swing", str(seq.current_pattern_swing_ui()), 7),
+            ("humanize", "Human", str(seq.current_pattern_humanize()), 7),
+            ("mode", "Mode", mode.title(), 8),
+        ]
+        px = area_work_content_x
+        for idx, (item_key, item_header, item_value, cell_w) in enumerate(pattern_param_table):
+            safe_add(area_work_controls_y, px, f"{item_header:<{cell_w}}", theme["muted"])
+            value_attr = theme["text"]
+            if pattern_params_focus and pattern_params_index == idx:
+                value_attr = value_attr | theme["selected"]
+                if pattern_params_edit_active:
+                    value_attr = value_attr | curses.A_UNDERLINE
+            safe_add(area_work_values_y, px, f"{item_value:<{cell_w}}", value_attr)
+            px += cell_w + 2
 
     def col_cell_width(col):
-        if col < seq.max_step_count:
+        if 0 <= col < seq.max_step_count:
             return 1
         if col == LOAD_COL:
             return 1
@@ -371,43 +376,52 @@ def draw(
             return 1
         if col == AUDIO_VOLUME_COL:
             return 3
-        if col == PROB_COL:
-            return 4
-        if col == GROUP_COL:
+        if col == REC_COL:
+            return 2
+        if col == CLEAR_COL:
             return 1
         if col == TRACK_PITCH_COL:
             return 3
         return 3
 
     # --- Sequencer tab UI elements: playhead lane + step-grid baseline ---
+    seq_col_gap = 1 if ui_options.get("seq_grid_wide_enabled", False) else 0
     if active_tab == 0:
         # Sequencer view: reserve load + preview slots before the step grid.
-        safe_add(playhead_y, x, "  ", theme["text"])
-        x += 2
+        safe_add(playhead_y, x, " " * (2 * (1 + seq_col_gap)), theme["text"])
+        x += 2 * (1 + seq_col_gap)
         step_x = x
         _max_steps = seq.max_step_count
-        safe_add(playhead_y, step_x, " " * _max_steps, theme["muted"])
+        step_span = _max_steps * (1 + seq_col_gap)
+        safe_add(playhead_y, step_x, " " * step_span, theme["muted"])
         if show_playhead and 0 <= seq.step < _max_steps:
-            safe_add(playhead_y, step_x + seq.step, "v", theme["playhead"])
-        if 1 <= current_length < _max_steps:
-            safe_add(playhead_y, step_x + current_length - 1, "|", theme["hint"])
+            safe_add(playhead_y, step_x + (seq.step * (1 + seq_col_gap)), "v", theme["playhead"])
+        if ui_options.get("playhead_divider_enabled", True) and 1 <= current_length < _max_steps:
+            safe_add(playhead_y, step_x + ((current_length - 1) * (1 + seq_col_gap)), "|", theme["hint"])
     # --- Audio tab UI elements: rows align to sequencer lanes (no playhead heading) ---
     elif active_tab == 1:
-        # Keep Audio rows aligned with sequencer rows; no heading on playhead line.
-        pass
-    else:
-        safe_add(playhead_y, area_work_content_x + 4, "Sequencer Tracks", theme["title"])
-        safe_add(playhead_y, area_work_content_x + 28, "Audio Tracks", theme["title"])
+        safe_add(area_work_controls_y, area_work_content_x, "Press enter on sample name to toggle song/pattern mode.", theme["muted"])
+        safe_add(area_work_values_y, area_work_content_x, "Song-level samples don't trigger per pattern.", theme["muted"])
+        # safe_add(playhead_y, area_work_content_x, "Enter on track name toggles Pattern/Song mode.", theme["muted"])
+    elif active_tab == 2:
+        mixer_base_x = area_work_content_x + len("1 ") + 2
+        mixer_audio_x = mixer_base_x + 13
+        safe_add(playhead_y, mixer_base_x, "Sequencer Tracks", theme["title"])
+        safe_add(playhead_y, mixer_audio_x, "Audio Tracks", theme["title"])
 
     row_start = area_work_top + 4
-    visible_rows = TRACKS if active_tab == 0 else (TRACKS - 1)
+    visible_rows = TRACKS if active_tab == 0 else (0 if active_tab == 3 else (TRACKS - 1))
     if active_tab == 0:
         track_order = [t for t in range(TRACKS - 1)]
     elif active_tab == 1:
-        track_order = (
-            [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 0]
-            + [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 1]
-        )
+        sort_audio_tracks_by_type = bool(ui_options.get("sort_audio_tracks_by_type_enabled", True))
+        if sort_audio_tracks_by_type:
+            track_order = (
+                [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 0]
+                + [t for t in range(TRACKS - 1) if seq.audio_track_mode[t] == 1]
+            )
+        else:
+            track_order = [t for t in range(TRACKS - 1)]
     else:
         track_order = [t for t in range(TRACKS - 1)]
     first_song_row = None
@@ -427,7 +441,7 @@ def draw(
         if seq.muted_rows[t]:
             row_attr = theme["muted"]
         if active_tab == 1 and seq.audio_track_mode[t] == 1:
-            row_attr = theme["chain_on"]
+            row_attr = theme["accent"]
         # No extra separator line in Audio view; ordering + color indicate grouping.
 
         x = area_work_content_x
@@ -455,31 +469,32 @@ def draw(
                 return theme["velocity_low"]
             return theme["velocity_high"]
 
-        # --- Audio tab UI elements: sample-name column + audio parameter columns ---
+        block_on_char = "■" if ui_options.get("large_blocks_enabled", False) else "▪"
+        show_steps_outside_pattern = ui_options.get("show_steps_outside_pattern_enabled", True)
+
+        # --- Audio tab UI elements: audio parameter columns + sample-name column last ---
         if active_tab == 1:
             sample_name = seq.get_audio_track_name(seq.view_pattern, t)
             ch_tag = "◯◯" if seq.get_audio_track_channels(seq.view_pattern, t) >= 2 else "◯"
             sample_name_width = 24
+            audio_col_gap = 1
             sample_field = f"{ch_tag} {sample_name}"[:sample_name_width].ljust(sample_name_width)
-            safe_add(y, x, "  ", row_attr)
-            x += 2
-            body = f"[{sample_field}]" if (cursor_x == 0 and cursor_y == row_idx) else f" {sample_field} "
-            attr = row_attr | (theme["selected"] if (cursor_x == 0 and cursor_y == row_idx) else 0)
-            safe_add(y, x, body, attr, transform_case=False)
-            x += len(body)
             cols = [
                 (LOAD_COL, "↓"),
                 (PREVIEW_COL, "▶"),
                 (AUDIO_VOLUME_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
-                (PROB_COL, "●"),
-                (GROUP_COL, "X"),
+                (REC_COL, "REC ●"),
+                (CLEAR_COL, "⌫"),
                 (TRACK_PITCH_COL, f"↔{seq.get_audio_track_shift(seq.view_pattern, t):02d}"),
             ]
             for col, char in cols:
                 cell_w = col_cell_width(col)
-                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (theme["selected"] if (cursor_x == col and cursor_y == row_idx) else 0)
+                cell_attr = (theme["record"] if col == REC_COL else row_attr) | (theme["selected"] if (cursor_x == col and cursor_y == row_idx) else 0)
                 safe_add(y, x, f"{char:>{cell_w}}", cell_attr)
-                x += cell_w
+                x += cell_w + audio_col_gap
+            body = f"[{sample_field}]" if (cursor_x == 0 and cursor_y == row_idx) else f" {sample_field} "
+            attr = row_attr | (theme["selected"] if (cursor_x == 0 and cursor_y == row_idx) else 0)
+            safe_add(y, x, body, attr, transform_case=False)
         elif active_tab == 2:
             seq_pan = seq.seq_track_pan[t]
             seq_vol = seq.seq_track_volume[t]
@@ -491,14 +506,14 @@ def draw(
             x += 2
 
             mix_cells = [
-                (0, f"P{seq_pan}", row_attr),
-                (1, f"V{seq_vol}", row_attr),
-                (2, f"●{seq_prob}", row_attr),
-                (3, f"↔{seq_pitch:02d}", row_attr),
-                (4, f"P{aud_pan}", row_attr),
-                (5, f"V{aud_vol}", row_attr),
+                (0, f"P{seq_pan}", row_attr, 2),
+                (1, f"V{seq_vol}", row_attr, 2),
+                (2, f"P{seq_prob}", row_attr, 2),
+                (3, f"{seq_pitch + 12}", row_attr, 2),
+                (4, f"P{aud_pan}", row_attr, 2),
+                (5, f"V{aud_vol}", row_attr, 2),
             ]
-            for idx, text, base_attr in mix_cells:
+            for idx, text, base_attr, cell_w in mix_cells:
                 if idx == 4:
                     safe_add(y, x, "     ", row_attr)
                     x += 5
@@ -506,8 +521,8 @@ def draw(
                     safe_add(y, x, "  ", row_attr)
                     x += 2
                 cell_attr = base_attr | (theme["selected"] if (cursor_x == idx and cursor_y == row_idx) else 0)
-                safe_add(y, x, f"{text:>2}", cell_attr)
-                x += 2
+                safe_add(y, x, f"{text:>{cell_w}}", cell_attr)
+                x += cell_w
         else:
             # --- Sequencer tab UI elements: load/preview + step grid + per-track params ---
             # Sequencer view: load + preview are shown next to the track label (before steps).
@@ -516,22 +531,29 @@ def draw(
             if cursor_x == LOAD_COL and cursor_y == t:
                 load_attr = load_attr | theme["selected"]
             safe_add(y, x, f"{load_char:>1}", load_attr)
-            x += 1
+            x += 1 + seq_col_gap
 
             preview_char = "▶" if t != ACCENT_TRACK else " "
             preview_attr = row_attr
             if cursor_x == PREVIEW_COL and cursor_y == t:
                 preview_attr = preview_attr | theme["selected"]
             safe_add(y, x, f"{preview_char:>1}", preview_attr)
-            x += 1
+            x += 1 + seq_col_gap
 
             # Sequencer grid: compact 1-char step cells.
             for s in range(seq.max_step_count):
                 val = seq.grid[seq.view_pattern][t][s]
                 ratchet = seq.ratchet_grid[seq.view_pattern][t][s]
                 detune = seq.detune_grid[seq.view_pattern][t][s]
+                if (not show_steps_outside_pattern) and s >= seq.pattern_length[seq.view_pattern]:
+                    cell_attr = theme["muted"]
+                    if cursor_x == s and cursor_y == t:
+                        cell_attr = cell_attr | theme["selected"]
+                    safe_add(y, x, " ", cell_attr)
+                    x += 1 + seq_col_gap
+                    continue
                 if edit_mode == "blocks":
-                    char = "▪" if val > 0 else "."
+                    char = block_on_char if val > 0 else "."
                 elif edit_mode == "ratchet":
                     char = str(ratchet if val > 0 else ".")
                 elif edit_mode == "detune":
@@ -543,7 +565,7 @@ def draw(
 
                 if t == ACCENT_TRACK:
                     if edit_mode == "blocks":
-                        char = "▪" if val > 0 else "."
+                        char = block_on_char if val > 0 else "."
                     else:
                         char = "1" if val > 0 else "."
                     cell_attr = theme["accent"]
@@ -558,15 +580,15 @@ def draw(
                 if cursor_x == s and cursor_y == t:
                     cell_attr = cell_attr | theme["selected"]
                 safe_add(y, x, char, cell_attr)
-                x += 1
+                x += 1 + seq_col_gap
 
             # Parameter area.
-            param_cols = [PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+            param_cols = [REC_COL, CLEAR_COL, TRACK_PITCH_COL]
             for s in param_cols:
-                if s == PROB_COL:
-                    char = f"%{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
+                if s == REC_COL:
+                    char = f"{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
-                elif s == GROUP_COL:
+                elif s == CLEAR_COL:
                     char = str(seq.seq_track_group[t]) if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 else:
@@ -578,10 +600,55 @@ def draw(
                 if cursor_x == s and cursor_y == t:
                     cell_attr = cell_attr | theme["selected"]
                 safe_add(y, x, body, cell_attr)
-                x += len(body)
+                x += len(body) + seq_col_gap
 
-            mute_mark = "M" if seq.muted_rows[t] else " "
-            safe_add(y, x, f" {mute_mark}", row_attr)
+    # --- Export tab inline content ---
+    if active_tab == 3:
+        ex = area_work_content_x
+        ey = area_work_top + 1
+        safe_add(ey, ex, "Export Audio", theme["title"])
+        ey += 2
+        bit_depth = int(audio_export_options.get("bit_depth", 16))
+        sample_rate = int(audio_export_options.get("sample_rate", seq.engine.sr))
+        channels = int(audio_export_options.get("channels", 2))
+        scope = str(audio_export_options.get("scope", "pattern")).strip().lower()
+
+        def _draw_export_row(y, row_idx, label, options, selected_value):
+            is_focused = (cursor_y == row_idx)
+            safe_add(y, ex, ">" if is_focused else " ", theme["text"])
+            safe_add(y, ex + 2, label, theme["title"] if is_focused else theme["muted"])
+            ox = ex + 2 + len(label)
+            for text, value in options:
+                attr = theme["text"] if value == selected_value else theme["muted"]
+                safe_add(y, ox, text, attr)
+                ox += len(text) + 2
+
+        _draw_export_row(ey,     0, "Bit Depth:   ", [("8-bit ", 8), ("12-bit", 12), ("16-bit", 16)], bit_depth)
+        _draw_export_row(ey + 1, 1, "Sample Rate: ", [("11k ", 11025), ("22k ", 22050), ("32k ", 32000), ("44.1k ", 44100), ("48k", 48000)], sample_rate)
+        _draw_export_row(ey + 2, 2, "Channels:    ", [("Mono  ", 1), ("Stereo", 2)], channels)
+        _draw_export_row(ey + 3, 3, "Export:      ", [("Pattern", "pattern"), ("Song   ", "chain")], scope)
+
+        # Effects row — EQ and TAPE toggles
+        eff_y = ey + 4
+        is_eff = (cursor_y == 4)
+        safe_add(eff_y, ex, ">" if is_eff else " ", theme["text"])
+        safe_add(eff_y, ex + 2, "Effects:     ", theme["title"] if is_eff else theme["muted"])
+        eq_x = ex + 2 + len("Effects:     ")
+        eq_attr = theme["accent"] if export_eq_enabled else theme["muted"]
+        if is_eff and cursor_x == 0:
+            eq_attr = eq_attr | theme["selected"]
+        safe_add(eff_y, eq_x, "[EQ]", eq_attr)
+        tape_x = eq_x + len("[EQ]") + 2
+        tape_attr = theme["accent"] if export_tape_enabled else theme["muted"]
+        if is_eff and cursor_x == 1:
+            tape_attr = tape_attr | theme["selected"]
+        safe_add(eff_y, tape_x, "[TAPE]", tape_attr)
+
+        # Export action button
+        btn_y = ey + 6
+        is_btn = (cursor_y == 5)
+        btn_attr = theme["text"] | (theme["selected"] if is_btn else 0)
+        safe_add(btn_y, ex + 4, "[ Export ]", btn_attr)
 
     prompt_line = ""
     help_line = ""
@@ -639,13 +706,25 @@ def draw(
     elif active_tab == 2 and cursor_x == 1:
         help_line = "Mixer: Sequencer track volume (0-9). Type number to set."
     elif active_tab == 2 and cursor_x == 2:
-        help_line = "Mixer: Sequencer track probability (0-100). Type digits to set."
+        help_line = "Mixer: Sequencer track probability (0-9). 0=always, 9=rarely."
     elif active_tab == 2 and cursor_x == 3:
         help_line = "Mixer: Sequencer track pitch (0-24). Type digits to set."
     elif active_tab == 2 and cursor_x == 4:
         help_line = "Mixer: Audio track pan (1-9). Type number to set."
     elif active_tab == 2 and cursor_x == 5:
         help_line = "Mixer: Audio track volume (0-9). Type number to set."
+    elif active_tab == 3 and cursor_y == 0:
+        help_line = "Export: Bit depth (8/12/16-bit). Arrows/Space to cycle."
+    elif active_tab == 3 and cursor_y == 1:
+        help_line = "Export: Sample rate. Arrows/Space to cycle."
+    elif active_tab == 3 and cursor_y == 2:
+        help_line = "Export: Channels (Mono/Stereo). Arrows/Space to cycle."
+    elif active_tab == 3 and cursor_y == 3:
+        help_line = "Export: Scope (Pattern/Song). Arrows/Space to cycle."
+    elif active_tab == 3 and cursor_y == 4:
+        help_line = "Export: EQ (bass/treble) and TAPE (warble effect) toggles. Enter to toggle."
+    elif active_tab == 3 and cursor_y == 5:
+        help_line = "Export: Enter to save audio file."
     elif active_tab == 1 and cursor_x == 0:
         help_line = "Toggle track mode: Pattern/Song. Song tracks play only when SONG mode is ON."
     elif active_tab == 1 and cursor_x == LOAD_COL:
@@ -654,9 +733,9 @@ def draw(
         help_line = f"Preview sample: {current_preview_name()}"
     elif active_tab == 1 and cursor_x == AUDIO_VOLUME_COL:
         help_line = "Volume: 0..9. Type 0-9 to set."
-    elif active_tab == 1 and cursor_x == PROB_COL:
+    elif active_tab == 1 and cursor_x == REC_COL:
         help_line = "Record input device / level monitor (2-pass capture)"
-    elif active_tab == 1 and cursor_x == GROUP_COL:
+    elif active_tab == 1 and cursor_x == CLEAR_COL:
         help_line = "Clear current audio track sample"
     elif active_tab == 1 and cursor_x == TRACK_PITCH_COL:
         help_line = "Start shift: 0..50 (12=center). 1 step = 5ms. Higher trims sample start, lower adds delay."
@@ -667,10 +746,10 @@ def draw(
         help_line = "Load sample"
     elif cursor_x == PREVIEW_COL:
         help_line = f"Preview sample: {current_preview_name()}"
-    elif cursor_x == PROB_COL:
-        help_line = "% Probability: chance that a step triggers on this track (0-100). Type digits to set."
-    elif cursor_x == GROUP_COL:
-        help_line = "Group: 0=off, 1-9=mute group. Tracks with same group choke each other."
+    elif cursor_x == REC_COL:
+        help_line = "% Probability: 0=always, 9=rarely. Type 0-9 to set."
+    elif cursor_x == CLEAR_COL:
+        help_line = "Mutegroup (0=off)"
     elif cursor_x == TRACK_PITCH_COL:
         help_line = "Track pitch: 0..24 scale (12 = no shift). Type digits to set."
     elif cursor_y < TRACKS - 1:
@@ -916,7 +995,7 @@ def draw(
             record_overlay_index == 4,
         )
 
-        if theme.get("record_input_metering_enabled", False):
+        if ui_options.get("record_input_metering_enabled", False):
             meter_y = box_bottom - 2
             meter_left = box_left + 2
             meter_width = max(10, box_width - 26)
@@ -1026,7 +1105,7 @@ def draw(
         draw_options_line(
             box_top + 4,
             "Bit Depth: ",
-            [("8-bit  ", 8), ("16-bit", 16)],
+            [('8-bit  ', 8), ('12-bit', 12), ('16-bit', 16)],
             bit_depth,
             audio_export_options_index == 0,
         )
@@ -1087,7 +1166,7 @@ def draw(
         draw_kit_options_line(
             box_top + 4,
             "Bit depth: ",
-            [("8-bit", 8), ("16-bit", 16)],
+            [('8-bit', 8), ('12-bit', 12), ('16-bit', 16)],
             bit_depth,
             kit_export_options_index == 0,
         )
@@ -1137,10 +1216,14 @@ def draw(
 # ---------- CONTROLLER ----------
 class Controller:
     """Owns transient UI/dialog state and translates key input into actions."""
-    def __init__(self, sequencer, keymap):
+    def __init__(self, sequencer, keymap, export_settings=None):
         self.seq = sequencer
         self.keymap = keymap
+        self.export_settings = export_settings or {}
         self.record_input_metering_enabled = False
+        self.sort_audio_tracks_by_type_enabled = True
+        self.export_eq_enabled = False
+        self.export_tape_enabled = False
         self.cursor_x = 0
         self.cursor_y = 0
         self.edit_mode = "blocks"
@@ -1283,11 +1366,11 @@ class Controller:
 
     def _sequencer_nav_cols(self):
         """Sequencer navigation order matching visual layout (load, preview, steps, params)."""
-        return [LOAD_COL, PREVIEW_COL] + list(range(self.seq.max_step_count)) + [PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+        return [LOAD_COL, PREVIEW_COL] + list(range(self.seq.max_step_count)) + [REC_COL, CLEAR_COL, TRACK_PITCH_COL]
 
     def _audio_nav_cols(self):
         """Audio tab navigation order matching visual layout."""
-        return [0, LOAD_COL, PREVIEW_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+        return [LOAD_COL, PREVIEW_COL, AUDIO_VOLUME_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL, 0]
 
     def _sequencer_beat_cols(self):
         """Return beat-start step columns for current visible pattern length."""
@@ -1342,21 +1425,65 @@ class Controller:
 
     def _set_active_tab(self, tab_index):
         """Switch active top tab and clamp cursor for that view."""
-        self.active_tab = max(0, min(2, int(tab_index)))
+        self.active_tab = max(0, min(3, int(tab_index)))
         if self.active_tab != 0:
             self.pattern_params_focus = False
             self.pattern_params_edit_active = False
         if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
-            self.cursor_x = PROB_COL
+            self.cursor_x = REC_COL
         if self.active_tab in [1, 2]:
             self.cursor_y = min(self.cursor_y, TRACKS - 2)
-        if self.active_tab == 1 and self.cursor_x not in [LOAD_COL, PREVIEW_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL, 0]:
+        if self.active_tab == 1 and self.cursor_x not in [LOAD_COL, PREVIEW_COL, AUDIO_VOLUME_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL, 0]:
             self.cursor_x = LOAD_COL
         if self.active_tab == 2 and self.cursor_x > 5:
             self.cursor_x = 0
+        if self.active_tab == 3:
+            self.cursor_y = max(0, min(5, self.cursor_y))
+            self.cursor_x = 0
+
+    def _export_tab_change(self, direction):
+        """Change the focused export option value left/right, or cycle EQ/TAPE cursor."""
+        opts = self.audio_export_options
+        row = self.cursor_y
+        if row == 0:
+            bit_depths = [8, 12, 16]
+            cur = int(opts.get("bit_depth", 16))
+            try:
+                idx = bit_depths.index(cur)
+            except ValueError:
+                idx = 1
+            opts["bit_depth"] = bit_depths[(idx + direction) % len(bit_depths)]
+        elif row == 1:
+            rates = [11025, 22050, 32000, 44100, 48000]
+            cur = int(opts.get("sample_rate", 44100))
+            try:
+                idx = rates.index(cur)
+            except ValueError:
+                idx = 3
+            opts["sample_rate"] = rates[(idx + direction) % len(rates)]
+        elif row == 2:
+            chans = [1, 2]
+            cur = int(opts.get("channels", 2))
+            try:
+                idx = chans.index(cur)
+            except ValueError:
+                idx = 1
+            opts["channels"] = chans[(idx + direction) % len(chans)]
+        elif row == 3:
+            scopes = ["pattern", "chain"]
+            cur = str(opts.get("scope", "pattern")).strip().lower()
+            try:
+                idx = scopes.index(cur)
+            except ValueError:
+                idx = 0
+            opts["scope"] = scopes[(idx + direction) % len(scopes)]
+        elif row == 4:
+            self.cursor_x = max(0, min(1, self.cursor_x + direction))
 
     def _tracks_order(self):
         """Return display order for Audio view (Pattern lanes first, Song lanes after)."""
+        if not getattr(self, "sort_audio_tracks_by_type_enabled", True):
+            return [t for t in range(TRACKS - 1)]
         pattern_rows = [t for t in range(TRACKS - 1) if self.seq.audio_track_mode[t] == 0]
         song_rows = [t for t in range(TRACKS - 1) if self.seq.audio_track_mode[t] == 1]
         return pattern_rows + song_rows
@@ -1398,7 +1525,7 @@ class Controller:
             value = int(self.inline_value_buffer)
         except ValueError:
             value = digit
-        if col == PROB_COL:
+        if col == REC_COL:
             value = max(0, min(100, value))
             self.seq.set_track_probability(self.cursor_y, value)
         elif col == TRACK_PITCH_COL:
@@ -1892,7 +2019,7 @@ class Controller:
         event_tokens = _event_tokens(key)
         key_code = key if isinstance(key, int) else ord(key)
         if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
-            self.cursor_x = PROB_COL
+            self.cursor_x = REC_COL
         if key_code != 27 and self.esc_confirm:
             self.esc_confirm = False
         if self.status_message and key_code != -1:
@@ -2439,7 +2566,7 @@ class Controller:
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab + 1) % 3)
+                    self._set_active_tab((self.active_tab + 1) % 4)
                     return True
                 if self.header_edit_active:
                     param = self.header_params[self.header_param_index]
@@ -2464,6 +2591,9 @@ class Controller:
                             nxt = c
                             break
                     self.cursor_x = nxt
+                elif self.active_tab == 3:
+                    direction = 1
+                    self._export_tab_change(direction)
                 else:
                     cols = self._sequencer_nav_cols()
                     if self.cursor_x in cols:
@@ -2482,7 +2612,7 @@ class Controller:
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab - 1) % 3)
+                    self._set_active_tab((self.active_tab - 1) % 4)
                     return True
                 if self.header_edit_active:
                     param = self.header_params[self.header_param_index]
@@ -2507,6 +2637,9 @@ class Controller:
                             prev = c
                             break
                     self.cursor_x = prev
+                elif self.active_tab == 3:
+                    direction = -1
+                    self._export_tab_change(direction)
                 else:
                     cols = self._sequencer_nav_cols()
                     if self.cursor_x in cols:
@@ -2544,6 +2677,8 @@ class Controller:
             else:
                 if self.active_tab in [1, 2]:
                     self.cursor_y = max(0, self.cursor_y - 1)
+                elif self.active_tab == 3:
+                    self.cursor_y = max(0, self.cursor_y - 1)
                 else:
                     self.move_cursor(0, -1)
             return True
@@ -2574,6 +2709,8 @@ class Controller:
             else:
                 if self.active_tab in [1, 2]:
                     self.cursor_y = min(TRACKS - 2, self.cursor_y + 1)
+                elif self.active_tab == 3:
+                    self.cursor_y = min(5, self.cursor_y + 1)
                 else:
                     self.move_cursor(0, 1)
             return True
@@ -2584,7 +2721,7 @@ class Controller:
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab + 1) % 3)
+                    self._set_active_tab((self.active_tab + 1) % 4)
                 elif not self.header_edit_active:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
                 return True
@@ -2602,9 +2739,9 @@ class Controller:
                 if 0 <= self.cursor_x < self.seq.max_step_count:
                     # In sequencer step grid, Tab hops by beat-starts rather than every step.
                     beat_cols = self._sequencer_beat_cols()
-                    if self.cursor_x == beat_cols[-1]:
+                    if self.cursor_x >= beat_cols[-1]:
                         # From last beat, exit grid to first parameter column.
-                        self.cursor_x = LOAD_COL
+                        self.cursor_x = REC_COL
                         return True
                     if self.cursor_x in beat_cols:
                         idx = beat_cols.index(self.cursor_x)
@@ -2629,7 +2766,7 @@ class Controller:
                 return True
             if self.header_focus:
                 if self.header_section == "tabs":
-                    self._set_active_tab((self.active_tab - 1) % 3)
+                    self._set_active_tab((self.active_tab - 1) % 4)
                 elif not self.header_edit_active:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
                 return True
@@ -2647,6 +2784,10 @@ class Controller:
                 if 0 <= self.cursor_x < self.seq.max_step_count:
                     # Reverse beat-hop for Shift+Tab while cursor is inside sequencer steps.
                     beat_cols = self._sequencer_beat_cols()
+                    if self.cursor_x <= beat_cols[0]:
+                        # From first beat, exit grid to preview/load columns in reverse order.
+                        self.cursor_x = PREVIEW_COL
+                        return True
                     if self.cursor_x in beat_cols:
                         idx = beat_cols.index(self.cursor_x)
                     else:
@@ -2798,7 +2939,7 @@ class Controller:
             if key_code in [10, 13, curses.KEY_ENTER]:
                 ok, message = self.seq.export_current_pattern_audio(
                     self.audio_export_input,
-                    options=self.audio_export_options,
+                    options={**self.audio_export_options, "eq_enabled": self.export_eq_enabled, "tape_enabled": self.export_tape_enabled, **self.export_settings},
                 )
                 self.status_message = message
                 self._close_audio_export_dialog()
@@ -2866,14 +3007,14 @@ class Controller:
                 try:
                     value = int(self.probability_edit_input.strip())
                 except ValueError:
-                    self.status_message = "Probability must be 0-100"
+                    self.status_message = "Probability must be 0-9"
                     self._close_probability_dialog()
                     return True
                 if self.cursor_y == ACCENT_TRACK:
                     self.status_message = "Accent track has no probability"
                 else:
                     self.seq.set_track_probability(self.cursor_y, value)
-                    self.status_message = f"Track {self.cursor_y + 1} probability: {max(0, min(100, value))}%"
+                    self.status_message = f"Track {self.cursor_y + 1} probability: {max(0, min(9, value))}"
                 self._close_probability_dialog()
                 return True
 
@@ -2882,7 +3023,7 @@ class Controller:
                 self.probability_edit_input = self.probability_edit_input[:-1]
                 return True
             if isinstance(key, str) and key.isdigit():
-                if len(self.probability_edit_input) < 3:
+                if len(self.probability_edit_input) < 1:
                     self.probability_edit_input += key
                 return True
             return True
@@ -3104,7 +3245,7 @@ class Controller:
                 elif self.cursor_x == 1:
                     self.seq.set_track_volume(track_idx, velocity)
                 elif self.cursor_x == 2:
-                    self._apply_inline_track_value(PROB_COL, velocity)
+                    self._apply_inline_track_value(REC_COL, velocity)
                 elif self.cursor_x == 3:
                     self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
                 elif self.cursor_x == 4 and velocity > 0:
@@ -3115,21 +3256,21 @@ class Controller:
             if self.active_tab == 1 and self.cursor_x == AUDIO_VOLUME_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._apply_inline_audio_track_value(AUDIO_VOLUME_COL, velocity)
-            elif self.active_tab == 1 and self.cursor_x == PROB_COL:
+            elif self.active_tab == 1 and self.cursor_x == REC_COL:
                 pass
             elif self.active_tab == 1 and self.cursor_x == TRACK_PITCH_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._apply_inline_audio_track_value(TRACK_PITCH_COL, velocity)
             elif self.cursor_x == PREVIEW_COL:
                 pass
-            elif self.cursor_x == GROUP_COL:
+            elif self.cursor_x == CLEAR_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.set_track_group(self.cursor_y, velocity)
             elif self.cursor_x == TRACK_PITCH_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
-            elif self.cursor_x == PROB_COL:
-                self._apply_inline_track_value(PROB_COL, velocity)
+            elif self.cursor_x == REC_COL:
+                self._apply_inline_track_value(REC_COL, velocity)
             elif self.cursor_x == LOAD_COL:
                 pass
             elif self.edit_mode == "ratchet":
@@ -3246,9 +3387,9 @@ class Controller:
                         self._open_file_browser("audio_track", target_track=track_idx)
                 elif self.cursor_x == AUDIO_VOLUME_COL:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, 9)
-                elif self.cursor_x == PROB_COL:
+                elif self.cursor_x == REC_COL:
                     self._open_record_overlay(target_track=track_idx, from_audio_view=True)
-                elif self.cursor_x == GROUP_COL:
+                elif self.cursor_x == CLEAR_COL:
                     self._open_clear_audio_confirm(self.seq.view_pattern, track_idx)
                 elif self.cursor_x == TRACK_PITCH_COL:
                     self.seq.set_audio_track_shift(self.seq.view_pattern, track_idx, 12)
@@ -3256,19 +3397,30 @@ class Controller:
             if self.active_tab == 2:
                 self.status_message = "Mixer: type 1-9 for pan, 0-9 for volume"
                 return True
+            if self.active_tab == 3:
+                if self.cursor_y == 4:
+                    if self.cursor_x == 0:
+                        self.export_eq_enabled = not self.export_eq_enabled
+                    else:
+                        self.export_tape_enabled = not self.export_tape_enabled
+                elif self.cursor_y == 5:
+                    self.audio_export_options_active = False
+                    self.audio_export_active = True
+                    self.audio_export_input = ""
+                return True
             if self.cursor_x == LOAD_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._open_file_browser("sample", target_track=self.cursor_y)
             elif self.cursor_x == PREVIEW_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.preview_row(self.cursor_y)
-            elif self.cursor_x == PROB_COL:
+            elif self.cursor_x == REC_COL:
                 if self.cursor_y == ACCENT_TRACK:
                     self.status_message = "Accent track has no probability"
                 else:
                     self.probability_edit_active = True
                     self.probability_edit_input = ""
-            elif self.cursor_x == GROUP_COL:
+            elif self.cursor_x == CLEAR_COL:
                 self.status_message = "Set group with number keys 0-9 (0 = off)"
             elif self.cursor_x == TRACK_PITCH_COL:
                 self.status_message = "Track pitch: type 0..24 (12 = no shift)"
@@ -3284,6 +3436,8 @@ class Controller:
             self._set_active_tab(1)
         elif self.keymap.matches("tab_3", event_tokens):
             self._set_active_tab(2)
+        elif self.keymap.matches("tab_4", event_tokens):
+            self._set_active_tab(3)
         elif self.keymap.matches("pattern_prev", event_tokens):
             self.seq.select_pattern(max(0, self.seq.view_pattern - 1))
         elif self.keymap.matches("pattern_next", event_tokens):
@@ -3297,15 +3451,26 @@ class Controller:
         return True
 
 # ---------- INPUT ----------
-def ui_loop(stdscr, seq, colors=None):
+def ui_loop(stdscr, seq, colors=None, export_settings=None):
     """Main curses event/render loop."""
     curses.set_escdelay(25)
     curses.curs_set(0)
     stdscr.nodelay(True)
 
     _colors = colors if isinstance(colors, dict) else {}
+    _export_settings = export_settings if isinstance(export_settings, dict) else {}
     record_input_metering_raw = str(_colors.get("rec_input_metering", "off")).strip().lower()
     record_input_metering_enabled = record_input_metering_raw in {"1", "true", "yes", "on"}
+    large_blocks_raw = str(_colors.get("large_blocks", "off")).strip().lower()
+    large_blocks_enabled = large_blocks_raw in {"1", "true", "yes", "on"}
+    sort_audio_tracks_by_type_raw = str(_colors.get("sort_audio_tracks_by_type", "on")).strip().lower()
+    sort_audio_tracks_by_type_enabled = sort_audio_tracks_by_type_raw in {"1", "true", "yes", "on"}
+    seq_grid_wide_raw = str(_colors.get("seq_grid_wide", "off")).strip().lower()
+    seq_grid_wide_enabled = seq_grid_wide_raw in {"1", "true", "yes", "on"}
+    playhead_divider_raw = str(_colors.get("playhead_divider", "on")).strip().lower()
+    playhead_divider_enabled = playhead_divider_raw in {"1", "true", "yes", "on"}
+    show_steps_outside_pattern_raw = str(_colors.get("show_steps_outside_pattern", "on")).strip().lower()
+    show_steps_outside_pattern_enabled = show_steps_outside_pattern_raw in {"1", "true", "yes", "on"}
     theme = {
         "frame": 0,
         "title": 0,
@@ -3330,9 +3495,16 @@ def ui_loop(stdscr, seq, colors=None):
         "meter_hot": 0,
         "tertiary_on": 0,
         "tertiary_off": curses.A_DIM,
-        "record_input_metering_enabled": record_input_metering_enabled,
         "text_bold_enabled": False,
         "text_uppercase_enabled": True,
+    }
+    ui_options = {
+        "record_input_metering_enabled": record_input_metering_enabled,
+        "large_blocks_enabled": large_blocks_enabled,
+        "sort_audio_tracks_by_type_enabled": sort_audio_tracks_by_type_enabled,
+        "seq_grid_wide_enabled": seq_grid_wide_enabled,
+        "playhead_divider_enabled": playhead_divider_enabled,
+        "show_steps_outside_pattern_enabled": show_steps_outside_pattern_enabled,
     }
     if curses.has_colors():
         curses.start_color()
@@ -3413,7 +3585,6 @@ def ui_loop(stdscr, seq, colors=None):
         theme["meter_hot"] = pair_attr(6, bright=record_bright)
         theme["tertiary_on"] = pair_attr(9, bright=tertiary_bright)
         theme["tertiary_off"] = pair_attr(9, curses.A_DIM, bright=tertiary_bright)
-        theme["record_input_metering_enabled"] = record_input_metering_enabled
         theme["text_bold_enabled"] = text_bold_enabled
         theme["text_uppercase_enabled"] = text_uppercase_enabled
 
@@ -3421,16 +3592,20 @@ def ui_loop(stdscr, seq, colors=None):
     tab_1_binding = str(_colors.get("hotkey_tab_1", "F1")).strip() or "F1"
     tab_2_binding = str(_colors.get("hotkey_tab_2", "F2")).strip() or "F2"
     tab_3_binding = str(_colors.get("hotkey_tab_3", "F3")).strip() or "F3"
+    tab_4_binding = str(_colors.get("hotkey_tab_4", "x")).strip() or "x"
     keymap.set_binding("tab_1", tab_1_binding)
     keymap.set_binding("tab_2", tab_2_binding)
     keymap.set_binding("tab_3", tab_3_binding)
-    controller = Controller(seq, keymap)
+    keymap.set_binding("tab_4", tab_4_binding)
+    controller = Controller(seq, keymap, _export_settings)
     controller.record_input_metering_enabled = record_input_metering_enabled
+    controller.sort_audio_tracks_by_type_enabled = sort_audio_tracks_by_type_enabled
     file_menu_label = keymap.label("file_menu")
     mode_key_label = keymap.label("mode_toggle")
     tab_1_label = keymap.label("tab_1")
     tab_2_label = keymap.label("tab_2")
     tab_3_label = keymap.label("tab_3")
+    tab_4_label = keymap.label("tab_4")
     clear_key_label = keymap.label("clear_pattern")
     length_dec_label = keymap.label("pattern_length_dec")
     length_inc_label = keymap.label("pattern_length_inc")
@@ -3710,9 +3885,13 @@ def ui_loop(stdscr, seq, colors=None):
                 tab_1_label,
                 tab_2_label,
                 tab_3_label,
+                tab_4_label,
+                controller.export_eq_enabled,
+                controller.export_tape_enabled,
                 clear_key_label,
                 length_dec_label,
                 length_inc_label,
+                ui_options,
                 theme
             )
 

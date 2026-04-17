@@ -9,14 +9,14 @@ from scipy.io import wavfile
 from .config import (
     ACCENT_TRACK,
     GRID_COLS,
-    GROUP_COL,
+    CLEAR_COL,
     HUMANIZE_COL,
     LOAD_COL,
     PAN_COL,
     PREVIEW_COL,
     PATTERN_MENU_ITEMS,
     PATTERNS,
-    PROB_COL,
+    REC_COL,
     STEPS,
     TRACK_PITCH_COL,
     TRACKS,
@@ -145,7 +145,7 @@ def draw(
     grid_bottom = h - 2
     draw_box(grid_left, grid_top, grid_right, grid_bottom, theme["frame"])
 
-    tabs = ["Sequencer", "Audio", "Mixer"]
+    tabs = ["seq", "Audio", "mix"]
     tx = 3
     for i, label in enumerate(tabs):
         tab_text = f"┌ {label} ┐"
@@ -234,9 +234,9 @@ def draw(
             return 2
         if col == HUMANIZE_COL:
             return 3
-        if col == PROB_COL:
+        if col == REC_COL:
             return 4
-        if col == GROUP_COL:
+        if col == CLEAR_COL:
             return 1
         if col == TRACK_PITCH_COL:
             return 3
@@ -334,15 +334,15 @@ def draw(
                 (LOAD_COL, "↓"),
                 (PAN_COL, f"P{seq.get_audio_track_pan(seq.view_pattern, t)}"),
                 (HUMANIZE_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
-                (PROB_COL, "●"),
-                (GROUP_COL, "X"),
+                (REC_COL, "●"),
+                (CLEAR_COL, "X"),
                 (TRACK_PITCH_COL, "N"),
             ]
             for col, char in cols:
                 safe_add(y, x, "| ", theme["divider"])
                 x += 2
                 cell_w = col_cell_width(col)
-                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (curses.A_REVERSE if (cursor_x == col and cursor_y == row_idx) else 0)
+                cell_attr = (theme["record"] if col == REC_COL else row_attr) | (curses.A_REVERSE if (cursor_x == col and cursor_y == row_idx) else 0)
                 safe_add(y, x, f" {char:>{cell_w}} ", cell_attr)
                 x += cell_w + 2
         else:
@@ -363,10 +363,10 @@ def draw(
                 elif s == HUMANIZE_COL:
                     char = f"{seq.seq_track_humanize[t]}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
-                elif s == PROB_COL:
+                elif s == REC_COL:
                     char = f"%{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
-                elif s == GROUP_COL:
+                elif s == CLEAR_COL:
                     char = str(seq.seq_track_group[t]) if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 elif s == TRACK_PITCH_COL:
@@ -389,7 +389,7 @@ def draw(
                     if s >= seq.pattern_length[seq.view_pattern]:
                         cell_attr = theme["muted"]
 
-                sep = "| " if s in [PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL] or (s < STEPS and s % 4 == 0) else "  "
+                sep = "| " if s in [PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL] or (s < STEPS and s % 4 == 0) else "  "
                 safe_add(y, x, sep, theme["divider"])
                 x += len(sep)
                 cell_w = col_cell_width(s)
@@ -451,9 +451,9 @@ def draw(
         help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
     elif active_tab == 1 and cursor_x == HUMANIZE_COL:
         help_line = "Volume: 0..9. Type 0-9 to set."
-    elif active_tab == 1 and cursor_x == PROB_COL:
+    elif active_tab == 1 and cursor_x == REC_COL:
         help_line = "Record input device / level monitor (2-pass capture)"
-    elif active_tab == 1 and cursor_x == GROUP_COL:
+    elif active_tab == 1 and cursor_x == CLEAR_COL:
         help_line = "Clear current audio track sample"
     elif active_tab == 1 and cursor_x == TRACK_PITCH_COL:
         help_line = "Rename current track sample"
@@ -468,9 +468,9 @@ def draw(
         help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
     elif cursor_x == HUMANIZE_COL:
         help_line = "H Humanize: timing/velocity randomization per track (0-100). Type digits to set."
-    elif cursor_x == PROB_COL:
+    elif cursor_x == REC_COL:
         help_line = "% Probability: chance that a step triggers on this track (0-100). Type digits to set."
-    elif cursor_x == GROUP_COL:
+    elif cursor_x == CLEAR_COL:
         help_line = "Group: 0=off, 1-9=mute group. Tracks with same group choke each other."
     elif cursor_x == TRACK_PITCH_COL:
         help_line = "Track pitch: 0..24 scale (12 = no shift). Type digits to set."
@@ -959,7 +959,7 @@ class Controller:
         if col == HUMANIZE_COL:
             value = max(0, min(100, value))
             self.seq.set_track_humanize(self.cursor_y, value)
-        elif col == PROB_COL:
+        elif col == REC_COL:
             value = max(0, min(100, value))
             self.seq.set_track_probability(self.cursor_y, value)
         elif col == TRACK_PITCH_COL:
@@ -1975,7 +1975,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL]
                     nxt = cols[0]
                     for c in cols:
                         if c > self.cursor_x:
@@ -2010,7 +2010,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL]
                     prev = cols[-1]
                     for c in reversed(cols):
                         if c < self.cursor_x:
@@ -2077,9 +2077,9 @@ class Controller:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL]
             else:
-                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL]
             next_idx = 0
             for i, col in enumerate(cycle):
                 if col > self.cursor_x:
@@ -2097,9 +2097,9 @@ class Controller:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL]
             else:
-                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, REC_COL, CLEAR_COL, TRACK_PITCH_COL]
             prev_idx = len(cycle) - 1
             for i in range(len(cycle) - 1, -1, -1):
                 if cycle[i] < self.cursor_x:
@@ -2553,14 +2553,14 @@ class Controller:
             elif self.active_tab == 1 and self.cursor_x == HUMANIZE_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
-            elif self.active_tab == 1 and self.cursor_x == PROB_COL:
+            elif self.active_tab == 1 and self.cursor_x == REC_COL:
                 pass
             elif self.cursor_x == PREVIEW_COL:
                 pass
             elif self.cursor_x == PAN_COL:
                 if velocity > 0:
                     self.seq.set_track_pan(self.cursor_y, velocity)
-            elif self.cursor_x == GROUP_COL:
+            elif self.cursor_x == CLEAR_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.set_track_group(self.cursor_y, velocity)
             elif self.cursor_x == TRACK_PITCH_COL:
@@ -2568,8 +2568,8 @@ class Controller:
                     self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
             elif self.cursor_x == HUMANIZE_COL:
                 self._apply_inline_track_value(HUMANIZE_COL, velocity)
-            elif self.cursor_x == PROB_COL:
-                self._apply_inline_track_value(PROB_COL, velocity)
+            elif self.cursor_x == REC_COL:
+                self._apply_inline_track_value(REC_COL, velocity)
             elif self.cursor_x == LOAD_COL:
                 pass
             elif self.edit_mode == "ratchet":
@@ -2671,9 +2671,9 @@ class Controller:
                     self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, 5)
                 elif self.cursor_x == HUMANIZE_COL:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, 9)
-                elif self.cursor_x == PROB_COL:
+                elif self.cursor_x == REC_COL:
                     self._open_record_overlay()
-                elif self.cursor_x == GROUP_COL:
+                elif self.cursor_x == CLEAR_COL:
                     ok, message = self.seq.clear_audio_track_sample(self.seq.view_pattern, track_idx)
                     self.status_message = message
                 elif self.cursor_x == TRACK_PITCH_COL:
@@ -2694,13 +2694,13 @@ class Controller:
                 else:
                     self.humanize_edit_active = True
                     self.humanize_edit_input = ""
-            elif self.cursor_x == PROB_COL:
+            elif self.cursor_x == REC_COL:
                 if self.cursor_y == ACCENT_TRACK:
                     self.status_message = "Accent track has no probability"
                 else:
                     self.probability_edit_active = True
                     self.probability_edit_input = ""
-            elif self.cursor_x == GROUP_COL:
+            elif self.cursor_x == CLEAR_COL:
                 self.status_message = "Set group with number keys 0-9 (0 = off)"
             elif self.cursor_x == TRACK_PITCH_COL:
                 self.status_message = "Track pitch: type 0..24 (12 = no shift)"

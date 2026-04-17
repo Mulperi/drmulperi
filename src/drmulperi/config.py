@@ -6,11 +6,10 @@ CHAIN_MAX_STEPS = 16
 # Negative values never collide with step indices (0..max_step_count-1).
 LOAD_COL        = -1
 PREVIEW_COL     = -2
-PROB_COL        = -3
-GROUP_COL       = -4
+REC_COL        = -3
+CLEAR_COL       = -4
 TRACK_PITCH_COL = -5
 PATTERNS = 4
-DEFAULT_KIT_PATH = ""
 KEYMAP_PATH = "keymap.ini"
 SETTINGS_PATH = "settings.ini"
 
@@ -24,6 +23,7 @@ DEFAULT_KEYMAP = {
     "tab_1": "F1",
     "tab_2": "F2",
     "tab_3": "F3",
+    "tab_4": "X",
     "patterns_overlay": "E,O",
     "mode_toggle": "V",
     "clear_pattern": "N",
@@ -36,7 +36,7 @@ DEFAULT_KEYMAP = {
     "chain_edit": "C",
     "pattern_length_dec": "CODE:-1",
     "pattern_length_inc": "CODE:-1",
-    "pattern_export": "X",
+    "pattern_export": "CODE:-1",
     "pattern_load": "L",
     "kit_load": "K",
     "pattern_prev": "Q",
