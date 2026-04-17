@@ -139,9 +139,23 @@ def draw(
     stdscr.clear()
     h, w = stdscr.getmaxyx()
 
-    def safe_add(y, x, text, attr=0):
+    def safe_add(y, x, text, attr=0, transform_case=True):
+        """Safely draw text in curses with clipping and optional global text transforms.
+
+        Use transform_case=False for user-provided filenames/paths so their original
+        casing is preserved.
+        """
         if y < 0 or y >= h or x < 0 or x >= w:
             return
+        if not isinstance(text, str):
+            text = str(text)
+        if transform_case:
+            if theme.get("text_uppercase_enabled", True):
+                text = text.upper()
+            else:
+                text = text.lower()
+        if theme.get("text_bold_enabled", False):
+            attr = (attr or 0) | curses.A_BOLD
         max_len = w - x
         if max_len <= 0:
             return
@@ -173,10 +187,10 @@ def draw(
             return
         draw_hline(y0, x0 + 1, x1 - 1, "─", attr)
         draw_hline(y1, x0 + 1, x1 - 1, "─", attr)
-        safe_add(y0, x0, "╭", attr)
-        safe_add(y0, x1, "╮", attr)
-        safe_add(y1, x0, "╰", attr)
-        safe_add(y1, x1, "╯", attr)
+        safe_add(y0, x0, "┌", attr)
+        safe_add(y0, x1, "┐", attr)
+        safe_add(y1, x0, "└", attr)
+        safe_add(y1, x1, "┘", attr)
         for y in range(y0 + 1, y1):
             safe_add(y, x0, "│", attr)
             safe_add(y, x1, "│", attr)
@@ -188,19 +202,20 @@ def draw(
 
     frame_attr = theme["record"] if record_capture_active else theme["frame"]
 
+    area_prompt = h - 1
     outer_left = 0
     outer_top = 0
     outer_right = w - 1
-    outer_bottom = h - 1
+    outer_bottom = h - 2
     draw_box(outer_left, outer_top, outer_right, outer_bottom, frame_attr)
 
     header_left = 2
     header_right = w - 3
-    menu_y = 1
+    area_menubar = 1
     grid_left = 2
     grid_right = w - 3
     grid_top = 2
-    grid_bottom = h - 2
+    grid_bottom = h - 3
     draw_box(grid_left, grid_top, grid_right, grid_bottom, frame_attr)
 
     mode = {
@@ -236,8 +251,10 @@ def draw(
         if pattern_menu_active and pattern_menu_kind == menu_key:
             menu_attr = theme["title"]
         if header_focus and header_section == "params" and header_param == menu_key:
-            menu_attr = menu_attr | curses.A_REVERSE
+            menu_attr = menu_attr | theme["selected"]
         safe_add(outer_top, menu_x, menu_label, menu_attr)
+        if menu_key in {"file", "pattern"} and len(menu_label) > 2:
+            safe_add(outer_top, menu_x + 1, menu_label[1], menu_attr | curses.A_UNDERLINE)
         menu_x += len(menu_label) + 1
 
     tabs = ["Sequencer", "Audio", "Mixer"]
@@ -248,8 +265,8 @@ def draw(
         if i == active_tab:
             attr = theme["title"]
         if header_focus and header_section == "tabs" and i == active_tab:
-            attr = attr | curses.A_REVERSE
-        safe_add(menu_y, tx, tab_text, attr)
+            attr = attr | theme["selected"]
+        safe_add(area_menubar, tx, tab_text, attr)
         tx += len(tab_text) + 1
 
     content_x = max(header_left + 2, tx + 2)
@@ -284,7 +301,7 @@ def draw(
                 song_parts.append(label)
     song_line = "-".join(song_parts) if song_parts else "-"
 
-    controls_y = menu_y
+    controls_y = area_menubar
 
     grid_content_x = grid_left + 2
     playhead_y = grid_top + 1
@@ -392,8 +409,8 @@ def draw(
             safe_add(y, x, "  ", theme["divider"])
             x += 2
             body = f"[{sample_field}]" if (cursor_x == 0 and cursor_y == row_idx) else f" {sample_field} "
-            attr = row_attr | (curses.A_REVERSE if (cursor_x == 0 and cursor_y == row_idx) else 0)
-            safe_add(y, x, body, attr)
+            attr = row_attr | (theme["selected"] if (cursor_x == 0 and cursor_y == row_idx) else 0)
+            safe_add(y, x, body, attr, transform_case=False)
             x += len(body)
             cols = [
                 (PREVIEW_COL, "▶"),
@@ -408,7 +425,7 @@ def draw(
                 safe_add(y, x, "| ", theme["divider"])
                 x += 2
                 cell_w = col_cell_width(col)
-                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (curses.A_REVERSE if (cursor_x == col and cursor_y == row_idx) else 0)
+                cell_attr = (theme["record"] if col == PROB_COL else row_attr) | (theme["selected"] if (cursor_x == col and cursor_y == row_idx) else 0)
                 safe_add(y, x, f" {char:>{cell_w}} ", cell_attr)
                 x += cell_w + 2
         elif active_tab == 2:
@@ -432,7 +449,7 @@ def draw(
                 elif idx > 0:
                     safe_add(y, x, "  ", theme["divider"])
                     x += 2
-                cell_attr = base_attr | (curses.A_REVERSE if (cursor_x == idx and cursor_y == row_idx) else 0)
+                cell_attr = base_attr | (theme["selected"] if (cursor_x == idx and cursor_y == row_idx) else 0)
                 safe_add(y, x, f"{text:>2}", cell_attr)
                 x += 2
         else:
@@ -465,7 +482,7 @@ def draw(
                     # Highlight each beat-start dot so the rhythm grid is easier to read.
                     cell_attr = theme["text"]
                 if cursor_x == s and cursor_y == t:
-                    cell_attr = cell_attr | curses.A_REVERSE
+                    cell_attr = cell_attr | theme["selected"]
                 safe_add(y, x, char, cell_attr)
                 x += 1
 
@@ -501,7 +518,7 @@ def draw(
                 cell_w = col_cell_width(s)
                 body = f"{char:>{cell_w}}"
                 if cursor_x == s and cursor_y == t:
-                    cell_attr = cell_attr | curses.A_REVERSE
+                    cell_attr = cell_attr | theme["selected"]
                 safe_add(y, x, body, cell_attr)
                 x += len(body)
 
@@ -510,6 +527,18 @@ def draw(
 
     prompt_line = ""
     help_line = ""
+    prompt_transform_case = True
+
+    def current_preview_name():
+        """Return the current sample name for preview help text in Audio and Sequencer views."""
+        if active_tab == 1:
+            if cursor_y < TRACKS - 1 and track_order:
+                active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
+                return str(seq.get_audio_track_name(seq.view_pattern, active_track))
+            return "-"
+        if cursor_y < TRACKS - 1 and 0 <= cursor_y < len(seq.engine.sample_names):
+            return str(seq.engine.sample_names[cursor_y])
+        return "Accent track"
     if header_focus:
         if header_section == "tabs":
             help_line = "Tabs: Left/Right switch view tabs. Down enters header controls."
@@ -565,7 +594,8 @@ def draw(
     elif active_tab == 1 and cursor_x == 0:
         help_line = "Toggle track mode: Pattern/Song. Song tracks play only when SONG mode is ON."
     elif active_tab == 1 and cursor_x == PREVIEW_COL:
-        help_line = "Preview sample"
+        help_line = f"Preview sample: {current_preview_name()}"
+        prompt_transform_case = False
     elif active_tab == 1 and cursor_x == LOAD_COL:
         help_line = "Load sample"
     elif active_tab == 1 and cursor_x == PAN_COL:
@@ -581,8 +611,10 @@ def draw(
     elif active_tab == 1 and cursor_y < TRACKS - 1:
         active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
         help_line = f"AUDIO TRACK SAMPLE: {seq.get_audio_track_name(seq.view_pattern, active_track)}"
+        prompt_transform_case = False
     elif cursor_x == PREVIEW_COL:
-        help_line = "Preview sample"
+        help_line = f"Preview sample: {current_preview_name()}"
+        prompt_transform_case = False
     elif cursor_x == LOAD_COL:
         help_line = "Load sample"
     elif cursor_x == PAN_COL:
@@ -597,6 +629,7 @@ def draw(
         help_line = "Track pitch: 0..24 scale (12 = no shift). Type digits to set."
     elif cursor_y < TRACKS - 1:
         help_line = f"SAMPLE: {seq.engine.sample_names[cursor_y]}  (Enter on ▶ preview, Enter on ↓ load)"
+        prompt_transform_case = False
     else:
         help_line = "SAMPLE: Accent track (no sample file)"
 
@@ -612,8 +645,8 @@ def draw(
         prompt_line = help_line
 
     if prompt_line:
-        prompt_y = min(row_start + visible_rows + (1 if active_tab in [1, 2] else 0), grid_bottom - 1)
-        safe_add(prompt_y, grid_content_x, prompt_line[:grid_right - grid_content_x], theme["hint"])
+        prompt_col = 0
+        safe_add(area_prompt, prompt_col, prompt_line[:max(0, w - 1)], theme["prompt"], transform_case=prompt_transform_case)
 
     # Always-visible current sample label at bottom-right of sequencer area.
     if active_tab == 1 and cursor_y < TRACKS - 1 and track_order:
@@ -626,7 +659,7 @@ def draw(
     sample_label = f"SAMPLE: {current_sample_name}"
     sample_y = grid_bottom - 1
     sample_x = max(grid_left + 2, grid_right - len(sample_label) - 1)
-    safe_add(sample_y, sample_x, sample_label[: max(0, grid_right - sample_x)], theme["muted"])
+    safe_add(sample_y, sample_x, sample_label[: max(0, grid_right - sample_x)], theme["muted"], transform_case=False)
 
     if pattern_menu_active:
         if pattern_menu_kind == "pattern":
@@ -648,7 +681,7 @@ def draw(
         for i, item in enumerate(items):
             item_attr = theme["text"]
             if i == pattern_menu_index:
-                item_attr = item_attr | curses.A_REVERSE
+                item_attr = item_attr | theme["selected"]
             safe_add(box_top + 1 + i, box_left + 2, item[: box_width - 4], item_attr)
 
     if patterns_overlay_active:
@@ -697,7 +730,7 @@ def draw(
             y = box_top + 2 + (i - start)
             attr = theme["muted"] if row_is_empty[i] else theme["text"]
             if i == patterns_overlay_index:
-                attr = attr | curses.A_REVERSE
+                attr = attr | theme["selected"]
             safe_add(y, box_left + 2, rows[i][: box_width - 4], attr)
 
     if chop_overlay_active:
@@ -721,14 +754,14 @@ def draw(
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
         src = os.path.basename(seq.chop_preview_path) if seq.chop_preview_path else "-"
-        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"])
+        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"], transform_case=False)
         for i, row in enumerate(rows):
             y = box_top + 3 + i
             if y >= box_bottom:
                 break
             attr = theme["text"]
             if i == chop_overlay_index:
-                attr = attr | curses.A_REVERSE
+                attr = attr | theme["selected"]
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
 
     if import_overlay_active:
@@ -753,14 +786,14 @@ def draw(
         for y in range(box_top + 1, box_bottom):
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
-        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"])
+        safe_add(box_top + 2, box_left + 2, f"Source: {src}"[: box_width - 4], theme["muted"], transform_case=False)
         for i, row in enumerate(rows):
             y = box_top + 3 + i
             if y >= box_bottom:
                 break
             attr = theme["text"]
             if i == import_overlay_index:
-                attr = attr | curses.A_REVERSE
+                attr = attr | theme["selected"]
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
 
     if record_overlay_active:
@@ -800,7 +833,7 @@ def draw(
         safe_add(box_top + 4, box_left + 4, f"Input Device: {selected_dev}"[: box_width - 6], theme["text"])
         source_text = "Input Source: " + (record_input_sources[record_input_source_index]["label"] if record_input_sources and 0 <= record_input_source_index < len(record_input_sources) else "Default")
         safe_add(box_top + 5, box_left + 2, ">" if record_overlay_index == 2 else " ", theme["text"])
-        safe_add(box_top + 5, box_left + 4, source_text[: box_width - 6], theme["text"])
+        safe_add(box_top + 5, box_left + 4, source_text[: box_width - 6], theme["text"], transform_case=False)
         draw_options_line(
             box_top + 6,
             "Precount: ",
@@ -881,7 +914,7 @@ def draw(
 
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
         path_line = f"Path: {file_browser_path}"
-        safe_add(box_top + 2, box_left + 2, path_line[: box_width - 4], theme["muted"])
+        safe_add(box_top + 2, box_left + 2, path_line[: box_width - 4], theme["muted"], transform_case=False)
 
         max_rows = box_height - 4
         start = 0
@@ -894,8 +927,8 @@ def draw(
             label = visible_items[i]["name"]
             item_attr = theme["text"]
             if i == file_browser_index and file_browser_items:
-                item_attr = item_attr | curses.A_REVERSE
-            safe_add(row, box_left + 2, label[: box_width - 4], item_attr)
+                item_attr = item_attr | theme["selected"]
+            safe_add(row, box_left + 2, label[: box_width - 4], item_attr, transform_case=False)
 
     if audio_export_options_active:
         title = "AUDIO EXPORT OPTIONS (Arrows/Space change, Enter export, Esc cancel)"
@@ -955,7 +988,7 @@ def draw(
             scope,
             audio_export_options_index == 3,
         )
-        export_attr = theme["text"] | (curses.A_REVERSE if audio_export_options_index == (row_count - 1) else 0)
+        export_attr = theme["text"] | (theme["selected"] if audio_export_options_index == (row_count - 1) else 0)
         safe_add(box_top + 8, box_left + 4, "[ Export -> Filename ]", export_attr)
 
     if kit_export_options_active:
@@ -984,7 +1017,7 @@ def draw(
                 selected = (value == selected_value)
                 attr = theme["text"] if selected else theme["muted"]
                 if selected_row and selected:
-                    attr = attr | curses.A_REVERSE
+                    attr = attr | theme["selected"]
                 safe_add(y, x, text, attr)
                 x += len(text) + 2
 
@@ -1009,31 +1042,32 @@ def draw(
             channels,
             kit_export_options_index == 2,
         )
-        export_attr = theme["text"] | (curses.A_REVERSE if kit_export_options_index == (row_count - 1) else 0)
+        export_attr = theme["text"] | (theme["selected"] if kit_export_options_index == (row_count - 1) else 0)
         safe_add(box_top + 7, box_left + 4, "[ Export Kit -> Folder ]", export_attr)
 
-    # Bottom-left transport indicator on the outer border.
+    # Footer row sits above area_prompt.
+    footer_row = outer_bottom
     transport_icon = "▶" if seq.playing else "▢"
     transport_attr = frame_attr
-    safe_add(outer_bottom, outer_left + 2, transport_icon, transport_attr)
+    safe_add(footer_row, outer_left + 2, transport_icon, transport_attr)
     compact_pattern_line = " ".join(pattern_line.split())
     footer_patterns = f"PATTERNS {compact_pattern_line}"
     footer_song = f"SONG {song_line}"
     footer_x = outer_left + 6
     max_w = max(0, outer_right - (outer_left + 8))
-    patterns_attr = theme["pattern_manual"] if not seq.chain_enabled else theme["pattern_chain_off"]
-    song_attr = theme["chain_on"] if seq.chain_enabled else theme["chain_off"]
-    safe_add(outer_bottom, footer_x, footer_patterns[:max_w], patterns_attr)
+    patterns_attr = theme["tertiary_on"] if not seq.chain_enabled else theme["tertiary_off"]
+    song_attr = theme["tertiary_on"] if seq.chain_enabled else theme["tertiary_off"]
+    safe_add(footer_row, footer_x, footer_patterns[:max_w], patterns_attr)
     footer_x += len(footer_patterns)
-    safe_add(outer_bottom, footer_x, "   "[:max(0, max_w - len(footer_patterns))], frame_attr)
+    safe_add(footer_row, footer_x, "   "[:max(0, max_w - len(footer_patterns))], frame_attr)
     footer_x += 3
-    safe_add(outer_bottom, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
+    safe_add(footer_row, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
     project_dir = os.path.basename(os.path.dirname(seq.pattern_path)) if seq.pattern_path else ""
     if not project_dir:
         project_dir = "."
     project_label = f"PROJECT:{project_dir}"
     project_x = max(outer_left + 2, outer_right - len(project_label) - 2)
-    safe_add(outer_bottom, project_x, project_label, theme["muted"])
+    safe_add(footer_row, project_x, project_label, theme["muted"])
 
     stdscr.refresh()
 
@@ -3117,17 +3151,20 @@ class Controller:
         return True
 
 # ---------- INPUT ----------
-def ui_loop(stdscr, seq):
+def ui_loop(stdscr, seq, colors=None):
     """Main curses event/render loop."""
     curses.set_escdelay(25)
     curses.curs_set(0)
     stdscr.nodelay(True)
 
+    _colors = colors if isinstance(colors, dict) else {}
     theme = {
         "frame": 0,
         "title": curses.A_BOLD,
         "text": 0,
         "hint": curses.A_BOLD,
+        "prompt": curses.A_BOLD,
+        "selected": curses.A_REVERSE,
         "divider": 0,
         "playhead": curses.A_BOLD,
         "muted": curses.A_DIM,
@@ -3143,6 +3180,10 @@ def ui_loop(stdscr, seq):
         "record": curses.A_BOLD,
         "meter_fill": curses.A_BOLD,
         "meter_hot": curses.A_BOLD,
+        "tertiary_on": curses.A_BOLD,
+        "tertiary_off": curses.A_DIM,
+        "text_bold_enabled": False,
+        "text_uppercase_enabled": True,
     }
     if curses.has_colors():
         curses.start_color()
@@ -3150,33 +3191,83 @@ def ui_loop(stdscr, seq):
             curses.use_default_colors()
         except curses.error:
             pass
-        curses.init_pair(1, curses.COLOR_CYAN, -1)    # frames
-        curses.init_pair(2, curses.COLOR_WHITE, -1)   # text
-        curses.init_pair(3, curses.COLOR_GREEN, -1)   # playhead
-        curses.init_pair(4, curses.COLOR_YELLOW, -1)  # accent/high velocity
-        curses.init_pair(5, curses.COLOR_BLUE, -1)    # dividers
-        curses.init_pair(6, curses.COLOR_RED, -1)     # record
-        curses.init_pair(7, curses.COLOR_GREEN, -1)   # meter fill
+        color_map = {
+            "black": curses.COLOR_BLACK,
+            "red": curses.COLOR_RED,
+            "green": curses.COLOR_GREEN,
+            "yellow": curses.COLOR_YELLOW,
+            "blue": curses.COLOR_BLUE,
+            "magenta": curses.COLOR_MAGENTA,
+            "cyan": curses.COLOR_CYAN,
+            "white": curses.COLOR_WHITE,
+        }
 
-        theme["frame"] = curses.color_pair(1)
-        theme["title"] = curses.color_pair(1) | curses.A_BOLD
-        theme["text"] = curses.color_pair(2)
-        theme["hint"] = curses.color_pair(4) | curses.A_BOLD
-        theme["divider"] = curses.color_pair(5)
-        theme["playhead"] = curses.color_pair(3) | curses.A_BOLD
-        theme["muted"] = curses.color_pair(2) | curses.A_DIM
-        theme["accent"] = curses.color_pair(4) | curses.A_BOLD
-        theme["chain_on"] = curses.color_pair(3) | curses.A_BOLD
-        theme["chain_off"] = curses.color_pair(2) | curses.A_DIM
-        theme["pattern_manual"] = curses.color_pair(3) | curses.A_BOLD
-        theme["pattern_chain_off"] = curses.color_pair(2) | curses.A_DIM
-        theme["velocity_low"] = curses.color_pair(2) | curses.A_DIM
-        theme["velocity_high"] = curses.color_pair(2) | curses.A_BOLD
-        theme["midi_on"] = curses.color_pair(3) | curses.A_BOLD
-        theme["midi_off"] = curses.color_pair(2) | curses.A_DIM
-        theme["record"] = curses.color_pair(6) | curses.A_BOLD
-        theme["meter_fill"] = curses.color_pair(7) | curses.A_BOLD
-        theme["meter_hot"] = curses.color_pair(6) | curses.A_BOLD
+        def resolve_color(name, default_name):
+            raw = str(name or default_name).strip().lower()
+            is_bright = False
+            for prefix in ("bright_", "intense_"):
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):]
+                    is_bright = True
+                    break
+            return color_map.get(raw, color_map[default_name]), is_bright
+
+        def pair_attr(pair_id, base_attr=0, bright=False):
+            attr = curses.color_pair(pair_id) | base_attr
+            if bright:
+                attr |= curses.A_BOLD
+            return attr
+
+        primary_color, primary_bright = resolve_color(_colors.get("color_primary", "cyan"), "cyan")
+        text_color, text_bright = resolve_color(_colors.get("color_text", "white"), "white")
+        playhead_color, playhead_bright = resolve_color(_colors.get("color_playhead", "green"), "green")
+        accent_color, accent_bright = resolve_color(_colors.get("color_accent", "yellow"), "yellow")
+        divider_color, divider_bright = resolve_color(_colors.get("color_divider", "blue"), "blue")
+        record_color, record_bright = resolve_color(_colors.get("color_record", "red"), "red")
+        meter_color, meter_bright = resolve_color(_colors.get("color_meter", "green"), "green")
+        selection_fg_color, _selection_fg_bright = resolve_color(_colors.get("color_selection_fg", "white"), "white")
+        selection_bg_color, _selection_bg_bright = resolve_color(_colors.get("color_selection_bg", "blue"), "blue")
+        tertiary_color, tertiary_bright = resolve_color(_colors.get("color_tertiary", "yellow"), "yellow")
+        text_bold_raw = str(_colors.get("text_bold", "off")).strip().lower()
+        text_uppercase_raw = str(_colors.get("text_uppercase", "on")).strip().lower()
+        text_bold_enabled = text_bold_raw in {"1", "true", "yes", "on"}
+        text_uppercase_enabled = text_uppercase_raw in {"1", "true", "yes", "on"}
+
+        curses.init_pair(1, primary_color, -1)               # primary (frame/prompt)
+        curses.init_pair(2, text_color, -1)                  # text
+        curses.init_pair(3, playhead_color, -1)              # playhead / chain_on / midi_on
+        curses.init_pair(4, accent_color, -1)                # accent / hint / high velocity
+        curses.init_pair(5, divider_color, -1)               # dividers
+        curses.init_pair(6, record_color, -1)                # record / meter_hot
+        curses.init_pair(7, meter_color, -1)                 # meter fill
+        curses.init_pair(8, selection_fg_color, selection_bg_color)  # selected text
+        curses.init_pair(9, tertiary_color, -1)              # tertiary (footer PATTERNS/SONG)
+
+        theme["frame"] = pair_attr(1, bright=primary_bright)
+        theme["title"] = pair_attr(1, curses.A_BOLD, bright=primary_bright)
+        theme["prompt"] = pair_attr(1, curses.A_BOLD, bright=primary_bright)
+        theme["selected"] = curses.A_REVERSE
+        theme["text"] = pair_attr(2, bright=text_bright)
+        theme["hint"] = pair_attr(4, curses.A_BOLD, bright=accent_bright)
+        theme["divider"] = pair_attr(5, bright=divider_bright)
+        theme["playhead"] = pair_attr(3, curses.A_BOLD, bright=playhead_bright)
+        theme["muted"] = pair_attr(2, curses.A_DIM, bright=text_bright)
+        theme["accent"] = pair_attr(4, curses.A_BOLD, bright=accent_bright)
+        theme["chain_on"] = pair_attr(3, curses.A_BOLD, bright=playhead_bright)
+        theme["chain_off"] = pair_attr(2, curses.A_DIM, bright=text_bright)
+        theme["pattern_manual"] = pair_attr(3, curses.A_BOLD, bright=playhead_bright)
+        theme["pattern_chain_off"] = pair_attr(2, curses.A_DIM, bright=text_bright)
+        theme["velocity_low"] = pair_attr(2, curses.A_DIM, bright=text_bright)
+        theme["velocity_high"] = pair_attr(2, curses.A_BOLD, bright=text_bright)
+        theme["midi_on"] = pair_attr(3, curses.A_BOLD, bright=playhead_bright)
+        theme["midi_off"] = pair_attr(2, curses.A_DIM, bright=text_bright)
+        theme["record"] = pair_attr(6, curses.A_BOLD, bright=record_bright)
+        theme["meter_fill"] = pair_attr(7, curses.A_BOLD, bright=meter_bright)
+        theme["meter_hot"] = pair_attr(6, curses.A_BOLD, bright=record_bright)
+        theme["tertiary_on"] = pair_attr(9, curses.A_BOLD, bright=tertiary_bright)
+        theme["tertiary_off"] = pair_attr(9, curses.A_DIM, bright=tertiary_bright)
+        theme["text_bold_enabled"] = text_bold_enabled
+        theme["text_uppercase_enabled"] = text_uppercase_enabled
 
     keymap = Keymap()
     controller = Controller(seq, keymap)

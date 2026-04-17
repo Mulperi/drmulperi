@@ -2171,12 +2171,23 @@ class Sequencer:
 
     def set_step_velocity(self, track, step, velocity):
         """Set step velocity (or accent on/off), with idle preview on note create."""
-        prev = self.grid[self.view_pattern][track][step]
+        if track < 0 or track >= TRACKS or step < 0:
+            return
+        if self.view_pattern < 0 or self.view_pattern >= len(self.grid):
+            return
+        pattern_grid = self.grid[self.view_pattern]
+        if track >= len(pattern_grid):
+            return
+        row = pattern_grid[track]
+        if step >= len(row):
+            return
+
+        prev = row[step]
         if track == ACCENT_TRACK:
-            self.grid[self.view_pattern][track][step] = 1 if velocity > 0 else 0
+            row[step] = 1 if velocity > 0 else 0
         else:
-            self.grid[self.view_pattern][track][step] = max(0, min(9, velocity))
-            new_val = self.grid[self.view_pattern][track][step]
+            row[step] = max(0, min(9, velocity))
+            new_val = row[step]
             if prev == 0 and new_val > 0:
                 self._preview_note_if_idle(track, new_val)
         self.dirty = True

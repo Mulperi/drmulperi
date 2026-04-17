@@ -230,3 +230,43 @@ Save project writes `<project_folder_name>_data.json` inside the saved folder.
 `keymap.ini` is loaded once at startup.
 
 You can customize bindings there (restart app after editing).
+
+## settings.ini Reference
+
+`settings.ini` is created automatically on first run. All sections and keys are optional — missing keys fall back to defaults.
+
+```ini
+[audio]
+sample_rate = 48000   # audio device sample rate (Hz)
+duplex = off          # off | on | auto
+
+[sequencer]
+default_kit = defaultkit   # kit folder loaded for new projects
+follow_song = on            # on | off — song playback advances the viewed pattern
+
+[ui]
+color_primary      = cyan     # frame borders, prompt line, top-menu title
+color_text         = white    # general text, step cells, muted labels
+color_playhead     = green    # playhead marker, chain/SONG on, MIDI on
+color_accent       = yellow   # hints, accented steps, high-velocity labels
+color_divider      = blue     # column/row divider lines
+color_record       = red      # recording indicator, hot meter segment
+color_meter        = green    # normal meter fill bars
+color_selection_fg = white    # text color inside the selected cell / cursor
+color_selection_bg = red      # background color of the selected cell / cursor
+color_tertiary     = yellow   # footer PATTERNS / SONG toggle labels
+text_bold = off               # on | off — force bold attribute on all rendered UI text
+text_uppercase = on           # on = UI labels uppercased, off = UI labels lowercased (filenames/paths keep original case)
+```
+
+### Available color names
+
+Standard names:
+`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`
+
+Bright/intense names (prefix form):
+`bright_black`, `bright_red`, `bright_green`, `bright_yellow`, `bright_blue`, `bright_magenta`, `bright_cyan`, `bright_white`
+
+You can also use `intense_` as a synonym for `bright_` (for example `intense_cyan`).
+
+Bright/intense values are rendered using terminal bold/high-intensity attributes on top of the base ANSI color. Exact appearance depends on your terminal emulator and color theme.

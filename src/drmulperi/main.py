@@ -41,10 +41,37 @@ def _load_sequencer_settings(path=SETTINGS_PATH):
     return default_kit, follow_song
 
 
+def _load_ui_settings(path=SETTINGS_PATH):
+    """Load UI settings from settings.ini."""
+    parser = configparser.ConfigParser()
+    parser.read(path)
+    section = parser["ui"] if "ui" in parser else {}
+    defaults = {
+        "color_primary": "cyan",
+        "color_text": "white",
+        "color_playhead": "green",
+        "color_accent": "yellow",
+        "color_divider": "blue",
+        "color_record": "red",
+        "color_meter": "green",
+        "color_selection_fg": "white",
+        "color_selection_bg": "red",
+        "color_tertiary": "yellow",
+        "text_bold": "off",
+        "text_uppercase": "on",
+    }
+    colors = {}
+    for key, default in defaults.items():
+        val = str(section.get(key, default)).strip().lower()
+        colors[key] = val if val else default
+    return colors
+
+
 def main(path=SETTINGS_PATH):
     """CLI entry point."""
     parser = argparse.ArgumentParser()
     configured_default_kit, configured_follow_song = _load_sequencer_settings(path)
+    configured_colors = _load_ui_settings(path)
     parser.add_argument(
         "--kit",
         default=configured_default_kit,
@@ -89,7 +116,7 @@ def main(path=SETTINGS_PATH):
     if not pattern_arg:
         # Default startup should be a truly empty project.
         seq.new_project("new_project.json")
-    curses.wrapper(ui_loop, seq)
+    curses.wrapper(ui_loop, seq, configured_colors)
 
 
 if __name__ == "__main__":
