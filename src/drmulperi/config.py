@@ -1,16 +1,14 @@
 """Project-wide constants and default key bindings."""
 
 TRACKS = 9
-STEPS = 32
 CHAIN_MAX_STEPS = 16
-PREVIEW_COL = STEPS
-LOAD_COL = STEPS + 1
-PAN_COL = STEPS + 2
-HUMANIZE_COL = STEPS + 3
-PROB_COL = STEPS + 4
-GROUP_COL = STEPS + 5
-TRACK_PITCH_COL = STEPS + 6
-GRID_COLS = STEPS + 7
+# Column IDs for parameter columns in the sequencer grid.
+# Negative values never collide with step indices (0..max_step_count-1).
+LOAD_COL        = -1
+PREVIEW_COL     = -2
+PROB_COL        = -3
+GROUP_COL       = -4
+TRACK_PITCH_COL = -5
 PATTERNS = 4
 DEFAULT_KIT_PATH = ""
 KEYMAP_PATH = "keymap.ini"
@@ -66,10 +64,13 @@ FILE_MENU_ITEMS = [
 
 PATTERN_MENU_ITEMS = [
     "1. Patterns Overlay",
-    "2. Import From Clipboard",
-    "3. Clear Pattern",
-    "4. Copy Pattern",
-    "5. Paste Pattern",
+    "2. Add Pattern",
+    "3. Import From Clipboard",
+    "4. Import From Project",
+    "5. Copy Patterns To Clipboard",
+    "6. Clear Pattern",
+    "7. Copy Pattern",
+    "8. Paste Pattern",
 ]
 
 MIDI_NOTES = [36, 37, 38, 39, 40, 41, 42, 43]

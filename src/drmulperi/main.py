@@ -3,7 +3,7 @@ import configparser
 import curses
 import os
 
-from .config import DEFAULT_KIT_PATH, DEFAULT_SETTINGS, SETTINGS_PATH, STEPS
+from .config import DEFAULT_KIT_PATH, DEFAULT_SETTINGS, SETTINGS_PATH
 from .sequencer import Sequencer
 from .ui import ui_loop
 
@@ -39,12 +39,24 @@ def _load_sequencer_settings(path=SETTINGS_PATH):
     raw_follow_song = str(section.get("follow_song", "off")).strip().lower()
     follow_song = raw_follow_song in {"1", "true", "yes", "on"}
     raw_default_step_count = section.get("default_step_count", "16")
+    raw_max_step_count = section.get("max_step_count", "32")
+    raw_default_pattern_count = section.get("default_pattern_count", "1")
     try:
         parsed_step_count = int(str(raw_default_step_count).strip())
     except Exception:
         parsed_step_count = 16
-    default_step_count = max(1, min(STEPS, parsed_step_count))
-    return default_kit, follow_song, default_step_count
+    try:
+        parsed_max_step_count = int(str(raw_max_step_count).strip())
+    except Exception:
+        parsed_max_step_count = 32
+    try:
+        parsed_default_pattern_count = int(str(raw_default_pattern_count).strip())
+    except Exception:
+        parsed_default_pattern_count = 1
+    max_step_count = max(1, parsed_max_step_count)
+    default_step_count = max(1, min(max_step_count, parsed_step_count))
+    default_pattern_count = max(1, parsed_default_pattern_count)
+    return default_kit, follow_song, default_step_count, max_step_count, default_pattern_count
 
 
 def _load_ui_settings(path=SETTINGS_PATH):
@@ -55,7 +67,7 @@ def _load_ui_settings(path=SETTINGS_PATH):
     defaults = {
         "color_primary": "cyan",
         "color_text": "white",
-        "color_playhead": "green",
+        "color_accent": "green",
         "color_accent": "yellow",
         "color_divider": "blue",
         "color_record": "red",
@@ -63,6 +75,9 @@ def _load_ui_settings(path=SETTINGS_PATH):
         "color_selection_fg": "white",
         "color_selection_bg": "red",
         "color_tertiary": "yellow",
+        "hotkey_tab_1": "F1",
+        "hotkey_tab_2": "F2",
+        "hotkey_tab_3": "F3",
         "text_bold": "off",
         "text_uppercase": "on",
     }
@@ -76,7 +91,7 @@ def _load_ui_settings(path=SETTINGS_PATH):
 def main(path=SETTINGS_PATH):
     """CLI entry point."""
     parser = argparse.ArgumentParser()
-    configured_default_kit, configured_follow_song, configured_default_step_count = _load_sequencer_settings(path)
+    configured_default_kit, configured_follow_song, configured_default_step_count, configured_max_step_count, configured_default_pattern_count = _load_sequencer_settings(path)
     configured_colors = _load_ui_settings(path)
     parser.add_argument(
         "--kit",
@@ -119,6 +134,8 @@ def main(path=SETTINGS_PATH):
         default_new_project_kit=kit_path,
         follow_song=configured_follow_song,
         default_step_count=configured_default_step_count,
+        max_step_count=configured_max_step_count,
+        default_pattern_count=configured_default_pattern_count,
     )
     if not pattern_arg:
         # Default startup should be a truly empty project.

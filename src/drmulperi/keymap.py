@@ -148,3 +148,8 @@ class Keymap:
         except Exception:
             return ["[keys]"]
         return lines if lines else ["[keys]"]
+
+    def set_binding(self, action, raw_value):
+        """Override one action binding from a raw token string (e.g. 'F1' or 'CHAR:q')."""
+        fallback = DEFAULT_KEYMAP.get(action, "")
+        self.bindings[action] = self._parse_binding(str(raw_value or "").strip(), fallback)

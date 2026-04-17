@@ -247,7 +247,7 @@ follow_song = on            # on | off — song playback advances the viewed pat
 [ui]
 color_primary      = cyan     # frame borders, prompt line, top-menu title
 color_text         = white    # general text, step cells, muted labels
-color_playhead     = green    # playhead marker, chain/SONG on, MIDI on
+color_accent     = green    # playhead marker, chain/SONG on, MIDI on
 color_accent       = yellow   # hints, accented steps, high-velocity labels
 color_divider      = blue     # column/row divider lines
 color_record       = red      # recording indicator, hot meter segment
