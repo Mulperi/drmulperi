@@ -483,6 +483,8 @@ def draw(
         elif active_tab == 2:
             seq_pan = seq.seq_track_pan[t]
             seq_vol = seq.seq_track_volume[t]
+            seq_prob = seq.seq_track_probability[t]
+            seq_pitch = seq.seq_track_pitch[t]
             aud_pan = seq.get_audio_track_pan(seq.view_pattern, t)
             aud_vol = seq.get_audio_track_volume(seq.view_pattern, t)
             safe_add(y, x, "  ", row_attr)
@@ -491,13 +493,15 @@ def draw(
             mix_cells = [
                 (0, f"P{seq_pan}", row_attr),
                 (1, f"V{seq_vol}", row_attr),
-                (2, f"P{aud_pan}", row_attr),
-                (3, f"V{aud_vol}", row_attr),
+                (2, f"●{seq_prob}", row_attr),
+                (3, f"↔{seq_pitch:02d}", row_attr),
+                (4, f"P{aud_pan}", row_attr),
+                (5, f"V{aud_vol}", row_attr),
             ]
             for idx, text, base_attr in mix_cells:
-                if idx == 2:
-                    safe_add(y, x, "   ", row_attr)
-                    x += 3
+                if idx == 4:
+                    safe_add(y, x, "     ", row_attr)
+                    x += 5
                 elif idx > 0:
                     safe_add(y, x, "  ", row_attr)
                     x += 2
@@ -596,13 +600,13 @@ def draw(
         pattern_nav_keys = ["length", "swing", "humanize", "mode"]
         active_key = pattern_nav_keys[max(0, min(len(pattern_nav_keys) - 1, pattern_params_index))]
         if active_key == "length":
-            help_line = "Pattern steps. Left/Right changes, Enter toggles edit mode."
+            help_line = "Pattern length"
         elif active_key == "swing":
-            help_line = "Pattern swing. Left/Right changes, Enter toggles edit mode."
+            help_line = "Pattern swing"
         elif active_key == "humanize":
-            help_line = "Pattern humanize. Left/Right changes, Enter toggles edit mode."
+            help_line = "Pattern humanize"
         else:
-            help_line = "Step mode. Left/Right cycles modes (or Enter to cycle)."
+            help_line = "Step mode (velocity, ratchet, blocks, detune, pan)"
     elif header_focus:
         if header_section == "tabs":
             help_line = "Tabs: Left/Right switch view tabs. Down enters header controls."
@@ -635,8 +639,12 @@ def draw(
     elif active_tab == 2 and cursor_x == 1:
         help_line = "Mixer: Sequencer track volume (0-9). Type number to set."
     elif active_tab == 2 and cursor_x == 2:
-        help_line = "Mixer: Audio track pan (1-9). Type number to set."
+        help_line = "Mixer: Sequencer track probability (0-100). Type digits to set."
     elif active_tab == 2 and cursor_x == 3:
+        help_line = "Mixer: Sequencer track pitch (0-24). Type digits to set."
+    elif active_tab == 2 and cursor_x == 4:
+        help_line = "Mixer: Audio track pan (1-9). Type number to set."
+    elif active_tab == 2 and cursor_x == 5:
         help_line = "Mixer: Audio track volume (0-9). Type number to set."
     elif active_tab == 1 and cursor_x == 0:
         help_line = "Toggle track mode: Pattern/Song. Song tracks play only when SONG mode is ON."
@@ -888,36 +896,37 @@ def draw(
             record_overlay_index == 4,
         )
 
-        meter_y = box_bottom - 2
-        meter_left = box_left + 2
-        meter_width = max(10, box_width - 26)
-        norm = max(0.0, min(1.0, (record_level_db + 60.0) / 60.0))
-        fill = int(round(norm * meter_width))
-        hot_start = max(0, int(round(meter_width * 0.82)))
-        # DEBUG METER FIELDS: keep tick/monitor info visible to diagnose input callback path quickly.
-        if record_monitor_running:
-            peak_db = float(getattr(seq, "record_level_peak_db", -60.0)) if hasattr(seq, "record_level_peak_db") else None
-            if peak_db is None:
-                db_text = f"{record_level_db:>5.1f} dBFS t:{int(record_level_tick)}"
+        if theme.get("record_input_metering_enabled", False):
+            meter_y = box_bottom - 2
+            meter_left = box_left + 2
+            meter_width = max(10, box_width - 26)
+            norm = max(0.0, min(1.0, (record_level_db + 60.0) / 60.0))
+            fill = int(round(norm * meter_width))
+            hot_start = max(0, int(round(meter_width * 0.82)))
+            # DEBUG METER FIELDS: keep tick/monitor info visible to diagnose input callback path quickly.
+            if record_monitor_running:
+                peak_db = float(getattr(seq, "record_level_peak_db", -60.0)) if hasattr(seq, "record_level_peak_db") else None
+                if peak_db is None:
+                    db_text = f"{record_level_db:>5.1f} dBFS t:{int(record_level_tick)}"
+                else:
+                    db_text = f"{record_level_db:>5.1f} dBFS pk:{peak_db:>5.1f} t:{int(record_level_tick)}"
             else:
-                db_text = f"{record_level_db:>5.1f} dBFS pk:{peak_db:>5.1f} t:{int(record_level_tick)}"
-        else:
-            db_text = "stopped"
-        safe_add(meter_y, meter_left, "IN [", theme["hint"])
-        meter_x = meter_left + 4
-        if fill > 0:
-            normal_fill = min(fill, hot_start)
-            hot_fill = max(0, fill - hot_start)
-            if normal_fill > 0:
-                safe_add(meter_y, meter_x, "█" * normal_fill, theme["meter_fill"])
-            if hot_fill > 0:
-                safe_add(meter_y, meter_x + normal_fill, "█" * hot_fill, theme["meter_hot"])
-        if fill < meter_width:
-            safe_add(meter_y, meter_x + fill, "░" * (meter_width - fill), theme["muted"])
-        safe_add(meter_y, meter_x + meter_width, "] ", theme["hint"])
-        # DEBUG METER FIELDS: includes active monitor stream device/samplerate/channels.
-        tail = f"{db_text} {record_monitor_info}".strip()
-        safe_add(meter_y, meter_x + meter_width + 2, tail[: max(0, box_width - 4)], theme["hint"])
+                db_text = "stopped"
+            safe_add(meter_y, meter_left, "IN [", theme["hint"])
+            meter_x = meter_left + 4
+            if fill > 0:
+                normal_fill = min(fill, hot_start)
+                hot_fill = max(0, fill - hot_start)
+                if normal_fill > 0:
+                    safe_add(meter_y, meter_x, "█" * normal_fill, theme["meter_fill"])
+                if hot_fill > 0:
+                    safe_add(meter_y, meter_x + normal_fill, "█" * hot_fill, theme["meter_hot"])
+            if fill < meter_width:
+                safe_add(meter_y, meter_x + fill, "░" * (meter_width - fill), theme["muted"])
+            safe_add(meter_y, meter_x + meter_width, "] ", theme["hint"])
+            # DEBUG METER FIELDS: includes active monitor stream device/samplerate/channels.
+            tail = f"{db_text} {record_monitor_info}".strip()
+            safe_add(meter_y, meter_x + meter_width + 2, tail[: max(0, box_width - 4)], theme["hint"])
         btn_y = box_bottom - 1
         record_label = "[ Stop ]" if record_capture_active else "[ Record ]"
         action_row = (record_overlay_index == 5)
@@ -1118,6 +1127,7 @@ class Controller:
     def __init__(self, sequencer, keymap):
         self.seq = sequencer
         self.keymap = keymap
+        self.record_input_metering_enabled = False
         self.cursor_x = 0
         self.cursor_y = 0
         self.edit_mode = "blocks"
@@ -1329,7 +1339,7 @@ class Controller:
             self.cursor_y = min(self.cursor_y, TRACKS - 2)
         if self.active_tab == 1 and self.cursor_x not in [LOAD_COL, PREVIEW_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL, 0]:
             self.cursor_x = LOAD_COL
-        if self.active_tab == 2 and self.cursor_x > 3:
+        if self.active_tab == 2 and self.cursor_x > 5:
             self.cursor_x = 0
 
     def _tracks_order(self):
@@ -2405,7 +2415,7 @@ class Controller:
                     idx = cols.index(self.cursor_x) if self.cursor_x in cols else 0
                     self.cursor_x = cols[(idx + 1) % len(cols)]
                 elif self.active_tab == 2:
-                    cols = [0, 1, 2, 3]
+                    cols = [0, 1, 2, 3, 4, 5]
                     nxt = cols[0]
                     for c in cols:
                         if c > self.cursor_x:
@@ -2542,7 +2552,7 @@ class Controller:
                 self.cursor_x = cycle[(idx + 1) % len(cycle)]
                 return True
             elif self.active_tab == 2:
-                cycle = [0, 1, 2, 3]
+                cycle = [0, 1, 2, 3, 4, 5]
                 next_idx = (cycle.index(self.cursor_x) + 1) % len(cycle) if self.cursor_x in cycle else 0
                 self.cursor_x = cycle[next_idx]
                 return True
@@ -2587,7 +2597,7 @@ class Controller:
                 self.cursor_x = cycle[(idx - 1) % len(cycle)]
                 return True
             elif self.active_tab == 2:
-                cycle = [0, 1, 2, 3]
+                cycle = [0, 1, 2, 3, 4, 5]
                 prev_idx = (cycle.index(self.cursor_x) - 1) % len(cycle) if self.cursor_x in cycle else len(cycle) - 1
                 self.cursor_x = cycle[prev_idx]
                 return True
@@ -3051,9 +3061,13 @@ class Controller:
                     self.seq.set_track_pan(track_idx, velocity)
                 elif self.cursor_x == 1:
                     self.seq.set_track_volume(track_idx, velocity)
-                elif self.cursor_x == 2 and velocity > 0:
-                    self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, velocity)
+                elif self.cursor_x == 2:
+                    self._apply_inline_track_value(PROB_COL, velocity)
                 elif self.cursor_x == 3:
+                    self._apply_inline_track_value(TRACK_PITCH_COL, velocity)
+                elif self.cursor_x == 4 and velocity > 0:
+                    self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, velocity)
+                elif self.cursor_x == 5:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
                 return True
             if self.active_tab == 1 and self.cursor_x == AUDIO_VOLUME_COL:
@@ -3248,6 +3262,8 @@ def ui_loop(stdscr, seq, colors=None):
     stdscr.nodelay(True)
 
     _colors = colors if isinstance(colors, dict) else {}
+    record_input_metering_raw = str(_colors.get("rec_input_metering", "off")).strip().lower()
+    record_input_metering_enabled = record_input_metering_raw in {"1", "true", "yes", "on"}
     theme = {
         "frame": 0,
         "title": 0,
@@ -3272,6 +3288,7 @@ def ui_loop(stdscr, seq, colors=None):
         "meter_hot": 0,
         "tertiary_on": 0,
         "tertiary_off": curses.A_DIM,
+        "record_input_metering_enabled": record_input_metering_enabled,
         "text_bold_enabled": False,
         "text_uppercase_enabled": True,
     }
@@ -3354,6 +3371,7 @@ def ui_loop(stdscr, seq, colors=None):
         theme["meter_hot"] = pair_attr(6, bright=record_bright)
         theme["tertiary_on"] = pair_attr(9, bright=tertiary_bright)
         theme["tertiary_off"] = pair_attr(9, curses.A_DIM, bright=tertiary_bright)
+        theme["record_input_metering_enabled"] = record_input_metering_enabled
         theme["text_bold_enabled"] = text_bold_enabled
         theme["text_uppercase_enabled"] = text_uppercase_enabled
 
@@ -3365,6 +3383,7 @@ def ui_loop(stdscr, seq, colors=None):
     keymap.set_binding("tab_2", tab_2_binding)
     keymap.set_binding("tab_3", tab_3_binding)
     controller = Controller(seq, keymap)
+    controller.record_input_metering_enabled = record_input_metering_enabled
     file_menu_label = keymap.label("file_menu")
     mode_key_label = keymap.label("mode_toggle")
     tab_1_label = keymap.label("tab_1")
@@ -3401,15 +3420,15 @@ def ui_loop(stdscr, seq, colors=None):
                 should_draw = True
 
         controller._tick_record_capture()
-        if (
-            controller.record_overlay_active
-            and controller.record_monitor_running
-            and not controller.record_capture_active
-            and seq.playing
-            and controller._record_monitor_stream is None
-        ):
-            controller._stop_record_monitor()
-            controller.record_level_db = -60.0
+        if controller.record_overlay_active and not controller.record_capture_active:
+            wants_monitor = controller.record_input_metering_enabled and not seq.playing
+            if wants_monitor and not controller.record_monitor_running:
+                controller._start_record_monitor()
+                should_draw = True
+            elif not wants_monitor and controller.record_monitor_running:
+                controller._stop_record_monitor()
+                controller.record_level_db = -60.0
+                should_draw = True
 
         ui_state = (
             controller.cursor_x,

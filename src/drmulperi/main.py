@@ -80,6 +80,7 @@ def _load_ui_settings(path=SETTINGS_PATH):
         "hotkey_tab_3": "F3",
         "text_bold": "off",
         "text_uppercase": "on",
+        "rec_input_metering": "off",
     }
     colors = {}
     for key, default in defaults.items():
