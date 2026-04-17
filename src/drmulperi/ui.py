@@ -165,6 +165,7 @@ def draw(
     tab_4_label,
     export_eq_enabled,
     export_tape_enabled,
+    bpm_input,
     clear_key_label,
     length_dec_label,
     length_inc_label,
@@ -231,8 +232,9 @@ def draw(
             safe_add(y, x0, "│", attr)
             safe_add(y, x1, "│", attr)
 
+    # terminal size check for outlined layout (minimum size to show all UI elements with borders and spacing).
     min_layout_h = 16
-    min_layout_w = 56
+    min_layout_w = 40
     if h < min_layout_h or w < min_layout_w:
         safe_add(0, 0, "Terminal too small for outlined layout")
         stdscr.refresh()
@@ -266,12 +268,12 @@ def draw(
     # Menubar options are defined here. Edit labels/ordering in this list.
     top_menus = [
         ("file", " FILE "),
-        ("pattern", " PATTERN "),
+        ("pattern", " PATT "),
         ("song", " SONG "),
         ("record", " REC "),
-        ("bpm", f" {seq.bpm} "),
+        ("bpm", f" {bpm_input}_ " if bpm_input else f" {seq.bpm} "),
         ("pitch", f" {seq.pitch_semitones:+d}st "),
-        ("midi", " MIDI OUT "),
+        ("midi", " MIDI "),
     ]
     top_menu_x = {}
     menu_x = outer_left + 2
@@ -368,6 +370,8 @@ def draw(
             px += cell_w + 2
 
     def col_cell_width(col):
+        if col == "audio_name":
+            return 16
         if 0 <= col < seq.max_step_count:
             return 1
         if col == LOAD_COL:
@@ -377,7 +381,7 @@ def draw(
         if col == AUDIO_VOLUME_COL:
             return 3
         if col == REC_COL:
-            return 2
+            return 1
         if col == CLEAR_COL:
             return 1
         if col == TRACK_PITCH_COL:
@@ -476,14 +480,14 @@ def draw(
         if active_tab == 1:
             sample_name = seq.get_audio_track_name(seq.view_pattern, t)
             ch_tag = "◯◯" if seq.get_audio_track_channels(seq.view_pattern, t) >= 2 else "◯"
-            sample_name_width = 24
+            sample_name_width = col_cell_width("audio_name")
             audio_col_gap = 1
             sample_field = f"{ch_tag} {sample_name}"[:sample_name_width].ljust(sample_name_width)
             cols = [
                 (LOAD_COL, "↓"),
                 (PREVIEW_COL, "▶"),
                 (AUDIO_VOLUME_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
-                (REC_COL, "REC ●"),
+                (REC_COL, "R"), #record column
                 (CLEAR_COL, "⌫"),
                 (TRACK_PITCH_COL, f"↔{seq.get_audio_track_shift(seq.view_pattern, t):02d}"),
             ]
@@ -683,7 +687,7 @@ def draw(
             if header_edit_active:
                 help_line = "Header edit: Left/Right or Up/Down changes BPM. Enter exits edit."
             else:
-                help_line = "BPM (tempo)."
+                help_line = "BPM: type 3 digits to set, Enter = tap tempo."
         elif header_param == "midi":
             help_line = "Enter toggles MIDI OUT."
         elif header_param == "file":
@@ -1280,6 +1284,8 @@ class Controller:
         self.active_tab = 0
         self.header_params = ["file", "pattern", "song", "record", "bpm", "pitch", "midi"]
         self.header_param_index = 0
+        self.bpm_input = ""
+        self.tap_tempo_times = []
         self.inline_value_buffer = ""
         self.inline_value_target = None  # (row, col)
         self.inline_value_time = 0.0
@@ -1585,6 +1591,21 @@ class Controller:
     def _close_probability_dialog(self):
         self.probability_edit_active = False
         self.probability_edit_input = ""
+
+    def _tap_tempo(self):
+        """Register a tap and update BPM from average interval of last 4 taps."""
+        now = time.perf_counter()
+        self.tap_tempo_times.append(now)
+        # Drop taps older than 3 seconds (stale sequence)
+        self.tap_tempo_times = [t for t in self.tap_tempo_times if now - t < 3.0]
+        if len(self.tap_tempo_times) >= 2:
+            intervals = [self.tap_tempo_times[i] - self.tap_tempo_times[i - 1]
+                         for i in range(1, len(self.tap_tempo_times))]
+            avg_interval = sum(intervals) / len(intervals)
+            bpm = round(60.0 / avg_interval)
+            bpm = max(20, min(300, bpm))
+            self.seq.set_bpm(bpm)
+            self.status_message = f"Tap tempo: {bpm} BPM"
 
     def _close_chain_dialog(self):
         self.chain_edit_active = False
@@ -2655,6 +2676,7 @@ class Controller:
                 self.header_focus = True
                 self.header_section = "tabs"
                 self.header_edit_active = False
+                self.bpm_input = ""
                 return True
             if self.header_focus:
                 if self.header_section == "params" and self.header_edit_active:
@@ -3237,6 +3259,23 @@ class Controller:
                 self.move_cursor(1, 0)
         elif key_code in range(ord('0'), ord('9') + 1):
             velocity = key_code - ord('0')
+            # BPM live typing: when BPM header param is selected, digits update BPM directly.
+            if self.header_focus and self.header_section == "params" and self.header_params[self.header_param_index] == "bpm":
+                self.bpm_input += chr(key_code)
+                if len(self.bpm_input) >= 3:
+                    try:
+                        self.seq.set_bpm(int(self.bpm_input))
+                        self.status_message = f"BPM: {self.seq.bpm}"
+                    except ValueError:
+                        pass
+                    self.bpm_input = ""
+                else:
+                    try:
+                        partial = int(self.bpm_input)
+                        self.seq.set_bpm(partial)
+                    except ValueError:
+                        pass
+                return True
             track_idx = self._track_for_row(self.cursor_y) if self.active_tab == 1 else self.cursor_y
             if self.active_tab == 2:
                 track_idx = max(0, min(TRACKS - 2, self.cursor_y))
@@ -3368,6 +3407,10 @@ class Controller:
                     self.header_focus = False
                     self.header_section = "params"
                     self.header_edit_active = False
+                elif param == "bpm":
+                    # Enter on BPM = tap tempo
+                    self._tap_tempo()
+                    self.bpm_input = ""
                 else:
                     self.header_edit_active = not self.header_edit_active
                 return True
@@ -3888,6 +3931,7 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 tab_4_label,
                 controller.export_eq_enabled,
                 controller.export_tape_enabled,
+                controller.bpm_input,
                 clear_key_label,
                 length_dec_label,
                 length_inc_label,

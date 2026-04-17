@@ -2308,6 +2308,10 @@ class Sequencer:
         self.bpm = max(1, self.bpm + delta)
         self.dirty = True
 
+    def set_bpm(self, value):
+        self.bpm = max(1, min(999, int(value)))
+        self.dirty = True
+
     def set_last_velocity(self, velocity):
         self.last_velocity = max(1, min(9, velocity))
         self.dirty = True
