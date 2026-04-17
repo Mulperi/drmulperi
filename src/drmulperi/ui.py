@@ -180,6 +180,18 @@ def draw(
     """Render full terminal UI frame from current sequencer/controller state."""
     stdscr.clear()
     h, w = stdscr.getmaxyx()
+    modal_dim_active = ui_options.get("dim_overlay_enabled", True) and (
+        pattern_menu_active
+        or patterns_overlay_active
+        or chop_overlay_active
+        or import_overlay_active
+        or record_overlay_active
+        or file_browser_active
+        or audio_export_options_active
+        or kit_export_options_active
+        or track_params_dialog_active
+    )
+    dim_background_active = modal_dim_active
 
     def safe_add(y, x, text, attr=0, transform_case=True):
         """Safely draw text in curses with clipping and optional global text transforms.
@@ -198,6 +210,8 @@ def draw(
                 text = text.lower()
         if theme.get("text_bold_enabled", False):
             attr = (attr or 0) | curses.A_BOLD
+        if dim_background_active:
+            attr = (attr or 0) | curses.A_DIM
         max_len = w - x
         if max_len <= 0:
             return
@@ -237,15 +251,15 @@ def draw(
             safe_add(y, x0, "│", attr)
             safe_add(y, x1, "│", attr)
 
-    def draw_dim_overlay():
-        """Draw a dimmed overlay across the screen, preserving top menubar and prompt row."""
-        dim_attr = curses.A_DIM
-        # Dim from row 1 to row h-2, leaving top menubar (row 0) and prompt/help row (h-1) undimmed.
-        for y in range(1, max(1, h - 1)):
-            try:
-                stdscr.addstr(y, 0, " " * w, dim_attr)
-            except curses.error:
-                pass
+    def _begin_modal_draw():
+        nonlocal dim_background_active
+        prev = dim_background_active
+        dim_background_active = False
+        return prev
+
+    def _end_modal_draw(prev):
+        nonlocal dim_background_active
+        dim_background_active = prev
 
     # terminal size check for outlined layout (minimum size to show all UI elements with borders and spacing).
     min_layout_h = 16
@@ -785,8 +799,7 @@ def draw(
     # safe_add(sample_y, sample_x, sample_label[: max(0, area_work_right - sample_x)], theme["muted"], transform_case=False)
 
     if pattern_menu_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         if pattern_menu_kind == "pattern":
             items = PATTERN_MENU_ITEMS
         else:
@@ -828,10 +841,10 @@ def draw(
                 x_pos = item.find("(X)")
                 if x_pos >= 0:
                     safe_add(box_top + 1 + i, box_left + 2 + x_pos + 1, "X", item_attr | curses.A_UNDERLINE)
+        _end_modal_draw(_prev_dim_background_active)
 
     if patterns_overlay_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         count = seq.pattern_count()
         title = "PATTERNS (A:Add, D:Duplicate, X:Delete)"
         rows = []
@@ -879,10 +892,10 @@ def draw(
             if i == patterns_overlay_index:
                 attr = attr | theme["selected"]
             safe_add(y, box_left + 2, rows[i][: box_width - 4], attr)
+        _end_modal_draw(_prev_dim_background_active)
 
     if chop_overlay_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         title = "IMPORT CHOPS (Space preview, Enter action)"
         rows = []
         for i in range(8):
@@ -912,10 +925,10 @@ def draw(
             if i == chop_overlay_index:
                 attr = attr | theme["selected"]
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
+        _end_modal_draw(_prev_dim_background_active)
 
     if import_overlay_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         title = "IMPORT AUDIO (Arrows move, <-/-> track, Space preview, Enter select)"
         src = os.path.basename(import_overlay_path) if import_overlay_path else "-"
         audio_mode_label = "Song" if (0 <= import_target_audio_track < (TRACKS - 1) and seq.audio_track_mode[import_target_audio_track] == 1) else f"Pattern {seq.view_pattern + 1}"
@@ -946,10 +959,10 @@ def draw(
             if i == import_overlay_index:
                 attr = attr | theme["selected"]
             safe_add(y, box_left + 2, row[: box_width - 4], attr)
+        _end_modal_draw(_prev_dim_background_active)
 
     if record_overlay_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         title = "RECORD SETTINGS"
         devices = record_device_names if record_device_names else ["(no input devices)"]
         selected_dev = devices[record_device_index] if devices else "(no input devices)"
@@ -1034,10 +1047,10 @@ def draw(
         safe_add(btn_y, box_left + 2, "[ Cancel ]", cancel_attr)
         rec_x = box_right - len(record_label) - 2
         safe_add(btn_y, rec_x, record_label, record_attr)
+        _end_modal_draw(_prev_dim_background_active)
 
     if file_browser_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         if file_browser_mode == "pattern":
             mode_name = "PATTERN"
         elif file_browser_mode == "pattern_steps":
@@ -1048,7 +1061,7 @@ def draw(
             mode_name = "KIT"
         title = f"{mode_name} BROWSER (Enter open/select, <-/-> or Backspace up, Esc close)"
         if file_browser_mode in ["sample", "audio_track"]:
-            title = f"{mode_name} BROWSER (Space preview, Enter select, <-/-> up/down, Esc close)"
+            title = f"{mode_name} BROWSER (Space preview)"
         visible_items = file_browser_items if file_browser_items else [{"name": "(empty)", "is_dir": False, "is_parent": False}]
         list_height = min(14, max(6, h - 12))
         max_name = max(len(it["name"]) for it in visible_items)
@@ -1080,10 +1093,10 @@ def draw(
             if i == file_browser_index and file_browser_items:
                 item_attr = item_attr | theme["selected"]
             safe_add(row, box_left + 2, label[: box_width - 4], item_attr, transform_case=False)
+        _end_modal_draw(_prev_dim_background_active)
 
     if audio_export_options_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         title = "AUDIO EXPORT OPTIONS (Arrows/Space change, Enter export, Esc cancel)"
         bit_depth = int(audio_export_options.get("bit_depth", 16))
         sample_rate = int(audio_export_options.get("sample_rate", seq.engine.sr))
@@ -1143,10 +1156,10 @@ def draw(
         )
         export_attr = theme["text"] | (theme["selected"] if audio_export_options_index == (row_count - 1) else 0)
         safe_add(box_top + 8, box_left + 4, "[ Export -> Filename ]", export_attr)
+        _end_modal_draw(_prev_dim_background_active)
 
     if kit_export_options_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         title = "KIT EXPORT OPTIONS (Arrows/Space change, Enter export, Esc cancel)"
         bit_depth = int(kit_export_options.get("bit_depth", 16))
         sample_rate = int(kit_export_options.get("sample_rate", seq.engine.sr))
@@ -1199,49 +1212,36 @@ def draw(
         )
         export_attr = theme["text"] | (theme["selected"] if kit_export_options_index == (row_count - 1) else 0)
         safe_add(box_top + 7, box_left + 4, "[ Export Kit -> Folder ]", export_attr)
+        _end_modal_draw(_prev_dim_background_active)
 
-    footer_dim_active = ui_options.get("dim_overlay_enabled", True) and (
-        pattern_menu_active
-        or patterns_overlay_active
-        or chop_overlay_active
-        or import_overlay_active
-        or record_overlay_active
-        or file_browser_active
-        or audio_export_options_active
-        or kit_export_options_active
-        or track_params_dialog_active
-    )
     # Footer row sits above area_prompt.
-    # Keep it fully covered by dim overlay when any modal is active.
-    if not footer_dim_active:
-        footer_row = outer_bottom
-        transport_icon = "▶" if seq.playing else "▢"
-        transport_attr = frame_attr
-        safe_add(footer_row, outer_left + 2, transport_icon, transport_attr)
-        compact_pattern_line = " ".join(pattern_line.split())
-        footer_patterns = f"PATTERNS {compact_pattern_line}"
-        footer_song = f"SONG {song_line}"
-        footer_x = outer_left + 6
-        max_w = max(0, outer_right - (outer_left + 8))
-        patterns_attr = theme["tertiary_on"] if not seq.chain_enabled else theme["tertiary_off"]
-        song_attr = theme["tertiary_on"] if seq.chain_enabled else theme["tertiary_off"]
-        safe_add(footer_row, footer_x, footer_patterns[:max_w], patterns_attr)
-        footer_x += len(footer_patterns)
-        safe_add(footer_row, footer_x, "   "[:max(0, max_w - len(footer_patterns))], frame_attr)
-        footer_x += 3
-        safe_add(footer_row, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
-        project_dir = os.path.basename(os.path.dirname(seq.pattern_path)) if seq.pattern_path else ""
-        if not project_dir:
-            project_dir = "."
-        project_label = f" {project_dir} "
-        project_x = max(outer_left + 2, outer_right - len(project_label) - 2)
-        safe_add(footer_row, project_x, project_label, theme["muted"])
+    footer_row = outer_bottom
+    transport_icon = "▶" if seq.playing else "▢"
+    transport_attr = frame_attr
+    safe_add(footer_row, outer_left + 2, transport_icon, transport_attr)
+    compact_pattern_line = " ".join(pattern_line.split())
+    footer_patterns = f"PATTERNS {compact_pattern_line}"
+    footer_song = f"SONG {song_line}"
+    footer_x = outer_left + 6
+    max_w = max(0, outer_right - (outer_left + 8))
+    patterns_attr = theme["tertiary_on"] if not seq.chain_enabled else theme["tertiary_off"]
+    song_attr = theme["tertiary_on"] if seq.chain_enabled else theme["tertiary_off"]
+    safe_add(footer_row, footer_x, footer_patterns[:max_w], patterns_attr)
+    footer_x += len(footer_patterns)
+    safe_add(footer_row, footer_x, "   "[:max(0, max_w - len(footer_patterns))], frame_attr)
+    footer_x += 3
+    safe_add(footer_row, footer_x, footer_song[:max(0, max_w - (len(footer_patterns) + 3))], song_attr)
+    project_dir = os.path.basename(os.path.dirname(seq.pattern_path)) if seq.pattern_path else ""
+    if not project_dir:
+        project_dir = "."
+    project_label = f" {project_dir} "
+    project_x = max(outer_left + 2, outer_right - len(project_label) - 2)
+    safe_add(footer_row, project_x, project_label, theme["muted"])
 
 
     # Track params dialog
     if track_params_dialog_active:
-        if ui_options.get("dim_overlay_enabled", True):
-            draw_dim_overlay()
+        _prev_dim_background_active = _begin_modal_draw()
         title = "TRACK PARAMETERS"
         track_name = "Accent" if track_params_dialog_track == ACCENT_TRACK else f"Track {track_params_dialog_track + 1}"
         params = [
@@ -1273,6 +1273,7 @@ def draw(
             value_text = track_params_dialog_input if (i == track_params_dialog_index and track_params_dialog_input != "") else current_value
             line = f"{param_label}: {value_text}"
             safe_add(y, box_left + 2, line[: box_width - 4], attr)
+        _end_modal_draw(_prev_dim_background_active)
 
     stdscr.refresh()
 
