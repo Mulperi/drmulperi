@@ -3,7 +3,7 @@ import configparser
 import curses
 import os
 
-from .config import DEFAULT_KIT_PATH, DEFAULT_SETTINGS, SETTINGS_PATH
+from .config import DEFAULT_KIT_PATH, DEFAULT_SETTINGS, SETTINGS_PATH, STEPS
 from .sequencer import Sequencer
 from .ui import ui_loop
 
@@ -38,7 +38,13 @@ def _load_sequencer_settings(path=SETTINGS_PATH):
     default_kit = str(section.get("default_kit", DEFAULT_KIT_PATH)).strip()
     raw_follow_song = str(section.get("follow_song", "off")).strip().lower()
     follow_song = raw_follow_song in {"1", "true", "yes", "on"}
-    return default_kit, follow_song
+    raw_default_step_count = section.get("default_step_count", "16")
+    try:
+        parsed_step_count = int(str(raw_default_step_count).strip())
+    except Exception:
+        parsed_step_count = 16
+    default_step_count = max(1, min(STEPS, parsed_step_count))
+    return default_kit, follow_song, default_step_count
 
 
 def _load_ui_settings(path=SETTINGS_PATH):
@@ -70,7 +76,7 @@ def _load_ui_settings(path=SETTINGS_PATH):
 def main(path=SETTINGS_PATH):
     """CLI entry point."""
     parser = argparse.ArgumentParser()
-    configured_default_kit, configured_follow_song = _load_sequencer_settings(path)
+    configured_default_kit, configured_follow_song, configured_default_step_count = _load_sequencer_settings(path)
     configured_colors = _load_ui_settings(path)
     parser.add_argument(
         "--kit",
@@ -112,6 +118,7 @@ def main(path=SETTINGS_PATH):
         duplex_mode=duplex_mode,
         default_new_project_kit=kit_path,
         follow_song=configured_follow_song,
+        default_step_count=configured_default_step_count,
     )
     if not pattern_arg:
         # Default startup should be a truly empty project.

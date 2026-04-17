@@ -10,7 +10,6 @@ from .config import (
     FILE_MENU_ITEMS,
     GRID_COLS,
     GROUP_COL,
-    HUMANIZE_COL,
     LOAD_COL,
     PAN_COL,
     PREVIEW_COL,
@@ -23,6 +22,10 @@ from .config import (
 )
 from .keymap import Keymap, _event_tokens
 from . import recorder
+
+
+# Audio tab volume column.
+AUDIO_VOLUME_COL = STEPS + 3
 
 
 def _read_system_clipboard_text():
@@ -320,7 +323,7 @@ def draw(
             return 1
         if col == PAN_COL:
             return 2
-        if col == HUMANIZE_COL:
+        if col == AUDIO_VOLUME_COL:
             return 3
         if col == PROB_COL:
             return 4
@@ -331,6 +334,11 @@ def draw(
         return 3
 
     if active_tab == 0:
+        # Sequencer view: reserve preview-slot width before step grid (next to track label).
+        safe_add(playhead_y, x, " ", theme["text"])
+        x += 1
+        safe_add(playhead_y, x, " ", theme["divider"])
+        x += 1
         step_x = x
         safe_add(playhead_y, step_x, " " * STEPS, theme["muted"])
         if show_playhead and 0 <= seq.step < STEPS:
@@ -416,7 +424,7 @@ def draw(
                 (PREVIEW_COL, "▶"),
                 (LOAD_COL, "↓"),
                 (PAN_COL, f"P{seq.get_audio_track_pan(seq.view_pattern, t)}"),
-                (HUMANIZE_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
+                (AUDIO_VOLUME_COL, f"V{seq.get_audio_track_volume(seq.view_pattern, t)}"),
                 (PROB_COL, "●"),
                 (GROUP_COL, "X"),
                 (TRACK_PITCH_COL, f"↔{seq.get_audio_track_shift(seq.view_pattern, t):02d}"),
@@ -453,6 +461,16 @@ def draw(
                 safe_add(y, x, f"{text:>2}", cell_attr)
                 x += 2
         else:
+            # Sequencer view: preview button is shown next to track label (before steps).
+            preview_char = "▶" if t != ACCENT_TRACK else " "
+            preview_attr = row_attr
+            if cursor_x == PREVIEW_COL and cursor_y == t:
+                preview_attr = preview_attr | theme["selected"]
+            safe_add(y, x, f"{preview_char:>1}", preview_attr)
+            x += 1
+            safe_add(y, x, " ", theme["divider"])
+            x += 1
+
             # Sequencer grid: compact 1-char step cells.
             for s in range(STEPS):
                 val = seq.grid[seq.view_pattern][t][s]
@@ -489,19 +507,13 @@ def draw(
             # Parameter area.
             safe_add(y, x, " ", theme["divider"])
             x += 1
-            param_cols = [PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+            param_cols = [LOAD_COL, PAN_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             for s in param_cols:
-                if s == PREVIEW_COL:
-                    char = "▶" if t != ACCENT_TRACK else ""
-                    cell_attr = row_attr
-                elif s == LOAD_COL:
+                if s == LOAD_COL:
                     char = "↓" if t != ACCENT_TRACK else ""
                     cell_attr = row_attr
                 elif s == PAN_COL:
                     char = f"P{seq.seq_track_pan[t]}" if t != ACCENT_TRACK else ""
-                    cell_attr = row_attr
-                elif s == HUMANIZE_COL:
-                    char = ""
                     cell_attr = row_attr
                 elif s == PROB_COL:
                     char = f"%{seq.seq_track_probability[t]}" if t != ACCENT_TRACK else ""
@@ -600,7 +612,7 @@ def draw(
         help_line = "Load sample"
     elif active_tab == 1 and cursor_x == PAN_COL:
         help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
-    elif active_tab == 1 and cursor_x == HUMANIZE_COL:
+    elif active_tab == 1 and cursor_x == AUDIO_VOLUME_COL:
         help_line = "Volume: 0..9. Type 0-9 to set."
     elif active_tab == 1 and cursor_x == PROB_COL:
         help_line = "Record input device / level monitor (2-pass capture)"
@@ -619,8 +631,6 @@ def draw(
         help_line = "Load sample"
     elif cursor_x == PAN_COL:
         help_line = "Pan: 1=left, 5=center, 9=right. Type 1-9 to set."
-    elif cursor_x == HUMANIZE_COL:
-        help_line = "Pattern humanize is global (top bar H:)."
     elif cursor_x == PROB_COL:
         help_line = "% Probability: chance that a step triggers on this track (0-100). Type digits to set."
     elif cursor_x == GROUP_COL:
@@ -1215,6 +1225,20 @@ class Controller:
         self.cursor_x = (self.cursor_x + dx) % GRID_COLS
         self.cursor_y = (self.cursor_y + dy) % TRACKS
 
+    def _sequencer_nav_cols(self):
+        """Sequencer navigation order matching visual layout (preview, steps, params)."""
+        return [PREVIEW_COL] + list(range(STEPS)) + [LOAD_COL, PAN_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+
+    def _sequencer_beat_cols(self):
+        """Return beat-start step columns for current visible pattern length."""
+        try:
+            current_len = int(self.seq.pattern_length[self.seq.view_pattern])
+        except Exception:
+            current_len = STEPS
+        step_span = max(1, min(STEPS, current_len))
+        cols = list(range(0, step_span, 4))
+        return cols if cols else [0]
+
     def _cycle_edit_mode(self):
         """Rotate sequencer edit mode through all available step views."""
         modes = ["velocity", "ratchet", "blocks", "detune"]
@@ -1227,6 +1251,8 @@ class Controller:
     def _set_active_tab(self, tab_index):
         """Switch active top tab and clamp cursor for that view."""
         self.active_tab = max(0, min(2, int(tab_index)))
+        if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
+            self.cursor_x = PROB_COL
         if self.active_tab in [1, 2]:
             self.cursor_y = min(self.cursor_y, TRACKS - 2)
         if self.active_tab == 1 and self.cursor_x > TRACK_PITCH_COL:
@@ -1304,7 +1330,7 @@ class Controller:
         if col == PAN_COL:
             if value > 0:
                 self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, max(1, min(9, value)))
-        elif col == HUMANIZE_COL:
+        elif col == AUDIO_VOLUME_COL:
             self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, max(0, min(9, value)))
         elif col == TRACK_PITCH_COL:
             self.seq.set_audio_track_shift(self.seq.view_pattern, track_idx, max(0, min(50, value)))
@@ -1769,6 +1795,8 @@ class Controller:
         """Handle a single key event. Returns False when app should exit."""
         event_tokens = _event_tokens(key)
         key_code = key if isinstance(key, int) else ord(key)
+        if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
+            self.cursor_x = PROB_COL
         if key_code != 27 and self.esc_confirm:
             self.esc_confirm = False
         if self.status_message and key_code != -1:
@@ -2303,7 +2331,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
                     nxt = cols[0]
                     for c in cols:
                         if c > self.cursor_x:
@@ -2319,7 +2347,12 @@ class Controller:
                             break
                     self.cursor_x = nxt
                 else:
-                    self.move_cursor(1, 0)
+                    cols = self._sequencer_nav_cols()
+                    if self.cursor_x in cols:
+                        idx = cols.index(self.cursor_x)
+                    else:
+                        idx = 0
+                    self.cursor_x = cols[(idx + 1) % len(cols)]
             return True
         if key_code == curses.KEY_LEFT:
             if self.header_focus:
@@ -2344,7 +2377,7 @@ class Controller:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
             else:
                 if self.active_tab == 1:
-                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                    cols = [0, PREVIEW_COL, LOAD_COL, PAN_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
                     prev = cols[-1]
                     for c in reversed(cols):
                         if c < self.cursor_x:
@@ -2360,7 +2393,12 @@ class Controller:
                             break
                     self.cursor_x = prev
                 else:
-                    self.move_cursor(-1, 0)
+                    cols = self._sequencer_nav_cols()
+                    if self.cursor_x in cols:
+                        idx = cols.index(self.cursor_x)
+                    else:
+                        idx = 0
+                    self.cursor_x = cols[(idx - 1) % len(cols)]
             return True
         if key_code == curses.KEY_UP:
             if self.header_focus:
@@ -2424,11 +2462,36 @@ class Controller:
                     self.header_param_index = (self.header_param_index + 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             elif self.active_tab == 2:
                 cycle = [0, 1, 2, 3]
             else:
-                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                if 0 <= self.cursor_x < STEPS:
+                    # In sequencer step grid, Tab hops by beat-starts rather than every step.
+                    beat_cols = self._sequencer_beat_cols()
+                    if self.cursor_x == beat_cols[-1]:
+                        # From last beat, exit grid to first parameter column.
+                        self.cursor_x = LOAD_COL
+                        return True
+                    if self.cursor_x in beat_cols:
+                        idx = beat_cols.index(self.cursor_x)
+                    else:
+                        idx = -1
+                        for i, col in enumerate(beat_cols):
+                            if col > self.cursor_x:
+                                idx = i - 1
+                                break
+                        if idx < -1:
+                            idx = -1
+                    self.cursor_x = beat_cols[(idx + 1) % len(beat_cols)]
+                    return True
+                cycle = self._sequencer_nav_cols()
+                if self.cursor_x in cycle:
+                    idx = cycle.index(self.cursor_x)
+                else:
+                    idx = -1
+                self.cursor_x = cycle[(idx + 1) % len(cycle)]
+                return True
             next_idx = 0
             for i, col in enumerate(cycle):
                 if col > self.cursor_x:
@@ -2446,11 +2509,32 @@ class Controller:
                     self.header_param_index = (self.header_param_index - 1) % len(self.header_params)
                 return True
             if self.active_tab == 1:
-                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, HUMANIZE_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                cycle = [0, PREVIEW_COL, LOAD_COL, PAN_COL, AUDIO_VOLUME_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
             elif self.active_tab == 2:
                 cycle = [0, 1, 2, 3]
             else:
-                cycle = [0, 4, 8, 12, PREVIEW_COL, LOAD_COL, PAN_COL, PROB_COL, GROUP_COL, TRACK_PITCH_COL]
+                if 0 <= self.cursor_x < STEPS:
+                    # Reverse beat-hop for Shift+Tab while cursor is inside sequencer steps.
+                    beat_cols = self._sequencer_beat_cols()
+                    if self.cursor_x in beat_cols:
+                        idx = beat_cols.index(self.cursor_x)
+                    else:
+                        idx = 0
+                        for i, col in enumerate(beat_cols):
+                            if col >= self.cursor_x:
+                                idx = i
+                                break
+                        else:
+                            idx = 0
+                    self.cursor_x = beat_cols[(idx - 1) % len(beat_cols)]
+                    return True
+                cycle = self._sequencer_nav_cols()
+                if self.cursor_x in cycle:
+                    idx = cycle.index(self.cursor_x)
+                else:
+                    idx = 0
+                self.cursor_x = cycle[(idx - 1) % len(cycle)]
+                return True
             prev_idx = len(cycle) - 1
             for i in range(len(cycle) - 1, -1, -1):
                 if cycle[i] < self.cursor_x:
@@ -2965,9 +3049,9 @@ class Controller:
             if self.active_tab == 1 and self.cursor_x == PAN_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._apply_inline_audio_track_value(PAN_COL, velocity)
-            elif self.active_tab == 1 and self.cursor_x == HUMANIZE_COL:
+            elif self.active_tab == 1 and self.cursor_x == AUDIO_VOLUME_COL:
                 if self.cursor_y != ACCENT_TRACK:
-                    self._apply_inline_audio_track_value(HUMANIZE_COL, velocity)
+                    self._apply_inline_audio_track_value(AUDIO_VOLUME_COL, velocity)
             elif self.active_tab == 1 and self.cursor_x == PROB_COL:
                 pass
             elif self.active_tab == 1 and self.cursor_x == TRACK_PITCH_COL:
@@ -3095,7 +3179,7 @@ class Controller:
                         self._open_file_browser("audio_track", target_track=track_idx)
                 elif self.cursor_x == PAN_COL:
                     self.seq.set_audio_track_pan(self.seq.view_pattern, track_idx, 5)
-                elif self.cursor_x == HUMANIZE_COL:
+                elif self.cursor_x == AUDIO_VOLUME_COL:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, 9)
                 elif self.cursor_x == PROB_COL:
                     self._open_record_overlay(target_track=track_idx, from_audio_view=True)
@@ -3115,8 +3199,6 @@ class Controller:
             elif self.cursor_x == LOAD_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self._open_file_browser("sample", target_track=self.cursor_y)
-            elif self.cursor_x == HUMANIZE_COL:
-                self.status_message = "Pattern humanize is global (top bar H:)"
             elif self.cursor_x == PROB_COL:
                 if self.cursor_y == ACCENT_TRACK:
                     self.status_message = "Accent track has no probability"

@@ -1,7 +1,7 @@
 """Project-wide constants and default key bindings."""
 
 TRACKS = 9
-STEPS = 16
+STEPS = 32
 CHAIN_MAX_STEPS = 16
 PREVIEW_COL = STEPS
 LOAD_COL = STEPS + 1

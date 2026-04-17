@@ -31,6 +31,7 @@ class Sequencer:
         duplex_mode="off",
         default_new_project_kit=None,
         follow_song=False,
+        default_step_count=16,
     ):
         self.kit_path = kit_path
         self.default_new_project_kit = default_new_project_kit if default_new_project_kit is not None else kit_path
@@ -38,6 +39,11 @@ class Sequencer:
         self.pattern_path = pattern_path
         self.pattern_name = os.path.basename(pattern_path)
         self.engine = AudioEngine(kit_path=self.kit_path, samplerate=int(samplerate), duplex_mode=duplex_mode)
+        try:
+            parsed_default_steps = int(default_step_count)
+        except Exception:
+            parsed_default_steps = 16
+        self.default_step_count = max(1, min(STEPS, parsed_default_steps))
 
         self.grid = [self._new_pattern_grid() for _ in range(PATTERNS)]
         self.ratchet_grid = [self._new_pattern_ratchet() for _ in range(PATTERNS)]
@@ -83,7 +89,7 @@ class Sequencer:
         self.audio_track_free_sample_names = ["-" for _ in range(TRACKS - 1)]
         self.audio_track_free_samples = [None for _ in range(TRACKS - 1)]
         self.audio_track_free_channels = [1 for _ in range(TRACKS - 1)]
-        self.pattern_length = [STEPS for _ in range(PATTERNS)]
+        self.pattern_length = [self.default_step_count for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.pattern_humanize = [0 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
@@ -765,13 +771,13 @@ class Sequencer:
                 self.audio_track_free_channels[t] = 2 if channels >= 2 else 1
 
         loaded_lengths = data.get("pattern_length", self.pattern_length)
-        normalized_lengths = [STEPS for _ in range(pattern_count)]
+        normalized_lengths = [self.default_step_count for _ in range(pattern_count)]
         if isinstance(loaded_lengths, list):
             for i in range(min(pattern_count, len(loaded_lengths))):
                 try:
                     normalized_lengths[i] = max(1, min(STEPS, int(loaded_lengths[i])))
                 except (ValueError, TypeError):
-                    normalized_lengths[i] = STEPS
+                    normalized_lengths[i] = self.default_step_count
         self.pattern_length = normalized_lengths
 
         loaded_swing = data.get("pattern_swing", self.pattern_swing)
@@ -936,7 +942,7 @@ class Sequencer:
         self.seq_track_probability = [100 for _ in range(TRACKS)]
         self.seq_track_group = [0 for _ in range(TRACKS)]
         self.seq_track_pitch = [0 for _ in range(TRACKS)]
-        self.pattern_length = [STEPS for _ in range(PATTERNS)]
+        self.pattern_length = [self.default_step_count for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.pattern_humanize = [0 for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
@@ -2073,7 +2079,7 @@ class Sequencer:
         return "-".join(parts)
 
     def change_current_pattern_length(self, delta):
-        """Increase or decrease viewed pattern length within 1..16."""
+        """Increase or decrease viewed pattern length within 1..STEPS."""
         current = self.pattern_length[self.view_pattern]
         new_length = max(1, min(STEPS, current + delta))
         if new_length != current:
@@ -2415,11 +2421,11 @@ class Sequencer:
         return True, f"Pasted pattern {self.view_pattern + 1}"
 
     def _parse_pattern_rows_block(self, rows):
-        """Parse one 8x16 text block into sequencer + ratchet grids.
+        """Parse one 8xSTEPS text block into sequencer + ratchet grids.
 
         Format rules:
         - Exactly 8 rows (sequencer tracks 1..8, accent is implicit off)
-        - Exactly 16 characters per row
+        - Exactly STEPS characters per row
         - Allowed chars: 0,1,2,3,4
           - 0: empty step
           - 1: velocity 9, ratchet 1
