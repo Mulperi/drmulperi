@@ -466,7 +466,7 @@ def finish_record_capture(controller):
 def arm_record_capture(controller):
     """Start recording using pre-rendered backing for stable timing."""
     track = controller.record_capture_context_track
-    if track is None and controller.active_tab == 1 and controller.cursor_y < (TRACKS - 1):
+    if track is None and controller.nav.active_tab == 1 and controller.cursor_y < (TRACKS - 1):
         track = controller._track_for_row(controller.cursor_y)
     if track is None:
         track = max(0, min(TRACKS - 2, int(controller.cursor_y)))
