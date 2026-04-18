@@ -26,6 +26,11 @@ from . import ui_texts as texts
 
 # Audio tab volume column — own negative ID, no collision with steps or other param cols.
 AUDIO_VOLUME_COL = -7
+TAB_SEQUENCER = 0
+TAB_SONG = 1
+TAB_AUDIO = 2
+TAB_MIXER = 3
+TAB_EXPORT = 4
 
 def _read_system_clipboard_text():
     """Return clipboard text using platform tools (macOS/Linux) with safe fallback."""
@@ -155,6 +160,7 @@ def draw(
     tab_2_label,
     tab_3_label,
     tab_4_label,
+    tab_5_label,
     export_eq_enabled,
     export_tape_enabled,
     clear_key_label,
@@ -186,10 +192,11 @@ def draw(
     pattern_params_index = navigation.pattern.index
     active_tab = navigation.active_tab
     header_edit_active = navigation.header.edit_active
-    sequencer_content_focus = active_tab == 0 and not header_focus and not pattern_params_focus
-    audio_content_focus = active_tab == 1 and not header_focus
-    mixer_content_focus = active_tab == 2 and not header_focus
-    export_content_focus = active_tab == 3 and not header_focus
+    sequencer_content_focus = active_tab == TAB_SEQUENCER and not header_focus and not pattern_params_focus
+    song_content_focus = active_tab == TAB_SONG and not header_focus
+    audio_content_focus = active_tab == TAB_AUDIO and not header_focus
+    mixer_content_focus = active_tab == TAB_MIXER and not header_focus
+    export_content_focus = active_tab == TAB_EXPORT and not header_focus
     stdscr.clear()
     h, w = stdscr.getmaxyx()
     modal_dim_active = ui_options.get("dim_overlay_enabled", True) and (
@@ -339,7 +346,13 @@ def draw(
             safe_add(outer_top, menu_x + 1, menu_label[1], menu_attr | curses.A_UNDERLINE)
         menu_x += len(menu_label) + 1
 
-    tabs = [("seq", tab_1_label), ("aud", tab_2_label), ("mix", tab_3_label), ("exp", tab_4_label)]
+    tabs = [
+        ("seq", tab_1_label),
+        ("song", tab_2_label),
+        ("aud", tab_3_label),
+        ("mix", tab_4_label),
+        ("exp", tab_5_label),
+    ]
     tx = 3
     for i, (label, hotkey) in enumerate(tabs):
         tab_text = f"┌ {label} {hotkey} ┐"
@@ -397,7 +410,7 @@ def draw(
     safe_add(playhead_y, x, "  ", theme["text"])
     x += 2
 
-    if active_tab == 0:
+    if active_tab == TAB_SEQUENCER:
         pattern_name = seq.get_pattern_name(seq.view_pattern)
         name_cell_width = max(18, min(50, w - area_work_content_x - 4))
         name_value = pattern_name
@@ -466,21 +479,34 @@ def draw(
         if ui_options.get("playhead_divider_enabled", True) and 1 <= current_length < _max_steps:
             safe_add(playhead_y, step_x + ((current_length - 1) * (1 + seq_col_gap)), "|", theme["hint"])
     # --- Audio tab UI elements: rows align to sequencer lanes (no playhead heading) ---
-    elif active_tab == 1:
+    elif active_tab == TAB_SONG:
+        song_state = "ON" if seq.chain_enabled else "OFF"
+        safe_add(area_patt_controls_y, area_work_content_x, f"Song mode: {song_state}", theme["title"] if seq.chain_enabled else theme["muted"])
+        safe_add(area_patt_values_y, area_work_content_x, "Enter left to add, Enter right to remove.", theme["muted"])
+    elif active_tab == TAB_AUDIO:
         safe_add(area_patt_controls_y, area_work_content_x, "Press enter on sample name to toggle song/pattern mode.", theme["muted"])
         safe_add(area_patt_values_y, area_work_content_x, "Song-level samples don't trigger per pattern.", theme["muted"])
         # safe_add(playhead_y, area_work_content_x, "Enter on track name toggles Pattern/Song mode.", theme["muted"])
-    elif active_tab == 2:
+    elif active_tab == TAB_MIXER:
         mixer_base_x = area_work_content_x + len("1 ") + 2
         mixer_audio_x = mixer_base_x + 13
         safe_add(playhead_y, mixer_base_x, "Sequencer Tracks", theme["title"])
         safe_add(playhead_y, mixer_audio_x, "Audio Tracks", theme["title"])
 
     row_start = area_work_top + 4
-    visible_rows = TRACKS if active_tab == 0 else (0 if active_tab == 3 else (TRACKS - 1))
-    if active_tab == 0:
+    pattern_count = seq.pattern_count()
+    song_chain_count = len(seq.chain)
+    if active_tab == TAB_SEQUENCER:
+        visible_rows = TRACKS
+    elif active_tab == TAB_EXPORT:
+        visible_rows = 0
+    elif active_tab == TAB_SONG:
+        visible_rows = max(pattern_count, song_chain_count, 1)
+    else:
+        visible_rows = TRACKS - 1
+    if active_tab == TAB_SEQUENCER:
         track_order = [t for t in range(TRACKS - 1)]
-    elif active_tab == 1:
+    elif active_tab == TAB_AUDIO:
         sort_audio_tracks_by_type = bool(ui_options.get("sort_audio_tracks_by_type_enabled", True))
         if sort_audio_tracks_by_type:
             track_order = (
@@ -492,7 +518,7 @@ def draw(
     else:
         track_order = [t for t in range(TRACKS - 1)]
     first_song_row = None
-    if active_tab == 1:
+    if active_tab == TAB_AUDIO:
         for idx, tr in enumerate(track_order):
             if seq.audio_track_mode[tr] == 1:
                 first_song_row = idx
@@ -502,33 +528,54 @@ def draw(
         y = row_start + row_idx
         if y >= area_work_bottom:
             continue
-        t = row_idx if active_tab == 0 else track_order[row_idx]
+        if active_tab == TAB_SONG:
+            left_attr = theme["text"]
+            right_attr = theme["text"]
+            left_selected = song_content_focus and cursor_x == 0 and cursor_y == row_idx
+            right_selected = song_content_focus and cursor_x == 1 and cursor_y == row_idx
+            left_name = texts.labels.rows.no_patterns
+            if row_idx < pattern_count:
+                left_name = f"{row_idx + 1} {seq.get_pattern_name(row_idx)}"
+            right_name = texts.labels.rows.browser_empty
+            if row_idx < song_chain_count:
+                chain_pattern = int(seq.chain[row_idx])
+                right_name = f"{chain_pattern + 1} {seq.get_pattern_name(chain_pattern)}"
+            left_title_x = area_work_content_x
+            right_title_x = max(left_title_x + 20, (w // 2))
+            if row_idx == 0:
+                safe_add(playhead_y, left_title_x, "Patterns", theme["title"])
+                safe_add(playhead_y, right_title_x, "Chain List", theme["title"])
+            safe_add(y, left_title_x, left_name[:max(1, right_title_x - left_title_x - 2)], left_attr | (theme["selected"] if left_selected else 0), transform_case=False)
+            safe_add(y, right_title_x, right_name[:max(1, area_work_right - right_title_x - 1)], right_attr | (theme["selected"] if right_selected else 0), transform_case=False)
+            continue
+
+        t = row_idx if active_tab == TAB_SEQUENCER else track_order[row_idx]
 
         row_attr = theme["accent"] if t == ACCENT_TRACK else theme["text"]
         if seq.muted_rows[t]:
             row_attr = theme["muted"]
-        if active_tab == 1 and seq.audio_track_mode[t] == 1:
+        if active_tab == TAB_AUDIO and seq.audio_track_mode[t] == 1:
             row_attr = theme["accent"]
         # No extra separator line in Audio view; ordering + color indicate grouping.
 
         x = area_work_content_x
-        if active_tab == 1:
+        if active_tab == TAB_AUDIO:
             row_label = f"{t+1} "
-        elif active_tab == 2:
+        elif active_tab == TAB_MIXER:
             row_label = f"{t+1} "
         else:
             row_label = "A " if t == ACCENT_TRACK else f"{t+1} "
         label_attr = row_attr
         trigger_arr = getattr(
             seq,
-            "audio_track_trigger_until" if active_tab == 1 else "seq_track_trigger_until",
+            "audio_track_trigger_until" if active_tab == TAB_AUDIO else "seq_track_trigger_until",
             [0.0] * TRACKS,
         )
         if t < TRACKS - 1 and not seq.muted_rows[t] and trigger_arr[t] > now_pc:
             label_attr = theme["playhead"]
         track_label_selected = (
             (active_tab == 0 and sequencer_content_focus)
-            or (active_tab == 1 and audio_content_focus)
+            or (active_tab == TAB_AUDIO and audio_content_focus)
         ) and cursor_x == TRACK_LABEL_COL and cursor_y == row_idx
         if track_label_selected:
             label_attr = label_attr | theme["selected"]
@@ -546,7 +593,7 @@ def draw(
         show_steps_outside_pattern = ui_options.get("show_steps_outside_pattern_enabled", True)
 
         # --- Audio tab UI elements: audio parameter columns + sample-name column last ---
-        if active_tab == 1:
+        if active_tab == TAB_AUDIO:
             sample_name = seq.get_audio_track_name(seq.view_pattern, t)
             ch_tag = "◯◯" if seq.get_audio_track_channels(seq.view_pattern, t) >= 2 else "◯"
             sample_name_width = col_cell_width("audio_name")
@@ -559,7 +606,7 @@ def draw(
             body = f"[{sample_field}]" if body_selected else f" {sample_field} "
             attr = row_attr | (theme["selected"] if body_selected else 0)
             safe_add(y, x, body, attr, transform_case=False)
-        elif active_tab == 2:
+        elif active_tab == TAB_MIXER:
             seq_pan = seq.seq_track_pan[t]
             seq_vol = seq.seq_track_volume[t]
             seq_prob = seq.seq_track_probability[t]
@@ -641,7 +688,7 @@ def draw(
                 x += 1 + seq_col_gap
 
     # --- Export tab inline content ---
-    if active_tab == 3:
+    if active_tab == TAB_EXPORT:
         ex = area_work_content_x
         ey = area_work_top + 1
         safe_add(ey, ex, "Export Audio", theme["title"])
@@ -693,7 +740,7 @@ def draw(
 
     def current_preview_name():
         """Return the current sample name for preview help text in Audio and Sequencer views."""
-        if active_tab == 1:
+        if active_tab == TAB_AUDIO:
             if cursor_y < TRACKS - 1 and track_order:
                 active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
                 return str(seq.get_audio_track_name(seq.view_pattern, active_track))
@@ -735,37 +782,41 @@ def draw(
             help_line = texts.help.header.chain_set
         else:
             help_line = texts.help.header.default
-    elif active_tab == 2 and cursor_x == 0:
+    elif active_tab == TAB_SONG and cursor_x == 0:
+        help_line = texts.help.song[0]
+    elif active_tab == TAB_SONG and cursor_x == 1:
+        help_line = texts.help.song[1]
+    elif active_tab == TAB_MIXER and cursor_x == 0:
         help_line = texts.help.mixer[0]
-    elif active_tab == 2 and cursor_x == 1:
+    elif active_tab == TAB_MIXER and cursor_x == 1:
         help_line = texts.help.mixer[1]
-    elif active_tab == 2 and cursor_x == 2:
+    elif active_tab == TAB_MIXER and cursor_x == 2:
         help_line = texts.help.mixer[2]
-    elif active_tab == 2 and cursor_x == 3:
+    elif active_tab == TAB_MIXER and cursor_x == 3:
         help_line = texts.help.mixer[3]
-    elif active_tab == 2 and cursor_x == 4:
+    elif active_tab == TAB_MIXER and cursor_x == 4:
         help_line = texts.help.mixer[4]
-    elif active_tab == 2 and cursor_x == 5:
+    elif active_tab == TAB_MIXER and cursor_x == 5:
         help_line = texts.help.mixer[5]
-    elif active_tab == 3 and cursor_y == 0:
+    elif active_tab == TAB_EXPORT and cursor_y == 0:
         help_line = texts.help.export[0]
-    elif active_tab == 3 and cursor_y == 1:
+    elif active_tab == TAB_EXPORT and cursor_y == 1:
         help_line = texts.help.export[1]
-    elif active_tab == 3 and cursor_y == 2:
+    elif active_tab == TAB_EXPORT and cursor_y == 2:
         help_line = texts.help.export[2]
-    elif active_tab == 3 and cursor_y == 3:
+    elif active_tab == TAB_EXPORT and cursor_y == 3:
         help_line = texts.help.export[3]
-    elif active_tab == 3 and cursor_y == 4:
+    elif active_tab == TAB_EXPORT and cursor_y == 4:
         help_line = texts.help.export[4]
-    elif active_tab == 3 and cursor_y == 5:
+    elif active_tab == TAB_EXPORT and cursor_y == 5:
         help_line = texts.help.export[5]
-    elif active_tab == 1 and cursor_x == TRACK_LABEL_COL:
+    elif active_tab == TAB_AUDIO and cursor_x == TRACK_LABEL_COL:
         help_line = texts.help.audio.track_settings
-    elif active_tab == 1 and cursor_x == PREVIEW_COL:
+    elif active_tab == TAB_AUDIO and cursor_x == PREVIEW_COL:
         help_line = texts.preview_sample_help(current_preview_name())
-    elif active_tab == 1 and cursor_x == 0:
+    elif active_tab == TAB_AUDIO and cursor_x == 0:
         help_line = texts.help.audio.track_name
-    elif active_tab == 1 and cursor_y < TRACKS - 1:
+    elif active_tab == TAB_AUDIO and cursor_y < TRACKS - 1:
         active_track = track_order[max(0, min(len(track_order) - 1, cursor_y))]
         help_line = texts.audio_track_sample_help(seq.get_audio_track_name(seq.view_pattern, active_track))
     elif cursor_x == LOAD_COL:
@@ -1544,6 +1595,18 @@ class Controller:
         """Audio tab navigation order matching visual layout."""
         return [TRACK_LABEL_COL, PREVIEW_COL, 0]
 
+    def _song_nav_row_count(self, column=None):
+        """Return visible row count for the Song tab column."""
+        col = self.cursor_x if column is None else int(column)
+        if col == 1:
+            return max(1, len(self.seq.chain))
+        return max(1, self.seq.pattern_count())
+
+    def _clamp_song_cursor(self):
+        """Clamp Song-tab cursor to the active column and available rows."""
+        self.cursor_x = 0 if int(self.cursor_x) <= 0 else 1
+        self.cursor_y = max(0, min(self._song_nav_row_count() - 1, int(self.cursor_y)))
+
     def _sequencer_beat_cols(self):
         """Return beat-start step columns for current visible pattern length."""
         try:
@@ -1636,18 +1699,21 @@ class Controller:
         """Switch active top tab and clamp cursor for that view."""
         self.nav.active_tab = int(tab_index)
         self.nav.clamp()
-        if self.nav.active_tab != 0:
+        if self.nav.active_tab != TAB_SEQUENCER:
             self.nav.pattern.blur()
             self._clear_pattern_param_input()
-        if self.nav.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
+        if self.nav.active_tab == TAB_SEQUENCER and self.cursor_x == AUDIO_VOLUME_COL:
             self.cursor_x = REC_COL
-        if self.nav.active_tab in [1, 2]:
+        if self.nav.active_tab == TAB_SONG:
+            self.cursor_x = 0 if self.cursor_x not in [0, 1] else self.cursor_x
+            self._clamp_song_cursor()
+        if self.nav.active_tab in [TAB_AUDIO, TAB_MIXER]:
             self.cursor_y = min(self.cursor_y, TRACKS - 2)
-        if self.nav.active_tab == 1 and self.cursor_x not in [TRACK_LABEL_COL, PREVIEW_COL, 0]:
+        if self.nav.active_tab == TAB_AUDIO and self.cursor_x not in [TRACK_LABEL_COL, PREVIEW_COL, 0]:
             self.cursor_x = TRACK_LABEL_COL
-        if self.nav.active_tab == 2 and self.cursor_x > 5:
+        if self.nav.active_tab == TAB_MIXER and self.cursor_x > 5:
             self.cursor_x = 0
-        if self.nav.active_tab == 3:
+        if self.nav.active_tab == TAB_EXPORT:
             self.cursor_y = max(0, min(5, self.cursor_y))
             self.cursor_x = 0
 
@@ -1999,7 +2065,7 @@ class Controller:
         self.import_overlay_can_delete_source = bool(can_delete_source)
         self.drop_path_active = False
         self.drop_path_input = ""
-        if self.nav.active_tab == 1:
+        if self.nav.active_tab == TAB_AUDIO:
             default_track = self._track_for_row(self.cursor_y)
         else:
             default_track = self.cursor_y if 0 <= self.cursor_y < (TRACKS - 1) else 0
@@ -2399,11 +2465,11 @@ class Controller:
         key_code = key if isinstance(key, int) else ord(key)
         header_nav = self.nav.header
         pattern_nav = self.nav.pattern
-        if self.nav.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
+        if self.nav.active_tab == TAB_SEQUENCER and self.cursor_x == AUDIO_VOLUME_COL:
             self.cursor_x = REC_COL
         if self.status_message and key_code != -1:
             self.status_message = ""
-        if self.nav.active_tab in [1, 2] and self.cursor_y >= (TRACKS - 1):
+        if self.nav.active_tab in [TAB_AUDIO, TAB_MIXER] and self.cursor_y >= (TRACKS - 1):
             self.cursor_y = TRACKS - 2
 
         if self.confirm_dialog_active:
@@ -3048,7 +3114,7 @@ class Controller:
                 return True
             if header_nav.focus:
                 if header_nav.section == "tabs":
-                    self._set_active_tab((self.nav.active_tab + 1) % 4)
+                    self._set_active_tab((self.nav.active_tab + 1) % len(self.nav.tabs))
                     return True
                 if header_nav.edit_active:
                     param = header_nav.current_param()
@@ -3062,11 +3128,14 @@ class Controller:
                     header_nav.next_param()
                 return True
             else:
-                if self.nav.active_tab == 1:
+                if self.nav.active_tab == TAB_SONG:
+                    self.cursor_x = min(1, self.cursor_x + 1)
+                    self._clamp_song_cursor()
+                elif self.nav.active_tab == TAB_AUDIO:
                     cols = self._audio_nav_cols()
                     idx = cols.index(self.cursor_x) if self.cursor_x in cols else 0
                     self.cursor_x = cols[(idx + 1) % len(cols)]
-                elif self.nav.active_tab == 2:
+                elif self.nav.active_tab == TAB_MIXER:
                     cols = [0, 1, 2, 3, 4, 5]
                     nxt = cols[0]
                     for c in cols:
@@ -3074,7 +3143,7 @@ class Controller:
                             nxt = c
                             break
                     self.cursor_x = nxt
-                elif self.nav.active_tab == 3:
+                elif self.nav.active_tab == TAB_EXPORT:
                     direction = 1
                     self._export_tab_change(direction)
                 else:
@@ -3098,7 +3167,7 @@ class Controller:
                 return True
             if header_nav.focus:
                 if header_nav.section == "tabs":
-                    self._set_active_tab((self.nav.active_tab - 1) % 4)
+                    self._set_active_tab((self.nav.active_tab - 1) % len(self.nav.tabs))
                     return True
                 if header_nav.edit_active:
                     param = header_nav.current_param()
@@ -3112,11 +3181,14 @@ class Controller:
                     header_nav.prev_param()
                 return True
             else:
-                if self.nav.active_tab == 1:
+                if self.nav.active_tab == TAB_SONG:
+                    self.cursor_x = max(0, self.cursor_x - 1)
+                    self._clamp_song_cursor()
+                elif self.nav.active_tab == TAB_AUDIO:
                     cols = self._audio_nav_cols()
                     idx = cols.index(self.cursor_x) if self.cursor_x in cols else 0
                     self.cursor_x = cols[(idx - 1) % len(cols)]
-                elif self.nav.active_tab == 2:
+                elif self.nav.active_tab == TAB_MIXER:
                     cols = [0, 1, 2, 3]
                     prev = cols[-1]
                     for c in reversed(cols):
@@ -3124,7 +3196,7 @@ class Controller:
                             prev = c
                             break
                     self.cursor_x = prev
-                elif self.nav.active_tab == 3:
+                elif self.nav.active_tab == TAB_EXPORT:
                     direction = -1
                     self._export_tab_change(direction)
                 else:
@@ -3155,14 +3227,16 @@ class Controller:
                     self.nav.header_move_up()
                 return True
             if self.cursor_y == 0:
-                if self.nav.active_tab == 0:
+                if self.nav.active_tab == TAB_AUDIO:
                     self.nav.focus_pattern_from_grid()
                 else:
                     self._focus_header_nav(section="tabs", edit_active=False)
             else:
-                if self.nav.active_tab in [1, 2]:
+                if self.nav.active_tab == TAB_SONG:
                     self.cursor_y = max(0, self.cursor_y - 1)
-                elif self.nav.active_tab == 3:
+                elif self.nav.active_tab in [TAB_AUDIO, TAB_MIXER]:
+                    self.cursor_y = max(0, self.cursor_y - 1)
+                elif self.nav.active_tab == TAB_EXPORT:
                     self.cursor_y = max(0, self.cursor_y - 1)
                 else:
                     self.move_cursor(0, -1)
@@ -3189,12 +3263,14 @@ class Controller:
                     if self.nav.active_tab == 0:
                         self._focus_pattern_params(index=0, edit_active=False)
                     else:
-                        self.cursor_y = 1  # Move into sequencer grid below header
+                        self.cursor_y = 0
                     return True
             else:
-                if self.nav.active_tab in [1, 2]:
+                if self.nav.active_tab == TAB_SONG:
+                    self.cursor_y = min(self._song_nav_row_count() - 1, self.cursor_y + 1)
+                elif self.nav.active_tab in [TAB_AUDIO, TAB_MIXER]:
                     self.cursor_y = min(TRACKS - 2, self.cursor_y + 1)
-                elif self.nav.active_tab == 3:
+                elif self.nav.active_tab == TAB_EXPORT:
                     self.cursor_y = min(5, self.cursor_y + 1)
                 else:
                     self.move_cursor(0, 1)
@@ -3209,16 +3285,20 @@ class Controller:
                 return True
             if header_nav.focus:
                 if header_nav.section == "tabs":
-                    self._set_active_tab((self.nav.active_tab + 1) % 4)
+                    self._set_active_tab((self.nav.active_tab + 1) % len(self.nav.tabs))
                 elif not header_nav.edit_active:
                     header_nav.next_param()
                 return True
-            if self.nav.active_tab == 1:
+            if self.nav.active_tab == TAB_SONG:
+                self.cursor_x = 1 if self.cursor_x == 0 else 0
+                self._clamp_song_cursor()
+                return True
+            if self.nav.active_tab == TAB_AUDIO:
                 cycle = self._audio_nav_cols()
                 idx = cycle.index(self.cursor_x) if self.cursor_x in cycle else -1
                 self.cursor_x = cycle[(idx + 1) % len(cycle)]
                 return True
-            elif self.nav.active_tab == 2:
+            elif self.nav.active_tab == TAB_MIXER:
                 cycle = [0, 1, 2, 3, 4, 5]
                 next_idx = (cycle.index(self.cursor_x) + 1) % len(cycle) if self.cursor_x in cycle else 0
                 self.cursor_x = cycle[next_idx]
@@ -3257,16 +3337,20 @@ class Controller:
                 return True
             if header_nav.focus:
                 if header_nav.section == "tabs":
-                    self._set_active_tab((self.nav.active_tab - 1) % 4)
+                    self._set_active_tab((self.nav.active_tab - 1) % len(self.nav.tabs))
                 elif not header_nav.edit_active:
                     header_nav.prev_param()
                 return True
-            if self.nav.active_tab == 1:
+            if self.nav.active_tab == TAB_SONG:
+                self.cursor_x = 0 if self.cursor_x == 1 else 1
+                self._clamp_song_cursor()
+                return True
+            if self.nav.active_tab == TAB_AUDIO:
                 cycle = self._audio_nav_cols()
                 idx = cycle.index(self.cursor_x) if self.cursor_x in cycle else 0
                 self.cursor_x = cycle[(idx - 1) % len(cycle)]
                 return True
-            elif self.nav.active_tab == 2:
+            elif self.nav.active_tab == TAB_MIXER:
                 cycle = [0, 1, 2, 3, 4, 5]
                 prev_idx = (cycle.index(self.cursor_x) - 1) % len(cycle) if self.cursor_x in cycle else len(cycle) - 1
                 self.cursor_x = cycle[prev_idx]
@@ -3442,8 +3526,8 @@ class Controller:
             # BPM header is now handled by text input dialog only, no live digit typing
             if header_nav.focus and header_nav.section == "params" and header_nav.current_param() == "bpm":
                 return True
-            track_idx = self._track_for_row(self.cursor_y) if self.nav.active_tab == 1 else self.cursor_y
-            if self.nav.active_tab == 2:
+            track_idx = self._track_for_row(self.cursor_y) if self.nav.active_tab == TAB_AUDIO else self.cursor_y
+            if self.nav.active_tab == TAB_MIXER:
                 track_idx = max(0, min(TRACKS - 2, self.cursor_y))
                 if self.cursor_x == 0 and velocity > 0:
                     self.seq.set_track_pan(track_idx, velocity)
@@ -3458,13 +3542,13 @@ class Controller:
                 elif self.cursor_x == 5:
                     self.seq.set_audio_track_volume(self.seq.view_pattern, track_idx, velocity)
                 return True
-            if self.nav.active_tab == 1 and self.cursor_x == TRACK_LABEL_COL:
+            if self.nav.active_tab == TAB_AUDIO and self.cursor_x == TRACK_LABEL_COL:
                 self.audio_track_params_dialog_active = True
                 self.audio_track_params_dialog_track = max(0, min(TRACKS - 2, track_idx))
                 self.audio_track_params_dialog_index = 2
                 self._apply_audio_track_params_dialog(initial_input_override=velocity)
                 return True
-            elif self.nav.active_tab == 1:
+            elif self.nav.active_tab == TAB_AUDIO:
                 return True
             elif self.cursor_x == PREVIEW_COL:
                 pass
@@ -3528,12 +3612,16 @@ class Controller:
                 return True
             if header_nav.focus:
                 if header_nav.section == "tabs":
-                    if self.nav.active_tab == 0:
+                    if self.nav.active_tab == TAB_SEQUENCER:
                         self.status_message = texts.status.generic.sequencer_view
-                    elif self.nav.active_tab == 1:
+                    elif self.nav.active_tab == TAB_SONG:
+                        self.status_message = texts.status.generic.song_view
+                    elif self.nav.active_tab == TAB_AUDIO:
                         self.status_message = texts.status.generic.audio_view
-                    else:
+                    elif self.nav.active_tab == TAB_MIXER:
                         self.status_message = texts.status.generic.mixer_view
+                    else:
+                        self.status_message = texts.status.generic.export_view
                     return True
                 param = header_nav.current_param()
                 if param == "file":
@@ -3592,7 +3680,20 @@ class Controller:
                 else:
                     header_nav.edit_active = not header_nav.edit_active
                 return True
-            if self.nav.active_tab == 1:
+            if self.nav.active_tab == TAB_SONG:
+                if self.cursor_x == 0:
+                    ok, message = self.seq.append_pattern_to_chain(self.cursor_y)
+                    self.status_message = message
+                    if ok:
+                        self.cursor_x = 1
+                        self.cursor_y = max(0, len(self.seq.chain) - 1)
+                    self._clamp_song_cursor()
+                    return True
+                ok, message = self.seq.remove_chain_item(self.cursor_y)
+                self.status_message = message
+                self._clamp_song_cursor()
+                return True
+            if self.nav.active_tab == TAB_AUDIO:
                 track_idx = self._track_for_row(self.cursor_y)
                 if self.cursor_x == TRACK_LABEL_COL:
                     self.audio_track_params_dialog_active = True
@@ -3604,10 +3705,10 @@ class Controller:
                         ok, message = self.seq.preview_audio_track_slot(self.seq.view_pattern, track_idx)
                         self.status_message = message
                 return True
-            if self.nav.active_tab == 2:
+            if self.nav.active_tab == TAB_MIXER:
                 self.status_message = texts.status.generic.mixer_hint
                 return True
-            if self.nav.active_tab == 3:
+            if self.nav.active_tab == TAB_EXPORT:
                 if self.cursor_y == 4:
                     if self.cursor_x == 0:
                         self.export_eq_enabled = not self.export_eq_enabled
@@ -3640,13 +3741,15 @@ class Controller:
             if self.nav.active_tab == 0:
                 self.seq.toggle_mute_row(self.cursor_y)
         elif self.keymap.matches("tab_1", event_tokens):
-            self._set_active_tab(0)
+            self._set_active_tab(TAB_SEQUENCER)
         elif self.keymap.matches("tab_2", event_tokens):
-            self._set_active_tab(1)
+            self._set_active_tab(TAB_SONG)
         elif self.keymap.matches("tab_3", event_tokens):
-            self._set_active_tab(2)
+            self._set_active_tab(TAB_AUDIO)
         elif self.keymap.matches("tab_4", event_tokens):
-            self._set_active_tab(3)
+            self._set_active_tab(TAB_MIXER)
+        elif self.keymap.matches("tab_5", event_tokens):
+            self._set_active_tab(TAB_EXPORT)
         elif self.keymap.matches("pattern_prev", event_tokens):
             self.seq.select_pattern(max(0, self.seq.view_pattern - 1))
         elif self.keymap.matches("pattern_next", event_tokens):
@@ -3805,10 +3908,12 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
     tab_2_binding = str(_colors.get("hotkey_tab_2", "F2")).strip() or "F2"
     tab_3_binding = str(_colors.get("hotkey_tab_3", "F3")).strip() or "F3"
     tab_4_binding = str(_colors.get("hotkey_tab_4", "x")).strip() or "x"
+    tab_5_binding = str(_colors.get("hotkey_tab_5", "c")).strip() or "c"
     keymap.set_binding("tab_1", tab_1_binding)
     keymap.set_binding("tab_2", tab_2_binding)
     keymap.set_binding("tab_3", tab_3_binding)
     keymap.set_binding("tab_4", tab_4_binding)
+    keymap.set_binding("tab_5", tab_5_binding)
     controller = Controller(seq, keymap, _export_settings)
     controller.record_input_metering_enabled = record_input_metering_enabled
     controller.sort_audio_tracks_by_type_enabled = sort_audio_tracks_by_type_enabled
@@ -3818,6 +3923,7 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
     tab_2_label = keymap.label("tab_2")
     tab_3_label = keymap.label("tab_3")
     tab_4_label = keymap.label("tab_4")
+    tab_5_label = keymap.label("tab_5")
     clear_key_label = keymap.label("clear_pattern")
     length_dec_label = keymap.label("pattern_length_dec")
     length_inc_label = keymap.label("pattern_length_inc")
@@ -4047,6 +4153,7 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 tab_2_label,
                 tab_3_label,
                 tab_4_label,
+                tab_5_label,
                 controller.export_eq_enabled,
                 controller.export_tape_enabled,
                 clear_key_label,

@@ -2315,6 +2315,59 @@ class Sequencer:
                 return True, texts.fmt(texts.backend.sequencer.song.set_max, max_steps=CHAIN_MAX_STEPS)
             return True, texts.backend.sequencer.song.set
 
+    def append_pattern_to_chain(self, pattern_index):
+        """Append one pattern to the song chain without opening text input."""
+        with self.transport_lock:
+            idx = int(pattern_index)
+            if idx < 0 or idx >= self.pattern_count():
+                return False, texts.backend.sequencer.audio_track.invalid_pattern
+            if len(self.chain) >= CHAIN_MAX_STEPS:
+                return False, texts.fmt(texts.backend.sequencer.song.full, max_steps=CHAIN_MAX_STEPS)
+            self.chain.append(idx)
+            if len(self.chain) == 1:
+                self.chain_pos = 0
+                if self.chain_enabled:
+                    self.pattern = self.chain[0]
+            elif self.pattern in self.chain:
+                self.chain_pos = self.chain.index(self.pattern)
+            else:
+                self.chain_pos = min(self.chain_pos, len(self.chain) - 1)
+            self.dirty = True
+            return True, texts.fmt(texts.backend.sequencer.song.appended, pattern_num=idx + 1)
+
+    def remove_chain_item(self, chain_index):
+        """Remove one item from the song chain by chain-list position."""
+        with self.transport_lock:
+            if chain_index < 0 or chain_index >= len(self.chain):
+                return False, texts.backend.sequencer.song.invalid_chain_empty
+
+            removed_pattern = int(self.chain[chain_index])
+            del self.chain[chain_index]
+
+            if not self.chain:
+                self.chain_enabled = False
+                self.chain_pos = 0
+                self.pattern = self.view_pattern
+                self.next_pattern = None
+                self.step = 0
+                self.pending_events.clear()
+                self.pending_midi_off.clear()
+                self.song_audio_started = False
+                self.dirty = True
+                return True, texts.backend.sequencer.song.removed_last
+
+            if self.chain_enabled:
+                self.chain_pos = min(self.chain_pos, len(self.chain) - 1)
+                self.pattern = self.chain[self.chain_pos]
+                if self.follow_song:
+                    self.view_pattern = self.pattern
+                self.next_pattern = None
+            else:
+                self._sync_chain_pos_to_pattern()
+
+            self.dirty = True
+            return True, texts.fmt(texts.backend.sequencer.song.removed, pattern_num=removed_pattern + 1)
+
     def chain_display(self):
         if not self.chain_enabled:
             return "OFF"

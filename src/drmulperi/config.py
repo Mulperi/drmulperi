@@ -25,6 +25,7 @@ DEFAULT_KEYMAP = {
     "tab_2": "F2",
     "tab_3": "F3",
     "tab_4": "X",
+    "tab_5": "C",
     "patterns_overlay": "E,O",
     "mode_toggle": "V",
     "clear_pattern": "N",

@@ -140,6 +140,7 @@ def _load_ui_settings(path=SETTINGS_PATH):
         "hotkey_tab_2": "F2",
         "hotkey_tab_3": "F3",
         "hotkey_tab_4": "x",
+        "hotkey_tab_5": "c",
         "text_bold": "off",
         "text_uppercase": "on",
         "rec_input_metering": "off",

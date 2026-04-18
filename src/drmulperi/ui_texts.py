@@ -56,6 +56,10 @@ help = TextNode(
             4: "Mixer: Audio track pan (1-9). Type number to set.",
             5: "Mixer: Audio track volume (0-9). Type number to set.",
         },
+        "song": {
+            0: "Song: patterns list. Enter adds selected pattern to the chain.",
+            1: "Song: chain list. Enter removes selected item from the chain.",
+        },
         "export": {
             0: "Export: Bit depth (8/12/16-bit). Arrows/Space to cycle.",
             1: "Export: Sample rate. Arrows/Space to cycle.",
@@ -195,8 +199,10 @@ status = TextNode(
             "import_canceled_deleted": "Import canceled and recording deleted",
             "mixer_hint": "Mixer: type 1-9 for pan, 0-9 for volume",
             "sequencer_view": "Sequencer view",
+            "song_view": "Song view",
             "audio_view": "Audio view",
             "mixer_view": "Mixer view",
+            "export_view": "Export view",
         },
         "pattern": {
             "steps": "Pattern steps: {value}",
@@ -314,8 +320,12 @@ backend = TextNode(
                 "invalid_chain_use": "Invalid chain (use pattern numbers 1-{max_patterns})",
                 "invalid_chain_range": "Invalid chain (pattern range 1-{max_patterns})",
                 "invalid_chain_empty": "Invalid chain (empty)",
+                "full": "Song already has max {max_steps} steps",
                 "set_max": "Song set (max {max_steps} steps)",
                 "set": "Song set",
+                "appended": "Added pattern {pattern_num} to song",
+                "removed": "Removed pattern {pattern_num} from song",
+                "removed_last": "Removed last song item",
             },
             "midi": {
                 "on": "MIDI OUT ON",
