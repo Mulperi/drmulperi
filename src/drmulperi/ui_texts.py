@@ -169,8 +169,10 @@ prompt = TextNode(
                 "Group 0-9",
                 "Pitch 0-24",
                 "Shift 0-9",
+                "Preview Sample",
                 "Load Sample",
             ],
+            "preview_action": "Preview Sample - Enter preview, second press stops",
             "load_action": "Load Sample - Left/Right track, Up/Down field, Enter browse",
             "edit_hint": "(Enter or type digit to edit in dialog, Left/Right track, Up/Down field, Esc close)",
         },
@@ -198,7 +200,7 @@ status = TextNode(
             "recording_file_missing": "Recording file was already missing",
             "import_canceled_deleted": "Import canceled and recording deleted",
             "mixer_hint": "Mixer: type 1-9 for pan, 0-9 for volume",
-            "sequencer_view": "Sequencer view",
+            "pattern_view": "Pattern view",
             "song_view": "Song view",
             "audio_view": "Audio view",
             "mixer_view": "Mixer view",
@@ -426,6 +428,8 @@ def path_label(path):
 
 def track_params_prompt(track_name, index):
     if index == 6:
+        return f"{track_name} {prompt.track_params.preview_action}"
+    if index == 7:
         return f"{track_name} {prompt.track_params.load_action}"
     return f"{track_name} {prompt.track_params.names[index]} {prompt.track_params.edit_hint}"
 

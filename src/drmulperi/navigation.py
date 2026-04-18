@@ -135,7 +135,7 @@ class PatternParamsNavigation:
 class NavigationModel:
     header: HeaderNavigation = field(default_factory=HeaderNavigation)
     pattern: PatternParamsNavigation = field(default_factory=PatternParamsNavigation)
-    tabs: tuple[str, ...] = ("sequencer", "song", "audio", "mixer", "export")
+    tabs: tuple[str, ...] = ("pattern", "song", "audio", "mixer", "export")
     active_tab: int = 0
 
     def clamp(self):

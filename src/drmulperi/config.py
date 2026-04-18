@@ -11,21 +11,24 @@ REC_COL        = -3
 CLEAR_COL       = -4
 TRACK_PITCH_COL = -5
 PATTERNS = 4
-KEYMAP_PATH = "keymap.ini"
 SETTINGS_PATH = "settings.ini"
+KEYMAP_PATH = SETTINGS_PATH
 
 ACCENT_TRACK = 8
 ACCENT_BOOST = 0.35
 
 DEFAULT_KEYMAP = {
     "file_menu": "F",
-    "pattern_menu": "P",
+    "edit_menu": "P",
     "record_menu": "R",
     "tab_1": "F1",
     "tab_2": "F2",
     "tab_3": "F3",
     "tab_4": "X",
     "tab_5": "C",
+    "tab_next": "]",
+    "tab_previous": "[",
+    "sample_preview": "SPACE",
     "patterns_overlay": "E,O",
     "mode_toggle": "V",
     "clear_pattern": "N",

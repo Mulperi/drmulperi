@@ -106,6 +106,24 @@ def _normalize_dropped_path(raw_path):
         pass
     return os.path.expanduser(text)
 
+
+class ScrollTextField:
+    """Generic horizontally scrolling text field for fixed-width UI columns."""
+
+    def __init__(self, step_frames=5, separator="   "):
+        self.step_frames = max(1, int(step_frames))
+        self.separator = str(separator)
+
+    def render(self, text, width, tick):
+        raw = str(text or "")
+        width = max(1, int(width))
+        if len(raw) <= width:
+            return raw.ljust(width)
+        loop = raw + self.separator
+        offset = (max(0, int(tick)) // self.step_frames) % len(loop)
+        doubled = loop + loop
+        return doubled[offset: offset + width]
+
 def draw(
     stdscr,
     seq,
@@ -171,6 +189,8 @@ def draw(
     track_params_dialog_track,
     track_params_dialog_index,
     track_params_dialog_input,
+    scroll_text,
+    scroll_tick,
     audio_track_params_dialog_active,
     audio_track_params_dialog_track,
     audio_track_params_dialog_index,
@@ -309,6 +329,13 @@ def draw(
     area_work_bottom = h - 3
     draw_box(area_work_left, area_work_top, area_work_right, area_work_bottom, frame_attr)
 
+    # Static UI anchor coordinates used by multiple layout sections.
+    ui_origins = {
+        "menubar": {"x": area_work_left, "y": area_menubar},
+        "work": {"x": area_work_left, "y": area_work_top},
+        "work_content": {"x": area_work_left + 2, "y": area_work_top + 1},
+    }
+
     mode = {
         "velocity": "VELOCITY",
         "ratchet": "RATCHET",
@@ -319,7 +346,7 @@ def draw(
     # Menubar options are defined here. Edit labels/ordering in this list.
     top_menus = [
         ("file", " FILE "),
-        ("pattern", " PATT "),
+        ("pattern", " EDIT "),
         ("song", " SONG "),
         ("record", " REC "),
         ("bpm", f" {seq.bpm} "),
@@ -342,28 +369,18 @@ def draw(
         if header_focus and header_section == "params" and header_param == menu_key:
             menu_attr = menu_attr | theme["selected"]
         safe_add(outer_top, menu_x, menu_label, menu_attr)
-        if menu_key in {"file", "pattern", "record"} and len(menu_label) > 2:
-            safe_add(outer_top, menu_x + 1, menu_label[1], menu_attr | curses.A_UNDERLINE)
         menu_x += len(menu_label) + 1
 
-    tabs = [
-        ("seq", tab_1_label),
-        ("song", tab_2_label),
-        ("aud", tab_3_label),
-        ("mix", tab_4_label),
-        ("exp", tab_5_label),
-    ]
-    tx = 3
-    for i, (label, hotkey) in enumerate(tabs):
-        tab_text = f"┌ {label} {hotkey} ┐"
+    tabs = ["pattern", "song", "aud", "mix", "exp"]
+    tx = ui_origins["menubar"]["x"]
+    for i, label in enumerate(tabs):
+        tab_text = f"┌ {label} ┐"
         attr = theme["muted"]
         if i == active_tab:
             attr = theme["title"]
         if header_focus and header_section == "tabs" and i == active_tab:
             attr = attr | theme["selected"]
         safe_add(area_menubar, tx, tab_text, attr)
-        hotkey_x = tx + len(f"┌ {label} ")
-        safe_add(area_menubar, hotkey_x, hotkey, attr | curses.A_UNDERLINE)
         tx += len(tab_text) + 1
 
     content_x = max(header_left + 2, tx + 2)
@@ -398,7 +415,7 @@ def draw(
                 song_parts.append(label)
     song_line = "-".join(song_parts) if song_parts else "-"
 
-    area_work_content_x = area_work_left + 2
+    area_work_content_x = ui_origins["work_content"]["x"]
     # Two control rows directly under tabs (pattern controls area).
     area_patt_controls = (area_work_top + 1, area_work_top + 2)
     area_patt_controls_y = area_patt_controls[0]
@@ -467,9 +484,6 @@ def draw(
     # --- Sequencer tab UI elements: playhead lane + step-grid baseline ---
     seq_col_gap = 1 if ui_options.get("seq_grid_wide_enabled", False) else 0
     if active_tab == 0:
-        # Sequencer view: reserve the preview slot before the step grid.
-        safe_add(playhead_y, x, " " * (1 + seq_col_gap), theme["text"])
-        x += 1 + seq_col_gap
         step_x = x
         _max_steps = seq.max_step_count
         step_span = _max_steps * (1 + seq_col_gap)
@@ -542,11 +556,15 @@ def draw(
                 right_name = f"{chain_pattern + 1} {seq.get_pattern_name(chain_pattern)}"
             left_title_x = area_work_content_x
             right_title_x = max(left_title_x + 20, (w // 2))
+            left_width = max(1, right_title_x - left_title_x - 2)
+            right_width = max(1, area_work_right - right_title_x - 1)
             if row_idx == 0:
                 safe_add(playhead_y, left_title_x, "Patterns", theme["title"])
                 safe_add(playhead_y, right_title_x, "Chain List", theme["title"])
-            safe_add(y, left_title_x, left_name[:max(1, right_title_x - left_title_x - 2)], left_attr | (theme["selected"] if left_selected else 0), transform_case=False)
-            safe_add(y, right_title_x, right_name[:max(1, area_work_right - right_title_x - 1)], right_attr | (theme["selected"] if right_selected else 0), transform_case=False)
+            left_view = scroll_text.render(left_name, left_width, scroll_tick + (row_idx * 5))
+            right_view = scroll_text.render(right_name, right_width, scroll_tick + (row_idx * 5) + 9)
+            safe_add(y, left_title_x, left_view, left_attr | (theme["selected"] if left_selected else 0), transform_case=False)
+            safe_add(y, right_title_x, right_view, right_attr | (theme["selected"] if right_selected else 0), transform_case=False)
             continue
 
         t = row_idx if active_tab == TAB_SEQUENCER else track_order[row_idx]
@@ -636,15 +654,7 @@ def draw(
                 safe_add(y, x, f"{text:>{cell_w}}", cell_attr)
                 x += cell_w
         else:
-            # --- Sequencer tab UI elements: preview + step grid + per-track params ---
-            # Sequencer view: preview is shown next to the track label (before steps).
-            preview_char = "▶" if t != ACCENT_TRACK else " "
-            preview_attr = row_attr
-            if sequencer_content_focus and cursor_x == PREVIEW_COL and cursor_y == t:
-                preview_attr = preview_attr | theme["selected"]
-            safe_add(y, x, f"{preview_char:>1}", preview_attr)
-            x += 1 + seq_col_gap
-
+            # --- Sequencer tab UI elements: step grid + per-track params ---
             # Sequencer grid: compact 1-char step cells.
             for s in range(seq.max_step_count):
                 val = seq.grid[seq.view_pattern][t][s]
@@ -1309,6 +1319,7 @@ def draw(
             ("Group (0-9)", str(seq.seq_track_group[track_params_dialog_track])),
             ("Pitch (0-24)", str(seq.seq_track_pitch[track_params_dialog_track] + 12)),
             ("Shift (0-9)", str(seq.seq_track_shift[track_params_dialog_track])),
+            ("Preview Sample", "Press Enter"),
             ("Load Sample", "Press Enter"),
         ]
         box_width = min(w - 8, max(50, len(track_name) + 6))
@@ -1385,7 +1396,22 @@ def draw(
             safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
         safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
         safe_add(box_top + 2, box_left + 2, (message or texts.dialog["text_input"].description)[: box_width - 4], theme["muted"], transform_case=False)
-        safe_add(box_top + 4, box_left + 3, (input_text[:input_width]).ljust(input_width), theme["text"] | curses.A_UNDERLINE, transform_case=False)
+
+        # Keep the end of long text visible so the caret stays at current typing position.
+        display_text = input_text[-input_width:] if len(input_text) > input_width else input_text
+        field_x = box_left + 3
+        field_y = box_top + 4
+        safe_add(field_y, field_x, display_text.ljust(input_width), theme["text"] | curses.A_UNDERLINE, transform_case=False)
+
+        # Draw a blinking caret in the input field.
+        if int(time.perf_counter() * 2) % 2 == 0:
+            if len(display_text) < input_width:
+                caret_idx = len(display_text)
+                caret_char = "_"
+            else:
+                caret_idx = input_width - 1
+                caret_char = display_text[-1] if display_text else "_"
+            safe_add(field_y, field_x + caret_idx, caret_char, theme["selected"], transform_case=False)
 
         cancel_attr = theme["text"] | (theme["selected"] if text_input_dialog_index == 0 else 0)
         ok_attr = theme["text"] | (theme["selected"] if text_input_dialog_index == 1 else 0)
@@ -1451,6 +1477,9 @@ class Controller:
         self.track_params_dialog_track = 0
         self.track_params_dialog_index = 0
         self.track_params_dialog_input = ""
+        self.scroll_text = ScrollTextField()
+        self.preview_hotkey_source = None
+        self.preview_hotkey_track = -1
         self.audio_track_params_dialog_active = False
         self.audio_track_params_dialog_track = 0
         self.audio_track_params_dialog_index = 0
@@ -1588,12 +1617,53 @@ class Controller:
         self.cursor_y = (self.cursor_y + dy) % TRACKS
 
     def _sequencer_nav_cols(self):
-        """Sequencer navigation order matching visual layout (track, preview, steps)."""
-        return [TRACK_LABEL_COL, PREVIEW_COL] + list(range(self.seq.max_step_count))
+        """Sequencer navigation order matching visual layout (track, steps)."""
+        return [TRACK_LABEL_COL] + list(range(self.seq.max_step_count))
 
     def _audio_nav_cols(self):
         """Audio tab navigation order matching visual layout."""
         return [TRACK_LABEL_COL, PREVIEW_COL, 0]
+
+    def _toggle_sample_preview(self):
+        """Toggle preview for selected track in Pattern/Audio tabs using hotkey."""
+        if self.nav.active_tab == TAB_SEQUENCER:
+            track = int(self.cursor_y)
+            source = "seq"
+            if track == ACCENT_TRACK:
+                self.status_message = texts.status.generic.accent_no_parameter_here
+                return True
+            if self.preview_hotkey_source == source and self.preview_hotkey_track == track:
+                self.seq.engine.stop_all()
+                if self.seq.midi_out_enabled:
+                    self.seq.midi.all_notes_off()
+                self.preview_hotkey_source = None
+                self.preview_hotkey_track = -1
+                self.status_message = "Preview stopped"
+                return True
+            ok, message = self.seq.preview_row(track)
+            self.status_message = message
+            if ok:
+                self.preview_hotkey_source = source
+                self.preview_hotkey_track = track
+            return True
+
+        if self.nav.active_tab == TAB_AUDIO:
+            track = self._track_for_row(self.cursor_y)
+            source = "audio"
+            if self.preview_hotkey_source == source and self.preview_hotkey_track == track:
+                self.seq.engine.stop_all()
+                self.preview_hotkey_source = None
+                self.preview_hotkey_track = -1
+                self.status_message = "Preview stopped"
+                return True
+            ok, message = self.seq.preview_audio_track_slot(self.seq.view_pattern, track)
+            self.status_message = message
+            if ok:
+                self.preview_hotkey_source = source
+                self.preview_hotkey_track = track
+            return True
+
+        return False
 
     def _song_nav_row_count(self, column=None):
         """Return visible row count for the Song tab column."""
@@ -1916,8 +1986,12 @@ class Controller:
             self.status_message = texts.status.generic.accent_no_track_parameters
             return
 
-        # Index 6 is Load Sample, which opens file browser (no value input needed)
+        # Index 6 previews current sample, index 7 opens sample browser.
         if self.track_params_dialog_index == 6:
+            ok, message = self.seq.preview_row(track)
+            self.status_message = message
+            return
+        if self.track_params_dialog_index == 7:
             self._open_file_browser("sample", target_track=track)
             self._close_track_params_dialog()
             return
@@ -2987,7 +3061,7 @@ class Controller:
             menu_items = self._menu_items()
             close_by_hotkey = self.keymap.matches("file_menu", event_tokens)
             if self.pattern_menu_kind == "pattern":
-                close_by_hotkey = close_by_hotkey or self.keymap.matches("pattern_menu", event_tokens)
+                close_by_hotkey = close_by_hotkey or self.keymap.matches("edit_menu", event_tokens)
             if key_code == 27 or close_by_hotkey:
                 menu_kind = self.pattern_menu_kind
                 self._close_pattern_menu()
@@ -3058,13 +3132,13 @@ class Controller:
                     self.track_params_dialog_track = (self.track_params_dialog_track - 1) % max(1, TRACKS - 1)
                 return True
             if key_code in [curses.KEY_DOWN, 9]:
-                self.track_params_dialog_index = (self.track_params_dialog_index + 1) % 7
+                self.track_params_dialog_index = (self.track_params_dialog_index + 1) % 8
                 return True
             if key_code in [curses.KEY_UP, curses.KEY_BTAB]:
-                self.track_params_dialog_index = (self.track_params_dialog_index - 1) % 7
+                self.track_params_dialog_index = (self.track_params_dialog_index - 1) % 8
                 return True
 
-            if isinstance(key, str) and key.isdigit() and self.track_params_dialog_index != 6:
+            if isinstance(key, str) and key.isdigit() and self.track_params_dialog_index not in [6, 7]:
                 self._apply_track_params_dialog(initial_input_override=key)
                 return True
             return True
@@ -3360,8 +3434,8 @@ class Controller:
                     # Reverse beat-hop for Shift+Tab while cursor is inside sequencer steps.
                     beat_cols = self._sequencer_beat_cols()
                     if self.cursor_x <= beat_cols[0]:
-                        # From first beat, exit grid to preview/load columns in reverse order.
-                        self.cursor_x = PREVIEW_COL
+                        # From first beat, exit grid to track-label column in reverse order.
+                        self.cursor_x = TRACK_LABEL_COL
                         return True
                     if self.cursor_x in beat_cols:
                         idx = beat_cols.index(self.cursor_x)
@@ -3419,6 +3493,10 @@ class Controller:
                 self.status_message = texts.fmt(texts.status.pattern.cleared, num=pat_num)
             return True
 
+        if self.keymap.matches("sample_preview", event_tokens):
+            if self._toggle_sample_preview():
+                return True
+
         if isinstance(key, str) and key in ["/", "~"]:
             self.drop_path_active = True
             self.drop_path_input = key
@@ -3435,7 +3513,7 @@ class Controller:
         elif self.keymap.matches("file_menu", event_tokens):
             header_nav.blur()
             self._open_top_menu("file")
-        elif self.keymap.matches("pattern_menu", event_tokens):
+        elif self.keymap.matches("edit_menu", event_tokens):
             header_nav.blur()
             self._open_top_menu("pattern")
         elif self.keymap.matches("record_menu", event_tokens):
@@ -3550,8 +3628,6 @@ class Controller:
                 return True
             elif self.nav.active_tab == TAB_AUDIO:
                 return True
-            elif self.cursor_x == PREVIEW_COL:
-                pass
             elif self.cursor_x == CLEAR_COL:
                 if self.cursor_y != ACCENT_TRACK:
                     self.seq.set_track_group(self.cursor_y, velocity)
@@ -3613,7 +3689,7 @@ class Controller:
             if header_nav.focus:
                 if header_nav.section == "tabs":
                     if self.nav.active_tab == TAB_SEQUENCER:
-                        self.status_message = texts.status.generic.sequencer_view
+                        self.status_message = texts.status.generic.pattern_view
                     elif self.nav.active_tab == TAB_SONG:
                         self.status_message = texts.status.generic.song_view
                     elif self.nav.active_tab == TAB_AUDIO:
@@ -3726,10 +3802,7 @@ class Controller:
 
                     self._open_text_input_dialog(texts.prompt.dialog.export_audio_filename, _do_export_audio)
                 return True
-            if self.cursor_x == PREVIEW_COL:
-                if self.cursor_y != ACCENT_TRACK:
-                    self.seq.preview_row(self.cursor_y)
-            elif self.cursor_x == TRACK_LABEL_COL:
+            if self.cursor_x == TRACK_LABEL_COL:
                 self.track_params_dialog_active = True
                 self.track_params_dialog_track = self.cursor_y
                 self.track_params_dialog_index = 0
@@ -3750,6 +3823,10 @@ class Controller:
             self._set_active_tab(TAB_MIXER)
         elif self.keymap.matches("tab_5", event_tokens):
             self._set_active_tab(TAB_EXPORT)
+        elif self.keymap.matches("tab_next", event_tokens):
+            self._set_active_tab((self.nav.active_tab + 1) % len(self.nav.tabs))
+        elif self.keymap.matches("tab_previous", event_tokens):
+            self._set_active_tab((self.nav.active_tab - 1) % len(self.nav.tabs))
         elif self.keymap.matches("pattern_prev", event_tokens):
             self.seq.select_pattern(max(0, self.seq.view_pattern - 1))
         elif self.keymap.matches("pattern_next", event_tokens):
@@ -3904,16 +3981,6 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
         theme["text_uppercase_enabled"] = text_uppercase_enabled
 
     keymap = Keymap()
-    tab_1_binding = str(_colors.get("hotkey_tab_1", "F1")).strip() or "F1"
-    tab_2_binding = str(_colors.get("hotkey_tab_2", "F2")).strip() or "F2"
-    tab_3_binding = str(_colors.get("hotkey_tab_3", "F3")).strip() or "F3"
-    tab_4_binding = str(_colors.get("hotkey_tab_4", "x")).strip() or "x"
-    tab_5_binding = str(_colors.get("hotkey_tab_5", "c")).strip() or "c"
-    keymap.set_binding("tab_1", tab_1_binding)
-    keymap.set_binding("tab_2", tab_2_binding)
-    keymap.set_binding("tab_3", tab_3_binding)
-    keymap.set_binding("tab_4", tab_4_binding)
-    keymap.set_binding("tab_5", tab_5_binding)
     controller = Controller(seq, keymap, _export_settings)
     controller.record_input_metering_enabled = record_input_metering_enabled
     controller.sort_audio_tracks_by_type_enabled = sort_audio_tracks_by_type_enabled
@@ -3935,6 +4002,8 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
     last_next_pattern = None
     last_playing = None
     last_ui_state = None
+    last_scroll_anim_tick = -1
+    last_caret_anim_tick = -1
 
     while True:
         try:
@@ -3978,6 +4047,15 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
             controller.record_level_db = max(-60.0, min(0.0, db))
             controller.record_level_peak_db = controller.record_level_db
             controller.record_level_tick = int(controller.record_level_tick) + 1
+            should_draw = True
+
+        # Animation-driven redraws for UI elements that must update without input.
+        now_pc = time.perf_counter()
+        scroll_anim_tick = int(now_pc * 10)  # marquee/text scroll speed
+        caret_anim_tick = int(now_pc * 2)    # blinking caret speed
+        if controller.nav.active_tab == TAB_SONG and scroll_anim_tick != last_scroll_anim_tick:
+            should_draw = True
+        if controller.text_input_dialog_active and caret_anim_tick != last_caret_anim_tick:
             should_draw = True
 
         ui_state = (
@@ -4164,6 +4242,8 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 controller.track_params_dialog_track,
                 controller.track_params_dialog_index,
                 controller.track_params_dialog_input,
+                controller.scroll_text,
+                scroll_anim_tick,
                 controller.audio_track_params_dialog_active,
                 controller.audio_track_params_dialog_track,
                 controller.audio_track_params_dialog_index,
@@ -4182,6 +4262,8 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
             last_next_pattern = seq.next_pattern
             last_playing = seq.playing
             last_ui_state = ui_state
+            last_scroll_anim_tick = scroll_anim_tick
+            last_caret_anim_tick = caret_anim_tick
             should_draw = False
 
         time.sleep(0.002)

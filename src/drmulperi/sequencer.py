@@ -3431,17 +3431,20 @@ class Sequencer:
 
     def preview_row(self, track):
         """Preview current track sample (or MIDI note when MIDI mode is on)."""
-        if track >= TRACKS - 1:
-            return
+        if track < 0 or track >= TRACKS - 1:
+            return False, texts.backend.sequencer.sample.invalid_track
         self._mark_track_trigger(track, source="seq")
         if self.midi_out_enabled:
             self._trigger_midi(track, self.last_velocity / 9.0, 0.08)
+            return True, f"Preview MIDI track {track + 1}"
         else:
             group_id = self.seq_track_group[track]
             if group_id > 0:
                 self.engine.choke_group(group_id, self.seq_track_group)
             vol = self.seq_track_volume[track] / 9.0
             self.engine.trigger(track, (self.last_velocity / 9.0) * vol, self.seq_track_pan[track], rate=self.pitch_rate(track))
+            name = self.engine.sample_names[track] if 0 <= track < len(self.engine.sample_names) else f"Track {track + 1}"
+            return True, f"Preview: {name}"
 
     def _preview_note_if_idle(self, track, velocity):
         if self.playing or track >= TRACKS - 1 or velocity <= 0:
