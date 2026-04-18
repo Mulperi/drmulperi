@@ -31,14 +31,14 @@ class TextNode(dict):
 help = TextNode(
     {
         "pattern_params": {
-            "name": "Pattern name: Enter to edit, type text, Enter/Esc to finish",
+            "name": "Pattern selector: Left/Right changes pattern, Enter opens rename dialog",
             "length": "Pattern steps: type digits to set immediately",
             "swing": "Pattern swing (0-10): type digits to set immediately",
             "mode": "Step mode (velocity, ratchet, blocks, detune, pan)",
         },
         "header": {
             "tabs": "Tabs: Left/Right switch view tabs. Down enters header controls.",
-            "patterns": "Enter opens pattern overlay.",
+            "patterns": "Enter opens pattern dialog.",
             "bpm": "BPM: Enter opens dialog to set tempo.",
             "midi": "Enter toggles MIDI OUT.",
             "file": "Enter opens File menu.",
@@ -49,12 +49,12 @@ help = TextNode(
             "default": "Enter edits pitch.",
         },
         "mixer": {
-            0: "Mixer: Sequencer track pan (1-9). Type number to set.",
-            1: "Mixer: Sequencer track volume (0-9). Type number to set.",
-            2: "Mixer: Sequencer track probability (0-9). 0=always, 9=rarely.",
-            3: "Mixer: Sequencer track pitch (0-24). Type digits to set.",
-            4: "Mixer: Audio track pan (1-9). Type number to set.",
-            5: "Mixer: Audio track volume (0-9). Type number to set.",
+            0: "Mixer: Sequencer track pan (1-9). Press Enter to edit.",
+            1: "Mixer: Sequencer track volume (0-9). Press Enter to edit.",
+            2: "Mixer: Sequencer track probability (0-9). Press Enter to edit.",
+            3: "Mixer: Sequencer track pitch (0-24). Press Enter to edit.",
+            4: "Mixer: Audio track pan (1-9). Press Enter to edit.",
+            5: "Mixer: Audio track volume (0-9). Press Enter to edit.",
         },
         "song": {
             0: "Song: patterns list. Enter adds selected pattern to the chain.",
@@ -199,7 +199,7 @@ status = TextNode(
             "accent_no_track_parameters": "Accent track has no track parameters",
             "recording_file_missing": "Recording file was already missing",
             "import_canceled_deleted": "Import canceled and recording deleted",
-            "mixer_hint": "Mixer: type 1-9 for pan, 0-9 for volume",
+            "mixer_hint": "Mixer: press Enter to edit selected value",
             "pattern_view": "Pattern view",
             "song_view": "Song view",
             "audio_view": "Audio view",
@@ -322,8 +322,6 @@ backend = TextNode(
                 "invalid_chain_use": "Invalid chain (use pattern numbers 1-{max_patterns})",
                 "invalid_chain_range": "Invalid chain (pattern range 1-{max_patterns})",
                 "invalid_chain_empty": "Invalid chain (empty)",
-                "full": "Song already has max {max_steps} steps",
-                "set_max": "Song set (max {max_steps} steps)",
                 "set": "Song set",
                 "appended": "Added pattern {pattern_num} to song",
                 "removed": "Removed pattern {pattern_num} from song",

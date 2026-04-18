@@ -1,7 +1,6 @@
 """Project-wide constants and default key bindings."""
 
 TRACKS = 9
-CHAIN_MAX_STEPS = 16
 # Column IDs for parameter columns in the sequencer grid.
 # Negative values never collide with step indices (0..max_step_count-1).
 TRACK_LABEL_COL = -6
@@ -29,7 +28,7 @@ DEFAULT_KEYMAP = {
     "tab_next": "]",
     "tab_previous": "[",
     "sample_preview": "SPACE",
-    "patterns_overlay": "E,O",
+    "dialog_patterns": "E,O",
     "mode_toggle": "V",
     "clear_pattern": "N",
     "pattern_copy": "B",
@@ -68,7 +67,7 @@ FILE_MENU_ITEMS = [
 ]
 
 PATTERN_MENU_ITEMS = [
-    "1. Patterns Overlay",
+    "1. Patterns Dialog",
     "2. Add Pattern",
     "3. Duplicate Pattern",
     "4. Import From Clipboard",

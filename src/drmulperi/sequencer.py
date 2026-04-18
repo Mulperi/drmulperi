@@ -15,7 +15,6 @@ from .audio_engine import AudioEngine, MidiOut
 from .config import (
     ACCENT_BOOST,
     ACCENT_TRACK,
-    CHAIN_MAX_STEPS,
     MIDI_NOTES,
     PATTERNS,
     TRACKS,
@@ -393,7 +392,7 @@ class Sequencer:
         return trimmed if trimmed.size > 0 else chunk
 
     def preview_chop_candidate(self, index, track=None):
-        """Preview one prepared chop candidate in-place from the chop overlay."""
+        """Preview one prepared chop candidate in-place from the chop dialog."""
         if index < 0 or index >= len(self.chop_preview_samples):
             return False, texts.backend.sequencer.chop.invalid_index
         pan = 5
@@ -914,7 +913,7 @@ class Sequencer:
         normalized_chain = []
         if isinstance(loaded_chain, list):
             raw = []
-            for item in loaded_chain[:CHAIN_MAX_STEPS]:
+            for item in loaded_chain:
                 try:
                     raw.append(int(item))
                 except (ValueError, TypeError):
@@ -2295,12 +2294,6 @@ class Sequencer:
             if not values:
                 return False, texts.backend.sequencer.song.invalid_chain_empty
 
-            if len(values) > CHAIN_MAX_STEPS:
-                values = values[:CHAIN_MAX_STEPS]
-                clipped = True
-            else:
-                clipped = False
-
             self.chain = values
             self.chain_enabled = True
             # Always restart chain from first slot when user sets a new sequence.
@@ -2311,8 +2304,6 @@ class Sequencer:
             self.pending_events.clear()
             self.pending_midi_off.clear()
             self.dirty = True
-            if clipped:
-                return True, texts.fmt(texts.backend.sequencer.song.set_max, max_steps=CHAIN_MAX_STEPS)
             return True, texts.backend.sequencer.song.set
 
     def append_pattern_to_chain(self, pattern_index):
@@ -2321,8 +2312,6 @@ class Sequencer:
             idx = int(pattern_index)
             if idx < 0 or idx >= self.pattern_count():
                 return False, texts.backend.sequencer.audio_track.invalid_pattern
-            if len(self.chain) >= CHAIN_MAX_STEPS:
-                return False, texts.fmt(texts.backend.sequencer.song.full, max_steps=CHAIN_MAX_STEPS)
             self.chain.append(idx)
             if len(self.chain) == 1:
                 self.chain_pos = 0
@@ -2618,6 +2607,7 @@ class Sequencer:
             self.pattern_length.append(int(self.pattern_length[self.view_pattern]))
             self.pattern_swing.append(int(self.pattern_swing[self.view_pattern]))
             self.pattern_humanize.append(bool(self.pattern_humanize[self.view_pattern]))
+            self.pattern_names.append(self.DEFAULT_PATTERN_NAME)
             self.audio_track_slot_pan.append(self.audio_track_slot_pan[self.view_pattern][:])
             self.audio_track_slot_volume.append(self.audio_track_slot_volume[self.view_pattern][:])
             self.audio_track_slot_shift.append(self.audio_track_slot_shift[self.view_pattern][:])
@@ -2648,72 +2638,8 @@ class Sequencer:
         return True, texts.fmt(texts.backend.sequencer.pattern.added, num=self.view_pattern + 1)
 
     def add_pattern_after_current(self, copy_from_view=False):
-        """Insert a new pattern after current view. Optionally duplicate current pattern."""
-        insert_at = max(0, min(self.pattern_count(), int(self.view_pattern) + 1))
-        if copy_from_view and 0 <= self.view_pattern < self.pattern_count():
-            grid = [row[:] for row in self.grid[self.view_pattern]]
-            ratchet = [row[:] for row in self.ratchet_grid[self.view_pattern]]
-            detune = [row[:] for row in self.detune_grid[self.view_pattern]]
-            pan = [row[:] for row in self.pan_grid[self.view_pattern]]
-            length = int(self.pattern_length[self.view_pattern])
-            swing = int(self.pattern_swing[self.view_pattern])
-            humanize = bool(self.pattern_humanize[self.view_pattern])
-            name = self.DEFAULT_PATTERN_NAME
-            slot_pan = self.audio_track_slot_pan[self.view_pattern][:]
-            slot_vol = self.audio_track_slot_volume[self.view_pattern][:]
-            slot_shift = self.audio_track_slot_shift[self.view_pattern][:]
-            slot_paths = self.audio_track_slot_sample_paths[self.view_pattern][:]
-            slot_names = self.audio_track_slot_sample_names[self.view_pattern][:]
-            slot_samples = self.audio_track_slot_samples[self.view_pattern][:]
-            slot_channels = self.audio_track_slot_channels[self.view_pattern][:]
-        else:
-            grid = self._new_pattern_grid()
-            ratchet = self._new_pattern_ratchet()
-            detune = self._new_pattern_detune()
-            pan = self._new_pattern_pan()
-            length = self.default_step_count
-            swing = 50
-            humanize = False
-            name = self.DEFAULT_PATTERN_NAME
-            slot_pan = [5 for _ in range(TRACKS - 1)]
-            slot_vol = [9 for _ in range(TRACKS - 1)]
-            slot_shift = [12 for _ in range(TRACKS - 1)]
-            slot_paths = [None for _ in range(TRACKS - 1)]
-            slot_names = ["-" for _ in range(TRACKS - 1)]
-            slot_samples = [None for _ in range(TRACKS - 1)]
-            slot_channels = [1 for _ in range(TRACKS - 1)]
-
-        self.grid.insert(insert_at, grid)
-        self.ratchet_grid.insert(insert_at, ratchet)
-        self.detune_grid.insert(insert_at, detune)
-        self.pan_grid.insert(insert_at, pan)
-        self.pattern_length.insert(insert_at, length)
-        self.pattern_swing.insert(insert_at, swing)
-        self.pattern_humanize.insert(insert_at, humanize)
-        self.pattern_names.insert(insert_at, name)
-        self.audio_track_slot_pan.insert(insert_at, slot_pan)
-        self.audio_track_slot_volume.insert(insert_at, slot_vol)
-        self.audio_track_slot_shift.insert(insert_at, slot_shift)
-        self.audio_track_slot_sample_paths.insert(insert_at, slot_paths)
-        self.audio_track_slot_sample_names.insert(insert_at, slot_names)
-        self.audio_track_slot_samples.insert(insert_at, slot_samples)
-        self.audio_track_slot_channels.insert(insert_at, slot_channels)
-
-        def remap_after_insert(v):
-            return v + 1 if v >= insert_at else v
-
-        self.pattern = remap_after_insert(self.pattern)
-        self.view_pattern = insert_at
-        if self.next_pattern is not None:
-            self.next_pattern = remap_after_insert(self.next_pattern)
-        self.chain = [p + 1 if p >= insert_at else p for p in self.chain]
-        self._sync_chain_pos_to_pattern()
-
-        if not self.chain_enabled and not self.playing:
-            self.pattern = self.view_pattern
-
-        self.dirty = True
-        return True, texts.fmt(texts.backend.sequencer.pattern.added, num=self.view_pattern + 1)
+        """Backward-compatible wrapper: adding pattern now always appends at end."""
+        return self.add_pattern(copy_from_view=copy_from_view)
 
     def delete_pattern(self, pattern_index):
         """Delete a pattern by index, keeping at least one pattern."""

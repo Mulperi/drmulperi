@@ -45,7 +45,7 @@ def _start_take_capture(controller):
 
 
 def refresh_record_devices(controller):
-    """Load available input devices for record overlay selection."""
+    """Load available input devices for record dialog selection."""
     names = []
     ids = []
     sample_rates = []
@@ -205,7 +205,7 @@ def start_record_monitor(controller):
     """Start input monitor stream for currently selected device."""
     # Monitoring behavior and settings:
     # - Enabled only when [ui] rec_input_metering=on in settings.ini.
-    # - Runs only while record overlay is open and transport is stopped.
+    # - Runs only while record dialog is open and transport is stopped.
     # - Uses engine duplex input metering first (matches recording path),
     #   then falls back to a standalone input stream if duplex is unavailable.
     if not getattr(controller, "record_input_metering_enabled", False):
@@ -318,14 +318,14 @@ def start_record_capture_stream(controller):
     return True
 
 
-def open_record_overlay(controller, target_track=None, from_audio_view=False):
-    """Open record device overlay and start live input level monitoring."""
-    # Stop transport before opening overlay so input monitor can start immediately.
+def open_record_dialog(controller, target_track=None, from_audio_view=False):
+    """Open record device dialog and start live input level monitoring."""
+    # Stop transport before opening dialog so input monitor can start immediately.
     if controller.seq.playing:
         controller.seq.toggle_playback()
     controller._refresh_record_devices()
-    controller.record_overlay_active = True
-    controller.record_overlay_index = 0
+    controller.dialog_record_active = True
+    controller.dialog_record_index = 0
     controller.record_action_index = 1
     controller.record_precount_pattern = max(0, min(controller.seq.pattern_count() - 1, int(controller.seq.view_pattern)))
     controller.record_capture_context_track = target_track if isinstance(target_track, int) else None
@@ -334,9 +334,9 @@ def open_record_overlay(controller, target_track=None, from_audio_view=False):
     controller._start_record_monitor()
 
 
-def close_record_overlay(controller):
-    """Close record overlay and stop input monitor."""
-    controller.record_overlay_active = False
+def close_record_dialog(controller):
+    """Close record dialog and stop input monitor."""
+    controller.dialog_record_active = False
     controller._stop_record_monitor()
 
 
@@ -378,7 +378,7 @@ def cancel_record_capture(controller, reason=None):
 
 
 def finish_record_capture(controller):
-    """Finalize capture, write WAV, then open import overlay for routing."""
+    """Finalize capture, write WAV, then open import dialog for routing."""
     controller.record_capture_active = False
     controller.record_capture_stage = "idle"
     controller.record_capture_loop_count = 0
@@ -456,14 +456,14 @@ def finish_record_capture(controller):
     wavfile.write(out_path, dst_sr, out)
     sr_hint = f" (SR {src_sr}->{dst_sr})" if src_sr != dst_sr else ""
     controller.status_message = texts.fmt(texts.backend.recorder.capture.recorded, name=name, sr_hint=sr_hint)
-    controller._close_record_overlay()
-    controller._open_import_overlay(out_path, can_delete_source=True)
+    controller._close_record_dialog()
+    controller._open_import_dialog(out_path, can_delete_source=True)
     if controller.record_capture_context_track is not None:
         track = max(0, min(TRACKS - 2, int(controller.record_capture_context_track)))
         controller.import_target_drum_track = track
         controller.import_target_audio_track = track
         if controller.record_capture_context_audio:
-            controller.import_overlay_index = 2
+            controller.dialog_import_index = 2
 
 
 def arm_record_capture(controller):
