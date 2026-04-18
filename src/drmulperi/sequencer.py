@@ -20,6 +20,7 @@ from .config import (
     PATTERNS,
     TRACKS,
 )
+from . import ui_texts as texts
 
 class Sequencer:
     """Pattern sequencer state, persistence, scheduling, and high-level actions."""
@@ -81,6 +82,7 @@ class Sequencer:
         self.chain_enabled = False
         self.chain = [0]
         self.chain_pos = 0
+        self.song_audio_started = False
 
         self.step = 0
 
@@ -223,16 +225,16 @@ class Sequencer:
     def prepare_chop_candidates_from_file(self, path, slices=8):
         """Analyze a long WAV file and prepare up to 8 chopped one-shot candidates."""
         if not os.path.isfile(path) or not path.lower().endswith(".wav"):
-            return False, "Select a .wav file to chop"
+            return False, texts.backend.sequencer.chop.select_wav
 
         try:
             mono, src_sr, sr, resampled, _ = self._read_wav_mono_info(path)
         except Exception as exc:
-            return False, f"Chop load failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.chop.load_failed, error=exc)
 
         mono = np.asarray(mono, dtype=np.float32)
         if mono.size < 64:
-            return False, "Sample too short to chop"
+            return False, texts.backend.sequencer.chop.too_short
 
         slices = max(1, min(8, int(slices)))
         starts = self._detect_chop_starts(mono, sr, slices)
@@ -259,7 +261,7 @@ class Sequencer:
         self.chop_preview_samples = candidates
         self.chop_preview_names = names
         sr_hint = f" (SR {src_sr}->{sr})" if resampled else ""
-        return True, f"Prepared {len(candidates)} chops{sr_hint}"
+        return True, texts.fmt(texts.backend.sequencer.chop.prepared, count=len(candidates), sr_hint=sr_hint)
 
     def _detect_chop_starts(self, samples, sr, slices):
         """Detect transient start positions from amplitude envelope for chop preview."""
@@ -393,7 +395,7 @@ class Sequencer:
     def preview_chop_candidate(self, index, track=None):
         """Preview one prepared chop candidate in-place from the chop overlay."""
         if index < 0 or index >= len(self.chop_preview_samples):
-            return False, "Invalid chop index"
+            return False, texts.backend.sequencer.chop.invalid_index
         pan = 5
         if track is not None and 0 <= track < TRACKS - 1:
             pan = self.seq_track_pan[track]
@@ -409,7 +411,7 @@ class Sequencer:
     def apply_chop_candidates_to_kit(self):
         """Commit prepared chop candidates into a generated 8-sample kit folder and load it."""
         if not self.chop_preview_samples:
-            return False, "No prepared chops"
+            return False, texts.backend.sequencer.chop.no_prepared
         base = os.path.splitext(os.path.basename(self.chop_preview_path or "chop"))[0]
         ts = time.strftime("%Y%m%d_%H%M%S")
         kit_dir = os.path.join(os.getcwd(), "generated_kits", f"{base}_chop_{ts}")
@@ -421,11 +423,11 @@ class Sequencer:
                 name = self.chop_preview_names[i] if i < len(self.chop_preview_names) else f"{base}_{i+1:02d}.wav"
                 wavfile.write(os.path.join(kit_dir, name), self.engine.sr, out)
         except Exception as exc:
-            return False, f"Chop save failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.chop.save_failed, error=exc)
         ok, message = self.load_kit_folder(kit_dir)
         if ok:
             self.dirty = True
-        return ok, (f"{message} (from chop)" if ok else message)
+        return ok, (texts.fmt(texts.backend.sequencer.chop.loaded_from_chop, message=message) if ok else message)
 
     @staticmethod
     def swing_ui_to_internal(ui_value):
@@ -995,20 +997,20 @@ class Sequencer:
         """Load a pattern bank JSON file and reset runtime playback state."""
         target = filename.strip()
         if not target:
-            return False, "Load canceled"
+            return False, texts.backend.sequencer.project.load_canceled
 
         if not target.lower().endswith(".json"):
             target = f"{target}.json"
 
         path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
         if not os.path.exists(path):
-            return False, f"Pattern not found: {os.path.basename(path)}"
+            return False, texts.fmt(texts.backend.sequencer.project.pattern_not_found, name=os.path.basename(path))
 
         try:
             with open(path, "r") as f:
                 data = json.load(f)
         except Exception as exc:
-            return False, f"Load failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.project.load_failed, error=exc)
 
         self.pattern_path = path
         self._apply_loaded_data(data)
@@ -1020,7 +1022,7 @@ class Sequencer:
         self.pending_midi_off.clear()
         self.dirty = False
         self._sync_chain_pos_to_pattern()
-        return True, f"Loaded {self.pattern_name}"
+        return True, texts.fmt(texts.backend.sequencer.project.loaded, name=self.pattern_name)
 
     def new_project(self, filename="new_project.json", kit=None):
         """Reset to a fresh project state and save it to a new JSON file."""
@@ -1100,14 +1102,14 @@ class Sequencer:
         try:
             self.save()
         except Exception as exc:
-            return False, f"New project failed: {exc}"
-        return True, f"New project: {self.pattern_name}"
+            return False, texts.fmt(texts.backend.sequencer.project.new_failed, error=exc)
+        return True, texts.fmt(texts.backend.sequencer.project.new_created, name=self.pattern_name)
 
     def save_project_file(self, filename):
         """Save pattern bank JSON to a user-provided filename."""
         target = filename.strip()
         if not target:
-            return False, "Save canceled"
+            return False, texts.backend.sequencer.project.save_canceled
 
         if not target.lower().endswith(".json"):
             target = f"{target}.json"
@@ -1118,34 +1120,34 @@ class Sequencer:
             with open(path, "w") as f:
                 json.dump(self._serialize(base_dir=base_dir), f)
         except Exception as exc:
-            return False, f"Save failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.project.save_failed, error=exc)
 
-        return True, f"Saved {os.path.basename(path)}"
+        return True, texts.fmt(texts.backend.sequencer.project.saved, name=os.path.basename(path))
 
     def load_kit_folder(self, foldername):
         """Load a sample kit folder (first 8 alphabetical WAV files)."""
         target = foldername.strip()
         if not target:
-            return False, "Load canceled"
+            return False, texts.backend.sequencer.project.load_canceled
 
         path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
         if not os.path.isdir(path):
-            return False, f"Kit folder not found: {os.path.basename(path)}"
+            return False, texts.fmt(texts.backend.sequencer.kit.folder_not_found, name=os.path.basename(path))
 
         self.kit_path = path
         loaded_count = self.engine.reload_kit(path)
-        return True, f"Loaded kit {os.path.basename(path)} ({loaded_count}/8 samples)"
+        return True, texts.fmt(texts.backend.sequencer.kit.loaded, name=os.path.basename(path), loaded_count=loaded_count)
 
     def load_single_sample_to_track(self, track, path):
         """Load one drum sample into a track and trim silence at both edges."""
         if track < 0 or track >= TRACKS - 1:
-            return False, "Invalid track"
+            return False, texts.backend.sequencer.sample.invalid_track
         if not os.path.isfile(path) or not path.lower().endswith(".wav"):
-            return False, "Select a .wav file"
+            return False, texts.backend.sequencer.sample.select_wav
         try:
             sample, src_sr, dst_sr, resampled, _ = self._read_wav_mono_info(path)
         except Exception as exc:
-            return False, f"Sample load failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.sample.load_failed, error=exc)
         trimmed = self._trim_silence_edges(np.asarray(sample, dtype=np.float32))
         if trimmed.size > 1:
             sample = trimmed
@@ -1158,19 +1160,19 @@ class Sequencer:
         if ok:
             self.dirty = True
             if resampled:
-                message = f"{message} (SR {src_sr}->{dst_sr})"
+                message = texts.fmt(texts.backend.sequencer.sample.with_sr_hint, message=message, src_sr=src_sr, dst_sr=dst_sr)
         return ok, message
 
     def load_audio_track_sample(self, pattern_index, track, path):
         """Assign a sample file to a track-view lane for a specific pattern."""
         if track < 0 or track >= TRACKS - 1:
-            return False, "Invalid track"
+            return False, texts.backend.sequencer.sample.invalid_track
         if not os.path.isfile(path) or not path.lower().endswith(".wav"):
-            return False, "Select a .wav file"
+            return False, texts.backend.sequencer.sample.select_wav
         try:
             sample, src_sr, dst_sr, resampled, channels = self._read_wav_audio_info(path)
         except Exception as exc:
-            return False, f"Sample load failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.sample.load_failed, error=exc)
         if self.audio_track_mode[track] == 1:
             self.audio_track_free_sample_paths[track] = path
             self.audio_track_free_sample_names[track] = os.path.basename(path)
@@ -1179,16 +1181,16 @@ class Sequencer:
             loaded_name = self.audio_track_free_sample_names[track]
         else:
             if pattern_index < 0 or pattern_index >= self.pattern_count():
-                return False, "Invalid pattern"
+                return False, texts.backend.sequencer.audio_track.invalid_pattern
             self.audio_track_slot_sample_paths[pattern_index][track] = path
             self.audio_track_slot_sample_names[pattern_index][track] = os.path.basename(path)
             self.audio_track_slot_samples[pattern_index][track] = sample
             self.audio_track_slot_channels[pattern_index][track] = channels
             loaded_name = self.audio_track_slot_sample_names[pattern_index][track]
         self.dirty = True
-        msg = f"Loaded track sample {loaded_name}"
+        msg = texts.fmt(texts.backend.sequencer.sample.loaded_track_sample, name=loaded_name)
         if resampled:
-            msg = f"{msg} (SR {src_sr}->{dst_sr})"
+            msg = texts.fmt(texts.backend.sequencer.sample.with_sr_hint, message=msg, src_sr=src_sr, dst_sr=dst_sr)
         return True, msg
 
     def _is_audio_path_used_elsewhere(self, path, exclude_pattern_index=None, exclude_track=None):
@@ -1240,16 +1242,16 @@ class Sequencer:
         """Delete a sample file and remove all audio-track references to it."""
         target = str(path or "").strip()
         if not target:
-            return False, "No file selected for force delete"
+            return False, texts.backend.sequencer.sample.no_file_force_delete
         removed = self._remove_audio_path_references(target)
         self.dirty = True
         if os.path.isfile(target):
             try:
                 os.remove(target)
-                return True, f"Force deleted file and removed {removed} references"
+                return True, texts.fmt(texts.backend.sequencer.sample.force_deleted, removed=removed)
             except Exception as exc:
-                return True, f"Removed {removed} references (file delete failed: {exc})"
-        return True, f"Removed {removed} references (file already missing)"
+                return True, texts.fmt(texts.backend.sequencer.sample.force_removed_delete_failed, removed=removed, error=exc)
+        return True, texts.fmt(texts.backend.sequencer.sample.force_removed_missing, removed=removed)
 
     def clear_audio_track_sample(self, pattern_index, track, delete_file=False):
         """Clear assigned audio-track sample from one pattern/track slot.
@@ -1257,7 +1259,7 @@ class Sequencer:
         If `delete_file` is True, the source WAV is removed from disk when safe.
         """
         if track < 0 or track >= TRACKS - 1:
-            return False, "Invalid track"
+            return False, texts.backend.sequencer.sample.invalid_track
         old_path = self.get_audio_track_path(pattern_index, track)
         if self.audio_track_mode[track] == 1:
             self.audio_track_free_sample_paths[track] = None
@@ -1267,7 +1269,7 @@ class Sequencer:
             self.audio_track_free_shift[track] = 12
         else:
             if pattern_index < 0 or pattern_index >= self.pattern_count():
-                return False, "Invalid pattern"
+                return False, texts.backend.sequencer.audio_track.invalid_pattern
             self.audio_track_slot_sample_paths[pattern_index][track] = None
             self.audio_track_slot_sample_names[pattern_index][track] = "-"
             self.audio_track_slot_samples[pattern_index][track] = None
@@ -1281,13 +1283,13 @@ class Sequencer:
                 exclude_track=track,
             )
             if used_elsewhere:
-                return True, f"Cleared track sample on track {track + 1} (file kept: used elsewhere)", True
+                return True, texts.fmt(texts.backend.sequencer.sample.cleared_kept, track_num=track + 1), True
             try:
                 os.remove(old_path)
-                return True, f"Cleared track sample on track {track + 1} (file deleted)", False
+                return True, texts.fmt(texts.backend.sequencer.sample.cleared_deleted, track_num=track + 1), False
             except Exception as exc:
-                return True, f"Cleared track sample on track {track + 1} (delete failed: {exc})", False
-        return True, f"Cleared track sample on track {track + 1}", False
+                return True, texts.fmt(texts.backend.sequencer.sample.cleared_delete_failed, track_num=track + 1, error=exc), False
+        return True, texts.fmt(texts.backend.sequencer.sample.cleared, track_num=track + 1), False
 
     def preview_audio_track_file(self, path, pattern_index=None, track=None):
         """Preview any sample file with track-view pan/volume when track is provided."""
@@ -1307,12 +1309,12 @@ class Sequencer:
     def preview_audio_track_slot(self, pattern_index, track):
         """Preview the currently assigned sample in one track-view lane."""
         if pattern_index < 0 or pattern_index >= self.pattern_count():
-            return False, "Invalid pattern"
+            return False, texts.backend.sequencer.audio_track.invalid_pattern
         if track < 0 or track >= TRACKS - 1:
-            return False, "Invalid track"
+            return False, texts.backend.sequencer.sample.invalid_track
         path = self.get_audio_track_path(pattern_index, track)
         if not path or not os.path.isfile(path):
-            return False, "No sample loaded on this track"
+            return False, texts.backend.sequencer.sample.no_sample_loaded
         return self.preview_audio_track_file(path, pattern_index=pattern_index, track=track)
 
     def preview_sample_file(self, path, track=None):
@@ -1327,13 +1329,13 @@ class Sequencer:
         """Save project into a portable folder containing JSON + referenced samples."""
         target = foldername.strip()
         if not target:
-            return False, "Save Project As canceled"
+            return False, texts.backend.sequencer.project.save_as_canceled
 
         project_dir = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
         try:
             os.makedirs(project_dir, exist_ok=True)
         except Exception as exc:
-            return False, f"Project folder create failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.project.folder_create_failed, error=exc)
 
         copied = 0
         for t in range(TRACKS - 1):
@@ -1430,29 +1432,32 @@ class Sequencer:
             with open(pattern_path, "w") as f:
                 json.dump(project_data, f)
         except Exception as exc:
-            return False, f"Pattern save failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.project.pattern_save_failed, error=exc)
 
         # Open the freshly saved project so UI/project context points at the new folder.
         ok_loaded, load_message = self.load_project_file(pattern_path)
         if not ok_loaded:
-            return False, f"Project saved but reload failed: {load_message}"
+            return False, texts.fmt(texts.backend.sequencer.project.reload_failed, message=load_message)
 
-        return True, (
-            f"Project saved: {os.path.basename(project_dir)} "
-            f"({copied}/8 kit + {track_audio_count} track samples + {pattern_filename})"
+        return True, texts.fmt(
+            texts.backend.sequencer.project.saved_portable,
+            name=os.path.basename(project_dir),
+            kit_count=copied,
+            track_audio_count=track_audio_count,
+            pattern_filename=pattern_filename,
         )
 
     def export_current_kit(self, foldername, options=None):
         """Export current sequencer kit samples into a folder with format options."""
         target = str(foldername or "").strip()
         if not target:
-            return False, "Kit export canceled"
+            return False, texts.backend.sequencer.kit.export_canceled
 
         out_dir = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
-            return False, f"Kit export failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.kit.export_failed, error=exc)
 
         opts = options or {}
         try:
@@ -1502,9 +1507,9 @@ class Sequencer:
                 continue
 
         if exported <= 0:
-            return False, "No kit samples to export"
+            return False, texts.backend.sequencer.kit.no_samples
         chan_label = "stereo" if channels == 2 else "mono"
-        return True, f"Kit exported: {os.path.basename(out_dir)} ({exported} samples, {target_sr}Hz, {bit_depth}-bit, {chan_label})"
+        return True, texts.fmt(texts.backend.sequencer.kit.exported, name=os.path.basename(out_dir), exported=exported, sample_rate=target_sr, bit_depth=bit_depth, channels=chan_label)
 
     def export_current_pattern_audio(self, filename, options=None):
         """Offline-render the viewed pattern as one-loop WAV with export options.
@@ -1517,7 +1522,7 @@ class Sequencer:
         """
         target = filename.strip()
         if not target:
-            return False, "Audio export canceled"
+            return False, texts.backend.sequencer.export.audio_canceled
 
         if not target.lower().endswith(".wav"):
             target = f"{target}.wav"
@@ -1675,10 +1680,10 @@ class Sequencer:
         try:
             wavfile.write(path, target_sr, out_wav)
         except Exception as exc:
-            return False, f"Audio export failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.export.audio_failed, error=exc)
         chan_label = "mono" if channels == 1 else "stereo"
         scope_label = "song" if scope == "chain" else "pattern"
-        return True, f"Exported audio: {os.path.basename(path)} ({scope_label}, {target_sr}Hz, {bit_depth}-bit, {chan_label})"
+        return True, texts.fmt(texts.backend.sequencer.export.audio_exported, name=os.path.basename(path), scope=scope_label, sample_rate=target_sr, bit_depth=bit_depth, channels=chan_label)
 
     @staticmethod
     def _apply_export_eq(audio: np.ndarray, sr: int, opts=None) -> np.ndarray:
@@ -1987,7 +1992,14 @@ class Sequencer:
                         current_length = self.pattern_length[self.pattern]
 
                         if self.step == 0 and not self.midi_out_enabled:
-                            self._trigger_audio_tracks_for_pattern(self.pattern)
+                            trigger_song_tracks = self.chain_enabled and (not self.song_audio_started)
+                            self._trigger_audio_tracks_for_pattern(
+                                self.pattern,
+                                include_song_tracks=trigger_song_tracks,
+                                include_pattern_tracks=True,
+                            )
+                            if trigger_song_tracks:
+                                self.song_audio_started = True
 
                         accent_on = (
                             not self.muted_rows[ACCENT_TRACK]
@@ -2039,6 +2051,9 @@ class Sequencer:
                             self.step = 0
                             if self.chain_enabled and self.chain:
                                 self.chain_pos = (self.chain_pos + 1) % len(self.chain)
+                                if self.chain_pos == 0:
+                                    # Song wrapped to the start: allow one-shot song tracks to fire again.
+                                    self.song_audio_started = False
                                 self.pattern = self.chain[self.chain_pos]
                                 if self.follow_song:
                                     self.view_pattern = self.pattern
@@ -2052,6 +2067,7 @@ class Sequencer:
                 else:
                     self.step = 0
                     self.pending_events.clear()
+                    self.song_audio_started = False
                     if self.pending_midi_off:
                         self.midi.all_notes_off()
                         self.pending_midi_off.clear()
@@ -2081,11 +2097,13 @@ class Sequencer:
                 else:
                     self.pattern = self.view_pattern
                     self.next_pattern = None
+                self.song_audio_started = False
             self.playing = not self.playing
             self.transport_resync = True
             if not self.playing:
                 self.step = 0
                 self.next_pattern = None
+                self.song_audio_started = False
                 if self.chain_enabled:
                     self.chain_pos = 0
                     if not self.chain:
@@ -2122,20 +2140,22 @@ class Sequencer:
                 self.step = 0
                 self.pending_events.clear()
                 self.pending_midi_off.clear()
+                self.song_audio_started = False
                 self.dirty = True
-                return True, "Song ON"
+                return True, texts.backend.sequencer.song.on
             self.pattern = self.view_pattern
             self.next_pattern = None
             self.step = 0
             self.pending_events.clear()
             self.pending_midi_off.clear()
+            self.song_audio_started = False
             self._sync_chain_pos_to_pattern()
             self.dirty = True
-            return True, "Song OFF"
+            return True, texts.backend.sequencer.song.off
 
     def _set_midi_out_enabled(self, enabled):
         if enabled == self.midi_out_enabled and not (enabled and self.midi.port is None):
-            return True, ("MIDI OUT ON" if enabled else "MIDI OUT OFF")
+            return True, (texts.backend.sequencer.midi.on if enabled else texts.backend.sequencer.midi.off)
         if enabled:
             ok, message = self.midi.enable()
             if not ok:
@@ -2181,20 +2201,26 @@ class Sequencer:
         self.midi.send_note_on(channel, note, velocity)
         heapq.heappush(self.pending_midi_off, (time.perf_counter() + max(0.01, gate_seconds), channel, note))
 
-    def _trigger_audio_tracks_for_pattern(self, pattern_index):
+    def _trigger_audio_tracks_for_pattern(self, pattern_index, include_song_tracks=True, include_pattern_tracks=True):
         """Trigger all loaded Tracks-view lanes for the given pattern once."""
         if pattern_index < 0 or pattern_index >= self.pattern_count():
             return
+        include_song_tracks = bool(include_song_tracks)
+        include_pattern_tracks = bool(include_pattern_tracks)
         for t in range(TRACKS - 1):
             if self.audio_track_mode[t] == 1:
                 # Song tracks only fire while song mode (chain) is active.
                 if not self.chain_enabled:
+                    continue
+                if not include_song_tracks:
                     continue
                 sample = self.audio_track_free_samples[t]
                 vol = max(0.0, min(1.0, self.audio_track_free_volume[t] / 9.0))
                 pan = self.audio_track_free_pan[t]
                 shift_ui = self.audio_track_free_shift[t]
             else:
+                if not include_pattern_tracks:
+                    continue
                 sample = self.audio_track_slot_samples[pattern_index][t]
                 vol = max(0.0, min(1.0, self.audio_track_slot_volume[pattern_index][t] / 9.0))
                 pan = self.audio_track_slot_pan[pattern_index][t]
@@ -2249,7 +2275,7 @@ class Sequencer:
         with self.transport_lock:
             src = text.strip()
             if not src:
-                return False, "Song canceled"
+                return False, texts.backend.sequencer.song.canceled
 
             values = []
             max_patterns = self.pattern_count()
@@ -2260,14 +2286,14 @@ class Sequencer:
                 parts = list(src)
             for part in parts:
                 if not part.isdigit():
-                    return False, f"Invalid chain (use pattern numbers 1-{max_patterns})"
+                    return False, texts.fmt(texts.backend.sequencer.song.invalid_chain_use, max_patterns=max_patterns)
                 n = int(part)
                 if n < 1 or n > max_patterns:
-                    return False, f"Invalid chain (pattern range 1-{max_patterns})"
+                    return False, texts.fmt(texts.backend.sequencer.song.invalid_chain_range, max_patterns=max_patterns)
                 values.append(n - 1)
 
             if not values:
-                return False, "Invalid chain (empty)"
+                return False, texts.backend.sequencer.song.invalid_chain_empty
 
             if len(values) > CHAIN_MAX_STEPS:
                 values = values[:CHAIN_MAX_STEPS]
@@ -2286,8 +2312,8 @@ class Sequencer:
             self.pending_midi_off.clear()
             self.dirty = True
             if clipped:
-                return True, f"Song set (max {CHAIN_MAX_STEPS} steps)"
-            return True, "Song set"
+                return True, texts.fmt(texts.backend.sequencer.song.set_max, max_steps=CHAIN_MAX_STEPS)
+            return True, texts.backend.sequencer.song.set
 
     def chain_display(self):
         if not self.chain_enabled:
@@ -2402,15 +2428,15 @@ class Sequencer:
     def set_current_pattern_swing_from_text(self, text):
         src = text.strip()
         if not src:
-            return False, "Swing canceled"
+            return False, texts.backend.sequencer.swing.canceled
         try:
             value = int(src)
         except ValueError:
-            return False, "Swing must be a number (0-10)"
+            return False, texts.backend.sequencer.swing.not_number
         if value < 0 or value > 10:
-            return False, "Swing out of range (0-10)"
+            return False, texts.backend.sequencer.swing.out_of_range
         self.set_current_pattern_swing_ui(value)
-        return True, f"Swing set to {value}"
+        return True, texts.fmt(texts.backend.sequencer.swing.set, value=value)
 
     def change_bpm(self, delta):
         self.bpm = max(1, self.bpm + delta)
@@ -2566,7 +2592,7 @@ class Sequencer:
         if not self.chain_enabled and not self.playing:
             self.pattern = self.view_pattern
         self.dirty = True
-        return True, f"Added pattern {self.view_pattern + 1}"
+        return True, texts.fmt(texts.backend.sequencer.pattern.added, num=self.view_pattern + 1)
 
     def add_pattern_after_current(self, copy_from_view=False):
         """Insert a new pattern after current view. Optionally duplicate current pattern."""
@@ -2634,12 +2660,12 @@ class Sequencer:
             self.pattern = self.view_pattern
 
         self.dirty = True
-        return True, f"Added pattern {self.view_pattern + 1}"
+        return True, texts.fmt(texts.backend.sequencer.pattern.added, num=self.view_pattern + 1)
 
     def delete_pattern(self, pattern_index):
         """Delete a pattern by index, keeping at least one pattern."""
         if self.pattern_count() <= 1:
-            return False, "At least one pattern is required"
+            return False, texts.backend.sequencer.pattern.at_least_one_required
         idx = max(0, min(self.pattern_count() - 1, int(pattern_index)))
         del self.grid[idx]
         del self.ratchet_grid[idx]
@@ -2678,7 +2704,7 @@ class Sequencer:
         self.chain_pos = min(self.chain_pos, len(self.chain) - 1)
         self._sync_chain_pos_to_pattern()
         self.dirty = True
-        return True, f"Deleted pattern {idx + 1}"
+        return True, texts.fmt(texts.backend.sequencer.pattern.deleted, num=idx + 1)
 
     def delete_view_pattern(self):
         """Delete currently viewed pattern, keeping at least one pattern."""
@@ -2708,12 +2734,12 @@ class Sequencer:
             "audio_slot_samples": slot_samples,
             "audio_slot_channels": self.audio_track_slot_channels[self.view_pattern][:],
         }
-        return True, f"Copied pattern {self.view_pattern + 1}"
+        return True, texts.fmt(texts.backend.sequencer.pattern.copied, num=self.view_pattern + 1)
 
     def paste_to_current_pattern(self):
         """Paste clipboard into viewed pattern and resync playback in manual mode."""
         if not self.pattern_clipboard:
-            return False, "Clipboard empty"
+            return False, texts.backend.sequencer.pattern.clipboard_empty
 
         self.grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["grid"]]
         self.ratchet_grid[self.view_pattern] = [row[:] for row in self.pattern_clipboard["ratchet_grid"]]
@@ -2763,7 +2789,7 @@ class Sequencer:
             self._sync_chain_pos_to_pattern()
 
         self.dirty = True
-        return True, f"Pasted pattern {self.view_pattern + 1}"
+        return True, texts.fmt(texts.backend.sequencer.pattern.pasted, num=self.view_pattern + 1)
 
     def _parse_pattern_rows_block(self, rows):
         """Parse one 8-row text block into sequencer + ratchet grids.
@@ -2777,14 +2803,13 @@ class Sequencer:
           - 2/3/4: velocity 9, ratchet value
         """
         if not isinstance(rows, list) or len(rows) != (TRACKS - 1):
-            return False, f"Each pattern must have exactly {TRACKS - 1} rows", None
+            return False, texts.fmt(texts.backend.sequencer.pattern.each_pattern_rows, rows=TRACKS - 1), None
 
         row_width = len(str(rows[0]).strip()) if rows else 0
         if row_width < 1 or row_width > self.max_step_count:
             return (
                 False,
-                f"Row 1 has {row_width} steps, but max_step_count is {self.max_step_count}. "
-                "Increase [sequencer] max_step_count in settings.ini to paste longer patterns",
+                texts.fmt(texts.backend.sequencer.pattern.row_width_exceeded, row_width=row_width, max_step_count=self.max_step_count),
                 None,
             )
 
@@ -2795,10 +2820,10 @@ class Sequencer:
         for track in range(TRACKS - 1):
             line = str(rows[track]).strip()
             if len(line) != row_width:
-                return False, f"Row {track + 1} must have exactly {row_width} steps", None
+                return False, texts.fmt(texts.backend.sequencer.pattern.row_exact_steps, track_num=track + 1, row_width=row_width), None
             for step, ch in enumerate(line):
                 if ch not in "01234":
-                    return False, f"Invalid char '{ch}' on row {track + 1}, step {step + 1}", None
+                    return False, texts.fmt(texts.backend.sequencer.pattern.invalid_char, char=ch, track_num=track + 1, step_num=step + 1), None
                 if ch == "0":
                     grid[track][step] = 0
                     ratchet[track][step] = 1
@@ -2834,13 +2859,13 @@ class Sequencer:
             blocks.append(current)
 
         if not blocks:
-            return False, "Clipboard is empty or invalid", []
+            return False, texts.backend.sequencer.pattern.clipboard_empty_or_invalid, []
 
         parsed = []
         for idx, block in enumerate(blocks):
             ok, message, payload = self._parse_pattern_rows_block(block)
             if not ok:
-                return False, f"Pattern {idx + 1}: {message}", []
+                return False, texts.fmt(texts.backend.sequencer.pattern.pattern_parse_error, pattern_num=idx + 1, message=message), []
             parsed.append(payload)
         return True, "", parsed
 
@@ -2899,8 +2924,8 @@ class Sequencer:
             self._sync_chain_pos_to_pattern()
             self.dirty = True
             if self.chain_enabled:
-                return True, f"Imported {count} patterns from clipboard (song mode ON)"
-            return True, "Imported 1 pattern from clipboard"
+                return True, texts.fmt(texts.backend.sequencer.pattern.imported_many, count=count)
+            return True, texts.backend.sequencer.pattern.imported_one
 
     def export_patterns_to_text(self):
         """Export all patterns as clipboard-friendly step rows.
@@ -2940,17 +2965,17 @@ class Sequencer:
         """
         target = str(filename or "").strip()
         if not target:
-            return False, "Import canceled"
+            return False, texts.backend.sequencer.project.import_canceled
 
         path = target if os.path.isabs(target) else os.path.join(os.getcwd(), target)
         if not os.path.isfile(path):
-            return False, f"Project not found: {os.path.basename(path)}"
+            return False, texts.fmt(texts.backend.sequencer.project.project_not_found, name=os.path.basename(path))
 
         try:
             with open(path, "r") as f:
                 data = json.load(f)
         except Exception as exc:
-            return False, f"Import failed: {exc}"
+            return False, texts.fmt(texts.backend.sequencer.project.import_failed, error=exc)
 
         count = self.pattern_count()
         imported = 0
@@ -3047,7 +3072,7 @@ class Sequencer:
             self.pattern_length = normalized_lengths
             self.dirty = True
 
-        return True, f"Imported step data from {os.path.basename(path)} ({imported}/{count} patterns)"
+        return True, texts.fmt(texts.backend.sequencer.project.imported_step_data, name=os.path.basename(path), imported=imported, count=count)
 
     def select_pattern(self, pattern_index):
         """Select/queue pattern depending on chain/playback mode."""
@@ -3112,13 +3137,13 @@ class Sequencer:
     def get_audio_track_mode(self, track):
         """Return track mode label for tracks view (`Pattern` or `Song`)."""
         if track < 0 or track >= TRACKS - 1:
-            return "Pattern"
-        return "Song" if self.audio_track_mode[track] == 1 else "Pattern"
+            return texts.backend.sequencer.audio_track.mode_label_pattern
+        return texts.backend.sequencer.audio_track.mode_label_song if self.audio_track_mode[track] == 1 else texts.backend.sequencer.audio_track.mode_label_pattern
 
     def toggle_audio_track_mode(self, pattern_index, track):
         """Toggle one tracks-view lane between Pattern and Song modes."""
         if track < 0 or track >= TRACKS - 1:
-            return False, "Invalid track"
+            return False, texts.backend.sequencer.sample.invalid_track
         if pattern_index < 0 or pattern_index >= self.pattern_count():
             pattern_index = max(0, min(self.pattern_count() - 1, int(pattern_index)))
         current = self.audio_track_mode[track]
@@ -3166,8 +3191,8 @@ class Sequencer:
         self.audio_track_mode[track] = next_mode
         self.dirty = True
         if next_mode == 1:
-            return True, f"Track {track + 1} mode: Song (from Pattern {pattern_index + 1})"
-        return True, f"Track {track + 1} mode: Pattern {pattern_index + 1}"
+            return True, texts.fmt(texts.backend.sequencer.audio_track.mode_song, track_num=track + 1, pattern_num=pattern_index + 1)
+        return True, texts.fmt(texts.backend.sequencer.audio_track.mode_pattern, track_num=track + 1, pattern_num=pattern_index + 1)
 
     def get_audio_track_name(self, pattern_index, track):
         """Return displayed sample name for a tracks-view lane."""
@@ -3178,6 +3203,22 @@ class Sequencer:
         if pattern_index < 0 or pattern_index >= self.pattern_count():
             return "-"
         return self.audio_track_slot_sample_names[pattern_index][track]
+
+    def set_audio_track_name(self, pattern_index, track, name):
+        """Set displayed sample name for a tracks-view lane in its active mode."""
+        if track < 0 or track >= TRACKS - 1:
+            return
+        text = str(name or "").strip()
+        if not text:
+            text = "-"
+        text = text[:64]
+        if self.audio_track_mode[track] == 1:
+            self.audio_track_free_sample_names[track] = text
+        else:
+            if pattern_index < 0 or pattern_index >= self.pattern_count():
+                return
+            self.audio_track_slot_sample_names[pattern_index][track] = text
+        self.dirty = True
 
     def get_audio_track_path(self, pattern_index, track):
         """Return currently active sample path for a tracks-view lane."""
@@ -3251,10 +3292,10 @@ class Sequencer:
     def rename_audio_track_sample(self, pattern_index, track, new_name):
         """Rename tracks-view sample label and recording file when applicable."""
         if track < 0 or track >= TRACKS - 1:
-            return False, "Invalid track"
+            return False, texts.backend.sequencer.sample.invalid_track
         name = str(new_name).strip()
         if not name:
-            return False, "Rename canceled"
+            return False, texts.backend.sequencer.sample.rename_canceled
         if not name.lower().endswith(".wav"):
             name = f"{name}.wav"
 
@@ -3265,33 +3306,33 @@ class Sequencer:
                 new_path = os.path.join(os.path.dirname(old_path), name)
                 if new_path != old_path:
                     if os.path.exists(new_path):
-                        return False, "Name exists"
+                        return False, texts.backend.sequencer.sample.name_exists
                     try:
                         os.rename(old_path, new_path)
                         self.audio_track_free_sample_paths[track] = new_path
                     except Exception as exc:
-                        return False, f"Rename failed: {exc}"
+                        return False, texts.fmt(texts.backend.sequencer.sample.rename_failed, error=exc)
             self.audio_track_free_sample_names[track] = name
             self.dirty = True
-            return True, f"Renamed {old_name} -> {name}"
+            return True, texts.fmt(texts.backend.sequencer.sample.renamed, old_name=old_name, new_name=name)
 
         if pattern_index < 0 or pattern_index >= self.pattern_count():
-            return False, "Invalid pattern"
+            return False, texts.backend.sequencer.audio_track.invalid_pattern
         old_path = self.audio_track_slot_sample_paths[pattern_index][track]
         old_name = self.audio_track_slot_sample_names[pattern_index][track]
         if old_path and os.path.isfile(old_path) and os.path.isdir(os.path.dirname(old_path)):
             new_path = os.path.join(os.path.dirname(old_path), name)
             if new_path != old_path:
                 if os.path.exists(new_path):
-                    return False, "Name exists"
+                    return False, texts.backend.sequencer.sample.name_exists
                 try:
                     os.rename(old_path, new_path)
                     self.audio_track_slot_sample_paths[pattern_index][track] = new_path
                 except Exception as exc:
-                    return False, f"Rename failed: {exc}"
+                    return False, texts.fmt(texts.backend.sequencer.sample.rename_failed, error=exc)
         self.audio_track_slot_sample_names[pattern_index][track] = name
         self.dirty = True
-        return True, f"Renamed {old_name} -> {name}"
+        return True, texts.fmt(texts.backend.sequencer.sample.renamed, old_name=old_name, new_name=name)
 
     def set_track_humanize(self, track, value):
         if track == ACCENT_TRACK:

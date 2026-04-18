@@ -35,12 +35,17 @@ class NavigationModelTests(unittest.TestCase):
         self.assertTrue(nav.pattern.focus)
         self.assertEqual(nav.pattern.index, 0)
 
-    def test_pattern_move_down_from_non_edit_returns_grid(self):
+    def test_pattern_move_down_advances_through_params_before_grid(self):
         nav = NavigationModel()
-        nav.focus_pattern(index=2, edit_active=False)
+        nav.focus_pattern(index=0, edit_active=False)
+
+        for expected_index in [1, 2, 3, 4]:
+            result = nav.pattern.move_down()
+            self.assertEqual(result, "params")
+            self.assertTrue(nav.pattern.focus)
+            self.assertEqual(nav.pattern.index, expected_index)
 
         result = nav.pattern.move_down()
-
         self.assertEqual(result, "grid")
         self.assertFalse(nav.pattern.focus)
         self.assertFalse(nav.pattern.edit_active)

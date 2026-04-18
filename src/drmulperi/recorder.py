@@ -11,6 +11,7 @@ import sounddevice as sd
 from scipy.io import wavfile
 
 from .config import TRACKS
+from . import ui_texts as texts
 
 
 def _start_take_capture(controller):
@@ -236,9 +237,9 @@ def start_record_monitor(controller):
         controller.record_level_peak_db = -60.0
         controller.record_level_tick = 0
         controller.record_capture_sr = int(engine.sr)
-        controller.record_monitor_info = f"engine duplex {int(engine.sr)}Hz"
+        controller.record_monitor_info = texts.fmt(texts.backend.recorder.monitor.engine_info, sample_rate=int(engine.sr))
         engine.set_input_monitoring(True)
-        controller.status_message = f"Input meter ON ({controller.record_monitor_info})"
+        controller.status_message = texts.fmt(texts.backend.recorder.monitor.input_meter_on_engine, info=controller.record_monitor_info)
         return
 
     if not controller.record_device_ids:
@@ -273,9 +274,9 @@ def start_record_monitor(controller):
         controller.record_level_peak_db = -60.0
         controller.record_level_tick = 0
         controller.record_capture_sr = int(dev_sr)
-        selected_name = controller.record_device_names[dev_idx] if 0 <= dev_idx < len(controller.record_device_names) else f"device {dev_id}"
-        controller.record_monitor_info = f"{selected_name} {int(dev_sr)}Hz ch{int(channels)}"
-        controller.status_message = f"Input meter ON ({selected_name}, {int(dev_sr)}Hz, ch {int(channels)})"
+        selected_name = controller.record_device_names[dev_idx] if 0 <= dev_idx < len(controller.record_device_names) else texts.fmt(texts.backend.recorder.monitor.device_fallback_name, device_id=dev_id)
+        controller.record_monitor_info = texts.fmt(texts.backend.recorder.monitor.device_info, device_name=selected_name, sample_rate=int(dev_sr), channels=int(channels))
+        controller.status_message = texts.fmt(texts.backend.recorder.monitor.input_meter_on_device, device_name=selected_name, sample_rate=int(dev_sr), channels=int(channels))
     except Exception as exc:
         controller._record_monitor_stream = None
         controller.record_monitor_running = False
@@ -283,7 +284,7 @@ def start_record_monitor(controller):
         controller.record_level_peak_db = -60.0
         controller.record_level_tick = 0
         controller.record_monitor_info = ""
-        controller.status_message = f"Record monitor failed: {exc}"
+        controller.status_message = texts.fmt(texts.backend.recorder.monitor.failed, error=exc)
 
 
 def start_record_capture_stream(controller):
@@ -302,17 +303,17 @@ def start_record_capture_stream(controller):
         controller.record_capture_sr = int(engine.sr)
     else:
         if engine.duplex_mode == "on":
-            controller.status_message = "Duplex mode requested but unavailable. Restart with a duplex-capable device."
+            controller.status_message = texts.backend.recorder.capture.duplex_unavailable
             return False
         if not controller.record_device_ids:
-            controller.status_message = "No input device"
+            controller.status_message = texts.backend.recorder.capture.no_input_device
             return False
         if controller.seq.playing:
-            controller.status_message = "Recording while playing requires duplex input device."
+            controller.status_message = texts.backend.recorder.capture.requires_duplex
             return False
         controller.record_use_external_capture = True
         controller.record_capture_sr = int(engine.sr)
-        controller.status_message = "Recording fallback mode (non-duplex device)"
+        controller.status_message = texts.backend.recorder.capture.fallback_mode
     controller.record_monitor_running = False
     return True
 
@@ -339,8 +340,10 @@ def close_record_overlay(controller):
     controller._stop_record_monitor()
 
 
-def cancel_record_capture(controller, reason="Recording canceled"):
+def cancel_record_capture(controller, reason=None):
     """Abort any active two-pass recording session."""
+    if reason is None:
+        reason = texts.backend.recorder.capture.canceled
     if controller.record_capture_active:
         controller.record_capture_active = False
         controller.record_capture_stage = "idle"
@@ -419,10 +422,10 @@ def finish_record_capture(controller):
             controller.seq.pending_midi_off.clear()
         controller.seq.transport_resync = True
     if recorded is None:
-        controller.status_message = "Record failed: no audio captured"
+        controller.status_message = texts.backend.recorder.capture.failed_no_audio
         return
     if recorded.size <= 1:
-        controller.status_message = "Record failed: no audio captured"
+        controller.status_message = texts.backend.recorder.capture.failed_no_audio
         return
     src_sr = int(controller.seq.engine.sr)
     dst_sr = int(controller.seq.engine.sr)
@@ -452,7 +455,7 @@ def finish_record_capture(controller):
     out = np.clip(out_src * 32767.0, -32768, 32767).astype(np.int16)
     wavfile.write(out_path, dst_sr, out)
     sr_hint = f" (SR {src_sr}->{dst_sr})" if src_sr != dst_sr else ""
-    controller.status_message = f"Recorded {name}{sr_hint}"
+    controller.status_message = texts.fmt(texts.backend.recorder.capture.recorded, name=name, sr_hint=sr_hint)
     controller._close_record_overlay()
     controller._open_import_overlay(out_path, can_delete_source=True)
     if controller.record_capture_context_track is not None:
@@ -497,11 +500,11 @@ def arm_record_capture(controller):
             include_precount=include_precount,
         )
     except Exception as exc:
-        controller.status_message = f"Record failed: backing render error ({exc})"
+        controller.status_message = texts.fmt(texts.backend.recorder.capture.backing_render_error, error=exc)
         return
 
     if backing is None or len(backing) <= 1:
-        controller.status_message = "Record failed: empty backing"
+        controller.status_message = texts.backend.recorder.capture.empty_backing
         return
 
     controller.record_capture_buffer = None
@@ -537,16 +540,16 @@ def arm_record_capture(controller):
     try:
         _start_take_capture(controller)
     except Exception as exc:
-        controller._cancel_record_capture(f"Record failed: {exc}")
+        controller._cancel_record_capture(texts.fmt(texts.backend.recorder.capture.failed, error=exc))
         return
 
     controller.seq.engine.trigger_buffer(backing, 1.0, 5, rate=1.0, track=999, replace=True)
     controller.record_capture_end_time = time.perf_counter() + controller.record_capture_duration_seconds
     scope_text = "song" if scope == "song" else "pattern"
     if include_precount:
-        controller.status_message = f"Recording... (precount + {scope_text})"
+        controller.status_message = texts.fmt(texts.backend.recorder.capture.recording_with_precount, scope=scope_text)
     else:
-        controller.status_message = f"Recording... ({scope_text})"
+        controller.status_message = texts.fmt(texts.backend.recorder.capture.recording, scope=scope_text)
 
 
 def tick_record_capture(controller):

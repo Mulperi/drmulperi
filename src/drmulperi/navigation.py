@@ -123,6 +123,10 @@ class PatternParamsNavigation:
     def move_down(self):
         if self.edit_active:
             return "edit"
+        if self.items and self.index < (len(self.items) - 1):
+            self.index += 1
+            self.clear_input()
+            return "params"
         self.blur()
         return "grid"
 
