@@ -96,6 +96,7 @@ def _load_sequencer_settings(path=SETTINGS_PATH):
     raw_default_step_count = section.get("default_step_count", "16")
     raw_max_step_count = section.get("max_step_count", "32")
     raw_default_pattern_count = section.get("default_pattern_count", "1")
+    raw_track_shift_step_ms = section.get("track_shift_step_ms", "5")
     try:
         parsed_step_count = int(str(raw_default_step_count).strip())
     except Exception:
@@ -108,10 +109,15 @@ def _load_sequencer_settings(path=SETTINGS_PATH):
         parsed_default_pattern_count = int(str(raw_default_pattern_count).strip())
     except Exception:
         parsed_default_pattern_count = 1
+    try:
+        parsed_track_shift_step_ms = int(str(raw_track_shift_step_ms).strip())
+    except Exception:
+        parsed_track_shift_step_ms = 5
     max_step_count = max(1, parsed_max_step_count)
     default_step_count = max(1, min(max_step_count, parsed_step_count))
     default_pattern_count = max(1, parsed_default_pattern_count)
-    return default_kit, follow_song, default_step_count, max_step_count, default_pattern_count
+    track_shift_step_ms = max(1, min(50, parsed_track_shift_step_ms))
+    return default_kit, follow_song, default_step_count, max_step_count, default_pattern_count, track_shift_step_ms
 
 
 def _load_ui_settings(path=SETTINGS_PATH):
@@ -154,7 +160,7 @@ def _load_ui_settings(path=SETTINGS_PATH):
 def main(path=SETTINGS_PATH):
     """CLI entry point."""
     parser = argparse.ArgumentParser()
-    configured_default_kit, configured_follow_song, configured_default_step_count, configured_max_step_count, configured_default_pattern_count = _load_sequencer_settings(path)
+    configured_default_kit, configured_follow_song, configured_default_step_count, configured_max_step_count, configured_default_pattern_count, configured_track_shift_step_ms = _load_sequencer_settings(path)
     configured_colors = _load_ui_settings(path)
     configured_export = _load_export_settings(path)
     parser.add_argument(
@@ -231,6 +237,7 @@ def main(path=SETTINGS_PATH):
         max_step_count=configured_max_step_count,
         default_pattern_count=configured_default_pattern_count,
         humanize_amount=configured_colors.get("humanize_amount", "50"),
+        track_shift_step_ms=configured_track_shift_step_ms,
     )
     if not project_arg and not pattern_arg and not positional_arg:
         # Default startup should be a truly empty project.

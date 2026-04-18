@@ -111,11 +111,10 @@ def draw(
     pattern_params_focus,
     pattern_params_index,
     pattern_params_edit_active,
+    pattern_params_input,
     active_tab,
     header_edit_active,
     edit_mode,
-    clear_confirm,
-    esc_confirm,
     pattern_load_prompt,
     status_message,
     pattern_menu_active,
@@ -123,7 +122,6 @@ def draw(
     pattern_menu_index,
     patterns_overlay_active,
     patterns_overlay_index,
-    patterns_overlay_delete_confirm_index,
     import_overlay_active,
     import_overlay_index,
     import_overlay_path,
@@ -175,6 +173,9 @@ def draw(
     track_params_dialog_track,
     track_params_dialog_index,
     track_params_dialog_input,
+    confirm_dialog_active,
+    confirm_dialog_message,
+    confirm_dialog_index,
     theme
 ):
     """Render full terminal UI frame from current sequencer/controller state."""
@@ -190,6 +191,7 @@ def draw(
         or audio_export_options_active
         or kit_export_options_active
         or track_params_dialog_active
+        or confirm_dialog_active
     )
     dim_background_active = modal_dim_active
 
@@ -371,8 +373,10 @@ def draw(
     song_line = "-".join(song_parts) if song_parts else "-"
 
     area_work_content_x = area_work_left + 2
-    area_work_controls_y = area_work_top + 1
-    area_work_values_y = area_work_top + 2
+    # Two control rows directly under tabs (pattern controls area).
+    area_patt_controls = (area_work_top + 1, area_work_top + 2)
+    area_patt_controls_y = area_patt_controls[0]
+    area_patt_values_y = area_patt_controls[1]
     playhead_y = area_work_top + 3
     current_length = seq.pattern_length[seq.view_pattern]
     show_playhead = seq.playing and (seq.view_pattern == seq.pattern)
@@ -381,16 +385,37 @@ def draw(
     x += 2
 
     if active_tab == 0:
+        pattern_name = seq.get_pattern_name(seq.view_pattern)
+        name_cell_width = max(18, min(50, w - area_work_content_x - 4))
+        if pattern_params_focus and pattern_params_index == 0 and pattern_params_edit_active:
+            name_value = pattern_params_input
+        else:
+            name_value = pattern_name
+        name_text = str(name_value or "")[:name_cell_width].ljust(name_cell_width)
+        name_attr = theme["text"]
+        if pattern_params_focus and pattern_params_index == 0:
+            name_attr = name_attr | theme["selected"]
+            if pattern_params_edit_active:
+                name_attr = name_attr | curses.A_UNDERLINE
+        safe_add(
+            area_patt_controls_y,
+            area_work_content_x,
+            name_text,
+            name_attr,
+            transform_case=False,
+        )
+
         pattern_param_table = [
-            ("length", "Steps", str(seq.pattern_length[seq.view_pattern]), 8),
-            ("swing", "Swing", str(seq.current_pattern_swing_ui()), 7),
+            ("name", "NAME", "", 8),
+            ("length", "LEN", str(seq.pattern_length[seq.view_pattern]), 8),
+            ("swing", "SW", str(seq.current_pattern_swing_ui()), 7),
             ("humanize", "", "HUMAN", 7),
-            ("mode", "Mode", mode.title(), 8),
+            ("mode", "MODE", mode.title(), 8),
         ]
         px = area_work_content_x
         for idx, (item_key, item_header, item_value, cell_w) in enumerate(pattern_param_table):
-            if item_header:
-                safe_add(area_work_controls_y, px, f"{item_header:<{cell_w}}", theme["muted"])
+            if item_key == "name":
+                continue
             value_attr = theme["text"]
             if item_key == "humanize" and seq.current_pattern_humanize_enabled():
                 value_attr = theme["accent"]
@@ -398,7 +423,7 @@ def draw(
                 value_attr = value_attr | theme["selected"]
                 if pattern_params_edit_active:
                     value_attr = value_attr | curses.A_UNDERLINE
-            safe_add(area_work_values_y, px, f"{item_value:<{cell_w}}", value_attr)
+            safe_add(area_patt_values_y, px, f"{item_value:<{cell_w}}", value_attr)
             px += cell_w + 2
 
     def col_cell_width(col):
@@ -436,8 +461,8 @@ def draw(
             safe_add(playhead_y, step_x + ((current_length - 1) * (1 + seq_col_gap)), "|", theme["hint"])
     # --- Audio tab UI elements: rows align to sequencer lanes (no playhead heading) ---
     elif active_tab == 1:
-        safe_add(area_work_controls_y, area_work_content_x, "Press enter on sample name to toggle song/pattern mode.", theme["muted"])
-        safe_add(area_work_values_y, area_work_content_x, "Song-level samples don't trigger per pattern.", theme["muted"])
+        safe_add(area_patt_controls_y, area_work_content_x, "Press enter on sample name to toggle song/pattern mode.", theme["muted"])
+        safe_add(area_patt_values_y, area_work_content_x, "Song-level samples don't trigger per pattern.", theme["muted"])
         # safe_add(playhead_y, area_work_content_x, "Enter on track name toggles Pattern/Song mode.", theme["muted"])
     elif active_tab == 2:
         mixer_base_x = area_work_content_x + len("1 ") + 2
@@ -675,9 +700,11 @@ def draw(
             return str(seq.engine.sample_names[cursor_y])
         return "Accent track"
     if pattern_params_focus and active_tab == 0:
-        pattern_nav_keys = ["length", "swing", "humanize", "mode"]
+        pattern_nav_keys = ["name", "length", "swing", "humanize", "mode"]
         active_key = pattern_nav_keys[max(0, min(len(pattern_nav_keys) - 1, pattern_params_index))]
-        if active_key == "length":
+        if active_key == "name":
+            help_line = "Pattern name: Enter to edit, type text, Enter/Esc to finish"
+        elif active_key == "length":
             help_line = "Pattern steps: type digits to set immediately"
         elif active_key == "swing":
             help_line = "Pattern swing (0-10): type digits to set immediately"
@@ -768,11 +795,7 @@ def draw(
     else:
         help_line = "SAMPLE: Accent track (no sample file)"
 
-    if clear_confirm:
-        prompt_line = f"Clear current pattern? Press {clear_key_label} again to confirm."
-    elif esc_confirm:
-        prompt_line = "Press Esc again to exit."
-    elif pattern_load_prompt:
+    if pattern_load_prompt:
         prompt_line = pattern_load_prompt
     elif status_message:
         prompt_line = f"{status_message} | {help_line}"
@@ -862,9 +885,9 @@ def draw(
             swing = seq.swing_internal_to_ui(seq.pattern_swing[i])
             is_empty = not seq.pattern_has_data(i)
             state = "EMPTY" if is_empty else "     "
-            confirm_tag = "X!" if i == patterns_overlay_delete_confirm_index else "  "
+            pat_name = str(seq.get_pattern_name(i) or "")[:18].ljust(18)
             rows.append(
-                f"{i+1:>2}. {view_tag} {play_tag} {confirm_tag} {state} LEN:{length:>2} SW:{swing:>2} HITS:{hits:>3}"
+                f"{i+1:>2}. {view_tag} {play_tag} {state} {pat_name} LEN:{length:>2} SW:{swing:>2} HITS:{hits:>3}"
             )
             row_is_empty.append(is_empty)
         if not rows:
@@ -891,7 +914,7 @@ def draw(
             attr = theme["muted"] if row_is_empty[i] else theme["text"]
             if i == patterns_overlay_index:
                 attr = attr | theme["selected"]
-            safe_add(y, box_left + 2, rows[i][: box_width - 4], attr)
+            safe_add(y, box_left + 2, rows[i][: box_width - 4], attr, transform_case=False)
         _end_modal_draw(_prev_dim_background_active)
 
     if chop_overlay_active:
@@ -1250,6 +1273,7 @@ def draw(
             ("Probability (0-9)", str(seq.seq_track_probability[track_params_dialog_track])),
             ("Group (0-9)", str(seq.seq_track_group[track_params_dialog_track])),
             ("Pitch (0-24)", str(seq.seq_track_pitch[track_params_dialog_track] + 12)),
+            ("Shift (0-9)", str(seq.seq_track_shift[track_params_dialog_track])),
             ("Load Sample", "Press Enter"),
         ]
         box_width = min(w - 8, 50)
@@ -1275,6 +1299,28 @@ def draw(
             safe_add(y, box_left + 2, line[: box_width - 4], attr)
         _end_modal_draw(_prev_dim_background_active)
 
+    if confirm_dialog_active:
+        _prev_dim_background_active = _begin_modal_draw()
+        title = "ARE YOU SURE?"
+        message = (confirm_dialog_message or "").strip()
+        box_width = min(w - 8, max(46, len(message) + 6 if message else 46))
+        box_height = min(h - 4, 8)
+        box_left = max(1, (w - box_width) // 2)
+        box_top = max(1, (h - box_height) // 2)
+        box_right = box_left + box_width - 1
+        box_bottom = box_top + box_height - 1
+        draw_box(box_left, box_top, box_right, box_bottom, frame_attr)
+        for y in range(box_top + 1, box_bottom):
+            safe_add(y, box_left + 1, " " * (box_width - 2), theme["text"])
+        safe_add(box_top + 1, box_left + 2, title[: box_width - 4], theme["text"])
+        safe_add(box_top + 2, box_left + 2, (message or "Please confirm")[: box_width - 4], theme["muted"], transform_case=False)
+
+        no_attr = theme["text"] | (theme["selected"] if confirm_dialog_index == 0 else 0)
+        yes_attr = theme["text"] | (theme["selected"] if confirm_dialog_index == 1 else 0)
+        safe_add(box_bottom - 2, box_left + 6, "[ No ]", no_attr)
+        safe_add(box_bottom - 2, box_right - 12, "[ Yes ]", yes_attr)
+        _end_modal_draw(_prev_dim_background_active)
+
     stdscr.refresh()
 
 # ---------- CONTROLLER ----------
@@ -1291,8 +1337,6 @@ class Controller:
         self.cursor_x = 0
         self.cursor_y = 0
         self.edit_mode = "blocks"
-        self.clear_confirm = False
-        self.esc_confirm = False
         self.kit_load_active = False
         self.kit_load_input = ""
         self.project_save_as_active = False
@@ -1356,7 +1400,6 @@ class Controller:
         self.inline_value_time = 0.0
         self.patterns_overlay_active = False
         self.patterns_overlay_index = 0
-        self.patterns_overlay_delete_confirm_index = -1
         self.import_overlay_active = False
         self.import_overlay_index = 0
         self.import_overlay_path = None
@@ -1417,16 +1460,28 @@ class Controller:
         self.record_capture_end_time = 0.0
         self.record_use_external_capture = False
         self.record_capture_started_playback = False
-        self.clear_audio_confirm_active = False
-        self.clear_audio_force_confirm_active = False
-        self.clear_audio_confirm_pattern = 0
-        self.clear_audio_confirm_track = 0
-        self.clear_audio_confirm_path = None
-        self.clipboard_import_confirm_active = False
-        self.clipboard_import_text = ""
-        self.clipboard_import_count = 0
+        self.confirm_dialog_active = False
+        self.confirm_dialog_message = ""
+        self.confirm_dialog_index = 0  # 0=No, 1=Yes
+        self.confirm_dialog_action = None
         self.status_message = ""
         self.pattern_actions = [f"pattern_{i+1}" for i in range(PATTERNS)]
+
+    def _open_confirm_dialog(self, message, action):
+        """Open centered generic confirm dialog with No/Yes buttons."""
+        self.confirm_dialog_active = True
+        self.confirm_dialog_message = str(message or "")
+        self.confirm_dialog_index = 0
+        self.confirm_dialog_action = action
+
+    def _close_confirm_dialog(self):
+        self.confirm_dialog_active = False
+        self.confirm_dialog_message = ""
+        self.confirm_dialog_index = 0
+        self.confirm_dialog_action = None
+
+    def _confirm_quit_action(self):
+        return "EXIT_APP"
 
     def move_cursor(self, dx, dy):
         nav = self._sequencer_nav_cols()
@@ -1464,7 +1519,7 @@ class Controller:
 
     def _pattern_param_keys(self):
         """Ordered keys for work-area pattern parameter navigation."""
-        return ["length", "swing", "humanize", "mode"]
+        return ["name", "length", "swing", "humanize", "mode"]
 
     def _pattern_param_current(self):
         keys = self._pattern_param_keys()
@@ -1503,6 +1558,8 @@ class Controller:
         """Apply +/- adjustment to the currently focused work-area pattern parameter."""
         self._clear_pattern_param_input()
         key = self._pattern_param_current()
+        if key == "name":
+            return
         if key == "length":
             self.seq.change_current_pattern_length(delta)
         elif key == "swing":
@@ -1700,8 +1757,8 @@ class Controller:
             self.status_message = "Accent track has no track parameters"
             return
 
-        # Index 5 is Load Sample, which opens file browser (no value input needed)
-        if self.track_params_dialog_index == 5:
+        # Index 6 is Load Sample, which opens file browser (no value input needed)
+        if self.track_params_dialog_index == 6:
             self._open_file_browser("sample", target_track=track)
             self._close_track_params_dialog()
             return
@@ -1728,10 +1785,15 @@ class Controller:
             value = max(0, min(9, value))
             self.seq.set_track_group(track, value)
             self.status_message = f"Track {track + 1} group: {value}"
-        else:
+        elif self.track_params_dialog_index == 4:
             value = max(0, min(24, value))
             self.seq.set_track_pitch_ui(track, value)
             self.status_message = f"Track {track + 1} pitch: {value}"
+        else:
+            value = max(0, min(9, value))
+            self.seq.set_track_shift(track, value)
+            shift_ms = self.seq.seq_shift_ui_to_ms(value)
+            self.status_message = f"Track {track + 1} shift: {value} ({shift_ms:+d}ms)"
 
     def _tap_tempo(self):
         """Register a tap and update BPM from average interval of last 4 taps."""
@@ -2016,18 +2078,35 @@ class Controller:
         self.track_rename_input = ""
 
     def _open_clear_audio_confirm(self, pattern_index, track):
-        """Open Y/N confirmation prompt for clearing an audio track sample."""
-        self.clear_audio_confirm_active = True
-        self.clear_audio_force_confirm_active = False
-        self.clear_audio_confirm_pattern = int(pattern_index)
-        self.clear_audio_confirm_track = int(track)
-        self.clear_audio_confirm_path = self.seq.get_audio_track_path(pattern_index, track)
+        """Open generic confirm dialog for clearing an audio track sample."""
+        pattern_idx = int(pattern_index)
+        track_idx = int(track)
+        path = self.seq.get_audio_track_path(pattern_idx, track_idx)
+        path_name = os.path.basename(path) if path else "(no file)"
 
-    def _close_clipboard_import_confirm(self):
-        """Close clipboard-import confirmation prompt state."""
-        self.clipboard_import_confirm_active = False
-        self.clipboard_import_text = ""
-        self.clipboard_import_count = 0
+        def _force_delete_everywhere():
+            ok, message = self.seq.force_delete_audio_path(path)
+            self.status_message = message
+            return True
+
+        def _do_clear_audio_track():
+            ok, message, needs_force = self.seq.clear_audio_track_sample(
+                pattern_idx,
+                track_idx,
+                delete_file=True,
+            )
+            self.status_message = message
+            if needs_force:
+                self._open_confirm_dialog(
+                    f"File used elsewhere. Force delete everywhere? {path_name}",
+                    _force_delete_everywhere,
+                )
+            return True
+
+        self._open_confirm_dialog(
+            f"Clear sample from audio track {track_idx + 1} and delete file? {path_name}",
+            _do_clear_audio_track,
+        )
 
     def _menu_items(self):
         """Return currently active top-menu item list."""
@@ -2060,7 +2139,6 @@ class Controller:
             if self.pattern_menu_index == 0:
                 self.patterns_overlay_active = True
                 self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
-                self.patterns_overlay_delete_confirm_index = -1
                 ok, message = True, ""
             elif self.pattern_menu_index == 1:
                 ok, message = self.seq.add_pattern_after_current(copy_from_view=False)
@@ -2072,9 +2150,19 @@ class Controller:
                 if not ok_parse:
                     ok, message = False, f"Clipboard import failed: {parse_message}"
                 else:
-                    self.clipboard_import_confirm_active = True
-                    self.clipboard_import_text = clip_text
-                    self.clipboard_import_count = len(parsed)
+                    import_count = len(parsed)
+                    def _do_import_from_clipboard():
+                        ok_import, msg_import = self.seq.import_patterns_from_text(clip_text)
+                        self.status_message = msg_import
+                        return True
+                    if import_count > 1:
+                        confirm_msg = (
+                            f"Import {import_count} patterns from clipboard? "
+                            "This replaces pattern step data and enables song mode."
+                        )
+                    else:
+                        confirm_msg = "Import 1 pattern from clipboard? This replaces current pattern step data."
+                    self._open_confirm_dialog(confirm_msg, _do_import_from_clipboard)
                     ok, message = True, ""
             elif self.pattern_menu_index == 4:
                 self._open_file_browser("pattern_steps")
@@ -2087,14 +2175,40 @@ class Controller:
                 else:
                     ok, message = False, f"Copy failed: {copy_error}"
             elif self.pattern_menu_index == 6:
-                self.seq.clear_current_pattern()
-                ok, message = True, f"Cleared pattern {self.seq.view_pattern + 1}"
+                idx = self.seq.view_pattern
+                if self.seq.pattern_has_data(idx):
+                    def _do_clear_pattern_from_menu():
+                        self.seq.clear_current_pattern()
+                        self.status_message = f"Cleared pattern {idx + 1}"
+                        return True
+
+                    self._open_confirm_dialog(
+                        f"Clear pattern {idx + 1}? This pattern contains data.",
+                        _do_clear_pattern_from_menu,
+                    )
+                    ok, message = True, ""
+                else:
+                    self.seq.clear_current_pattern()
+                    ok, message = True, f"Cleared pattern {idx + 1}"
             elif self.pattern_menu_index == 7:
                 ok, message = self.seq.copy_current_pattern()
             elif self.pattern_menu_index == 8:
                 ok, message = self.seq.paste_to_current_pattern()
             elif self.pattern_menu_index == 9:
-                ok, message = self.seq.delete_pattern(self.seq.view_pattern)
+                idx = self.seq.view_pattern
+                if self.seq.pattern_has_data(idx):
+                    def _do_delete_pattern_from_menu():
+                        ok_delete, msg_delete = self.seq.delete_pattern(idx)
+                        self.status_message = msg_delete
+                        return ok_delete
+
+                    self._open_confirm_dialog(
+                        f"Delete pattern {idx + 1}? This pattern contains data.",
+                        _do_delete_pattern_from_menu,
+                    )
+                    ok, message = True, ""
+                else:
+                    ok, message = self.seq.delete_pattern(idx)
             else:
                 ok, message = False, "Invalid Pattern menu option"
             self.status_message = message
@@ -2182,58 +2296,45 @@ class Controller:
         key_code = key if isinstance(key, int) else ord(key)
         if self.active_tab == 0 and self.cursor_x == AUDIO_VOLUME_COL:
             self.cursor_x = REC_COL
-        if key_code != 27 and self.esc_confirm:
-            self.esc_confirm = False
         if self.status_message and key_code != -1:
             self.status_message = ""
         if self.active_tab in [1, 2] and self.cursor_y >= (TRACKS - 1):
             self.cursor_y = TRACKS - 2
 
-        if self.clear_audio_confirm_active:
+        if self.confirm_dialog_active:
             if key_code == 27:
-                self.clear_audio_confirm_active = False
-                self.clear_audio_force_confirm_active = False
-                self.status_message = "Clear canceled"
+                self._close_confirm_dialog()
+                self.status_message = "Canceled"
                 return True
-            if self.clear_audio_force_confirm_active:
-                if isinstance(key, str) and key.lower() in ["y", "n"]:
-                    if key.lower() == "y":
-                        ok, message = self.seq.force_delete_audio_path(self.clear_audio_confirm_path)
-                        self.status_message = message
-                    else:
-                        self.status_message = "Force delete canceled (file kept)"
-                    self.clear_audio_confirm_active = False
-                    self.clear_audio_force_confirm_active = False
-                    return True
-            else:
-                if isinstance(key, str) and key.lower() in ["y", "n"]:
-                    delete_file = (key.lower() == "y")
-                    ok, message, needs_force = self.seq.clear_audio_track_sample(
-                        self.clear_audio_confirm_pattern,
-                        self.clear_audio_confirm_track,
-                        delete_file=delete_file,
-                    )
-                    self.status_message = message
-                    if needs_force:
-                        self.clear_audio_force_confirm_active = True
-                    else:
-                        self.clear_audio_confirm_active = False
-                        self.clear_audio_force_confirm_active = False
-                    return True
-            return True
-
-        if self.clipboard_import_confirm_active:
-            if key_code == 27:
-                self._close_clipboard_import_confirm()
-                self.status_message = "Clipboard import canceled"
+            if key_code in [curses.KEY_LEFT, curses.KEY_UP, curses.KEY_BTAB]:
+                self.confirm_dialog_index = 0
+                return True
+            if key_code in [curses.KEY_RIGHT, curses.KEY_DOWN, 9]:
+                self.confirm_dialog_index = 1
                 return True
             if isinstance(key, str) and key.lower() in ["y", "n"]:
-                if key.lower() == "y":
-                    ok, message = self.seq.import_patterns_from_text(self.clipboard_import_text)
-                    self.status_message = message
-                else:
-                    self.status_message = "Clipboard import canceled"
-                self._close_clipboard_import_confirm()
+                self.confirm_dialog_index = 1 if key.lower() == "y" else 0
+                if key.lower() == "n":
+                    self._close_confirm_dialog()
+                    self.status_message = "Canceled"
+                    return True
+                # key == 'y' executes action below by simulating Enter branch
+                key_code = 10
+            if key_code in [10, 13, curses.KEY_ENTER]:
+                action = self.confirm_dialog_action
+                execute_yes = (self.confirm_dialog_index == 1)
+                self._close_confirm_dialog()
+                if not execute_yes:
+                    self.status_message = "Canceled"
+                    return True
+                if callable(action):
+                    try:
+                        result = action()
+                    except Exception as exc:
+                        self.status_message = f"Confirm action failed: {exc}"
+                        return True
+                    if result == "EXIT_APP":
+                        return False
                 return True
             return True
 
@@ -2446,55 +2547,53 @@ class Controller:
             count = self.seq.pattern_count()
             if key_code == 27 or self.keymap.matches("patterns_overlay", event_tokens):
                 self.patterns_overlay_active = False
-                self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code == curses.KEY_UP:
                 if count > 0:
                     self.patterns_overlay_index = (self.patterns_overlay_index - 1) % count
-                self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code == curses.KEY_DOWN:
                 if count > 0:
                     self.patterns_overlay_index = (self.patterns_overlay_index + 1) % count
-                self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
                 if count > 0:
                     self.seq.select_pattern(self.patterns_overlay_index)
-                self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code == 32:
                 if not self.seq.playing and count > 0:
                     self.seq.select_pattern(self.patterns_overlay_index)
                 self.seq.toggle_playback()
-                self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code in [ord("a"), ord("A")]:
                 ok, message = self.seq.add_pattern_after_current(copy_from_view=False)
                 self.status_message = message
                 self.patterns_overlay_index = self.seq.view_pattern
-                self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code in [ord("d"), ord("D")]:
                 ok, message = self.seq.add_pattern_after_current(copy_from_view=True)
                 self.status_message = message
                 self.patterns_overlay_index = self.seq.view_pattern
-                self.patterns_overlay_delete_confirm_index = -1
                 return True
             if key_code in [ord("x"), ord("X")]:
                 if count <= 0:
                     return True
                 idx = self.patterns_overlay_index
-                if self.patterns_overlay_delete_confirm_index != idx:
-                    self.patterns_overlay_delete_confirm_index = idx
-                    if self.seq.pattern_has_data(idx):
-                        self.status_message = f"Pattern {idx + 1} has data. Press X again to delete (X! marker shown)."
-                    else:
-                        self.status_message = f"Press X again to delete pattern {idx + 1}."
+                if self.seq.pattern_has_data(idx):
+                    def _do_delete_pattern_from_overlay():
+                        ok, message = self.seq.delete_pattern(idx)
+                        self.status_message = message
+                        self.patterns_overlay_index = min(idx, self.seq.pattern_count() - 1)
+                        return True
+
+                    self._open_confirm_dialog(
+                        f"Delete pattern {idx + 1}? This pattern contains data.",
+                        _do_delete_pattern_from_overlay,
+                    )
                     return True
+
                 ok, message = self.seq.delete_pattern(idx)
                 self.status_message = message
-                self.patterns_overlay_delete_confirm_index = -1
                 self.patterns_overlay_index = min(idx, self.seq.pattern_count() - 1)
                 return True
             return True
@@ -2725,17 +2824,31 @@ class Controller:
                 return True
             if key_code in [10, 13, curses.KEY_ENTER]:
                 # For Load Sample field, open file browser; for others, apply and close.
-                if self.track_params_dialog_index == 5:
+                if self.track_params_dialog_index == 6:
                     self._apply_track_params_dialog()
                 else:
                     self._close_track_params_dialog()
                 return True
-            if key_code in [curses.KEY_RIGHT, curses.KEY_DOWN, 9]:
-                self.track_params_dialog_index = (self.track_params_dialog_index + 1) % 6
+            if key_code == curses.KEY_RIGHT:
+                if self.track_params_dialog_track == ACCENT_TRACK:
+                    self.track_params_dialog_track = 0
+                else:
+                    self.track_params_dialog_track = (self.track_params_dialog_track + 1) % max(1, TRACKS - 1)
                 self.track_params_dialog_input = ""
                 return True
-            if key_code in [curses.KEY_LEFT, curses.KEY_UP, curses.KEY_BTAB]:
-                self.track_params_dialog_index = (self.track_params_dialog_index - 1) % 6
+            if key_code == curses.KEY_LEFT:
+                if self.track_params_dialog_track == ACCENT_TRACK:
+                    self.track_params_dialog_track = max(0, TRACKS - 2)
+                else:
+                    self.track_params_dialog_track = (self.track_params_dialog_track - 1) % max(1, TRACKS - 1)
+                self.track_params_dialog_input = ""
+                return True
+            if key_code in [curses.KEY_DOWN, 9]:
+                self.track_params_dialog_index = (self.track_params_dialog_index + 1) % 7
+                self.track_params_dialog_input = ""
+                return True
+            if key_code in [curses.KEY_UP, curses.KEY_BTAB]:
+                self.track_params_dialog_index = (self.track_params_dialog_index - 1) % 7
                 self.track_params_dialog_input = ""
                 return True
 
@@ -2753,14 +2866,50 @@ class Controller:
                 return True
             return True
 
+        if self.pattern_params_focus and self.active_tab == 0 and self._pattern_param_current() == "name":
+            backspace_keys = {curses.KEY_BACKSPACE, 127, 8}
+            if self.pattern_params_edit_active:
+                if key_code in [10, 13, curses.KEY_ENTER, 27]:
+                    self.pattern_params_edit_active = False
+                    self._clear_pattern_param_input()
+                    return True
+                if key_code in backspace_keys or key in ["\b", "\x7f"]:
+                    self.pattern_params_input = self.pattern_params_input[:-1]
+                    self.seq.set_pattern_name(self.seq.view_pattern, self.pattern_params_input)
+                    self.status_message = f"Pattern name: {self.seq.get_pattern_name(self.seq.view_pattern)}"
+                    return True
+                if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                    if len(self.pattern_params_input) < 64:
+                        self.pattern_params_input += key
+                    self.seq.set_pattern_name(self.seq.view_pattern, self.pattern_params_input)
+                    self.status_message = f"Pattern name: {self.seq.get_pattern_name(self.seq.view_pattern)}"
+                    return True
+                # While editing pattern name, consume all remaining keys so hotkeys do not fire.
+                return True
+
+            if isinstance(key, str) and key.isprintable() and key not in ["\n", "\r", "\t"]:
+                self.pattern_params_edit_active = True
+                self.pattern_params_input = self.seq.get_pattern_name(self.seq.view_pattern)
+                if len(self.pattern_params_input) < 64:
+                    self.pattern_params_input += key
+                self.seq.set_pattern_name(self.seq.view_pattern, self.pattern_params_input)
+                self.status_message = f"Pattern name: {self.seq.get_pattern_name(self.seq.view_pattern)}"
+                return True
+
         # Global navigation handlers (arrow keys + tab) start here.
         if key_code == curses.KEY_RIGHT:
             if self.pattern_params_focus and self.active_tab == 0:
                 if self.pattern_params_edit_active:
+                    if self._pattern_param_current() == "name":
+                        return True
                     self._adjust_pattern_param(+1)
                 else:
                     keys = self._pattern_param_keys()
-                    self.pattern_params_index = (self.pattern_params_index + 1) % len(keys)
+                    if self.pattern_params_index == 0:
+                        return True
+                    lo = 1
+                    hi = len(keys) - 1
+                    self.pattern_params_index = lo if self.pattern_params_index >= hi else (self.pattern_params_index + 1)
                     self._clear_pattern_param_input()
                 return True
             if self.header_focus:
@@ -2804,10 +2953,16 @@ class Controller:
         if key_code == curses.KEY_LEFT:
             if self.pattern_params_focus and self.active_tab == 0:
                 if self.pattern_params_edit_active:
+                    if self._pattern_param_current() == "name":
+                        return True
                     self._adjust_pattern_param(-1)
                 else:
                     keys = self._pattern_param_keys()
-                    self.pattern_params_index = (self.pattern_params_index - 1) % len(keys)
+                    if self.pattern_params_index == 0:
+                        return True
+                    lo = 1
+                    hi = len(keys) - 1
+                    self.pattern_params_index = hi if self.pattern_params_index <= lo else (self.pattern_params_index - 1)
                     self._clear_pattern_param_input()
                 return True
             if self.header_focus:
@@ -2850,6 +3005,12 @@ class Controller:
             return True
         if key_code == curses.KEY_UP:
             if self.pattern_params_focus and self.active_tab == 0:
+                if self.pattern_params_edit_active and self._pattern_param_current() == "name":
+                    return True
+                if not self.pattern_params_edit_active and self.pattern_params_index != 0:
+                    self.pattern_params_index = 0
+                    self._clear_pattern_param_input()
+                    return True
                 self.pattern_params_edit_active = False
                 self._clear_pattern_param_input()
                 self.pattern_params_focus = False
@@ -2872,6 +3033,8 @@ class Controller:
                 if self.active_tab == 0:
                     self.pattern_params_focus = True
                     self.pattern_params_edit_active = False
+                    if self.pattern_params_index == 0:
+                        self.pattern_params_index = 1
                     self._clear_pattern_param_input()
                 else:
                     self.header_focus = True
@@ -2888,7 +3051,12 @@ class Controller:
         if key_code == curses.KEY_DOWN:
             if self.pattern_params_focus and self.active_tab == 0:
                 if self.pattern_params_edit_active:
+                    if self._pattern_param_current() == "name":
+                        return True
                     self._adjust_pattern_param(-1)
+                elif self.pattern_params_index == 0:
+                    self.pattern_params_index = 1
+                    self._clear_pattern_param_input()
                 else:
                     self._clear_pattern_param_input()
                     self.pattern_params_focus = False
@@ -2910,6 +3078,8 @@ class Controller:
                     if self.active_tab == 0:
                         self.pattern_params_focus = True
                         self.pattern_params_edit_active = False
+                        if self.pattern_params_index == 0:
+                            self.pattern_params_index = 1
                         self._clear_pattern_param_input()
             else:
                 if self.active_tab in [1, 2]:
@@ -2921,8 +3091,14 @@ class Controller:
             return True
         if "TAB" in event_tokens or key_code == 9:
             if self.pattern_params_focus and self.active_tab == 0:
+                if self.pattern_params_edit_active and self._pattern_param_current() == "name":
+                    return True
                 keys = self._pattern_param_keys()
-                self.pattern_params_index = (self.pattern_params_index + 1) % len(keys)
+                if self.pattern_params_index == 0:
+                    return True
+                lo = 1
+                hi = len(keys) - 1
+                self.pattern_params_index = lo if self.pattern_params_index >= hi else (self.pattern_params_index + 1)
                 self._clear_pattern_param_input()
                 return True
             if self.header_focus:
@@ -2967,8 +3143,14 @@ class Controller:
                 return True
         if "BTAB" in event_tokens or key_code == curses.KEY_BTAB:
             if self.pattern_params_focus and self.active_tab == 0:
+                if self.pattern_params_edit_active and self._pattern_param_current() == "name":
+                    return True
                 keys = self._pattern_param_keys()
-                self.pattern_params_index = (self.pattern_params_index - 1) % len(keys)
+                if self.pattern_params_index == 0:
+                    return True
+                lo = 1
+                hi = len(keys) - 1
+                self.pattern_params_index = hi if self.pattern_params_index <= lo else (self.pattern_params_index - 1)
                 self._clear_pattern_param_input()
                 return True
             if self.header_focus:
@@ -3066,16 +3248,7 @@ class Controller:
             if self.track_params_dialog_active:
                 self._close_track_params_dialog()
                 return True
-            if self.clipboard_import_confirm_active:
-                self._close_clipboard_import_confirm()
-                return True
-            if self.clear_confirm:
-                self.clear_confirm = False
-                return True
-            if self.esc_confirm:
-                return False
-            self.esc_confirm = True
-            self.status_message = "Press Esc again to exit."
+            self._open_confirm_dialog("Quit application?", self._confirm_quit_action)
             return True
 
         if self.chain_edit_active:
@@ -3269,15 +3442,17 @@ class Controller:
             return True
 
         if self.keymap.matches("clear_pattern", event_tokens):
-            if self.clear_confirm:
-                self.seq.clear_current_pattern()
-                self.clear_confirm = False
+            pat_num = self.seq.view_pattern + 1
+            if self.seq.pattern_has_data(self.seq.view_pattern):
+                def _do_clear_pattern():
+                    self.seq.clear_current_pattern()
+                    self.status_message = f"Cleared pattern {pat_num}"
+                    return True
+                self._open_confirm_dialog(f"Clear pattern {pat_num} with existing data?", _do_clear_pattern)
             else:
-                self.clear_confirm = True
+                self.seq.clear_current_pattern()
+                self.status_message = f"Cleared pattern {pat_num}"
             return True
-
-        if self.clear_confirm and key_code != -1:
-            self.clear_confirm = False
 
         if isinstance(key, str) and key in ["/", "~"]:
             self.drop_path_active = True
@@ -3292,7 +3467,6 @@ class Controller:
         elif self.keymap.matches("patterns_overlay", event_tokens):
             self.patterns_overlay_active = True
             self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
-            self.patterns_overlay_delete_confirm_index = -1
         elif self.keymap.matches("file_menu", event_tokens):
             self.header_focus = False
             self.header_section = "params"
@@ -3546,7 +3720,14 @@ class Controller:
         elif key_code in [10, 13, curses.KEY_ENTER]:
             if self.pattern_params_focus and self.active_tab == 0:
                 current = self._pattern_param_current()
-                if current == "mode":
+                if current == "name":
+                    if self.pattern_params_edit_active:
+                        self.pattern_params_edit_active = False
+                        self._clear_pattern_param_input()
+                    else:
+                        self.pattern_params_edit_active = True
+                        self.pattern_params_input = self.seq.get_pattern_name(self.seq.view_pattern)
+                elif current == "mode":
                     self._cycle_edit_mode()
                 elif current == "humanize":
                     self.seq.toggle_current_pattern_humanize()
@@ -3595,7 +3776,6 @@ class Controller:
                 elif param == "patterns":
                     self.patterns_overlay_active = True
                     self.patterns_overlay_index = max(0, min(self.seq.pattern_count() - 1, self.seq.view_pattern))
-                    self.patterns_overlay_delete_confirm_index = -1
                     self.header_focus = False
                     self.header_section = "params"
                     self.header_edit_active = False
@@ -3928,8 +4108,6 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
             controller.active_tab,
             controller.header_edit_active,
             controller.edit_mode,
-            controller.clear_confirm,
-            controller.esc_confirm,
             controller.kit_load_active,
             controller.project_save_as_active,
             controller.audio_export_active,
@@ -3950,17 +4128,14 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
             controller.track_rename_active,
             controller.chain_edit_active,
             controller.swing_edit_active,
-            controller.clear_audio_confirm_active,
-            controller.clear_audio_force_confirm_active,
-            controller.clipboard_import_confirm_active,
-            controller.clipboard_import_count,
-            controller.clipboard_import_text,
+            controller.confirm_dialog_active,
+            controller.confirm_dialog_message,
+            controller.confirm_dialog_index,
             controller.pattern_menu_active,
             controller.pattern_menu_kind,
             controller.pattern_menu_index,
             controller.patterns_overlay_active,
             controller.patterns_overlay_index,
-            controller.patterns_overlay_delete_confirm_index,
             controller.import_overlay_active,
             controller.import_overlay_index,
             controller.import_overlay_path,
@@ -4057,32 +4232,17 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
             elif controller.swing_edit_active:
                 prompt_text = f"Swing 0-10 (Esc cancels): {controller.swing_edit_input}"
             elif controller.track_params_dialog_active:
-                param_names = ["Pan 1-9", "Volume 0-9", "Probability 0-9", "Group 0-9", "Pitch 0-24", "Load Sample"]
+                param_names = ["Pan 1-9", "Volume 0-9", "Probability 0-9", "Group 0-9", "Pitch 0-24", "Shift 0-9", "Load Sample"]
                 track_name = "Accent" if controller.track_params_dialog_track == ACCENT_TRACK else f"Track {controller.track_params_dialog_track + 1}"
-                if controller.track_params_dialog_index == 5:
-                    prompt_text = f"{track_name} Load Sample - Press Enter to browse samples"
+                if controller.track_params_dialog_index == 6:
+                    prompt_text = f"{track_name} Load Sample - Left/Right track, Up/Down field, Enter browse"
                 else:
                     prompt_text = (
                         f"{track_name} {param_names[controller.track_params_dialog_index]} "
-                        f"(Type to apply, Tab/Arrows switch, Enter/Esc close): {controller.track_params_dialog_input}"
+                        f"(Type to apply, Left/Right track, Up/Down field, Enter/Esc close): {controller.track_params_dialog_input}"
                     )
-            elif controller.clear_audio_confirm_active:
-                path_name = os.path.basename(controller.clear_audio_confirm_path) if controller.clear_audio_confirm_path else "(no file)"
-                if controller.clear_audio_force_confirm_active:
-                    prompt_text = f"File used elsewhere. Force delete everywhere? Y/N (Esc cancels): {path_name}"
-                else:
-                    prompt_text = f"Delete sample file too? Y/N (Esc cancels): {path_name}"
-            elif controller.clipboard_import_confirm_active:
-                if controller.clipboard_import_count > 1:
-                    prompt_text = (
-                        f"Import {controller.clipboard_import_count} patterns from clipboard? "
-                        "This replaces all pattern step data, keeps each pattern's own length, and enables song mode. Y/N (Esc cancels)"
-                    )
-                else:
-                    prompt_text = (
-                        "Import 1 pattern from clipboard? This replaces all pattern step data "
-                        "with the imported pattern length. Y/N (Esc cancels)"
-                    )
+            elif controller.confirm_dialog_active:
+                prompt_text = ""
             else:
                 prompt_text = ""
 
@@ -4097,19 +4257,17 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 controller.pattern_params_focus,
                 controller.pattern_params_index,
                 controller.pattern_params_edit_active,
+                controller.pattern_params_input,
                 controller.active_tab,
                 controller.header_edit_active,
                 controller.edit_mode,
-                controller.clear_confirm,
-                controller.esc_confirm,
                 prompt_text,
-                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.chain_edit_active and not controller.kit_load_active and not controller.project_save_as_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.kit_export_active and not controller.kit_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active and not controller.track_params_dialog_active and not controller.clear_audio_confirm_active and not controller.clipboard_import_confirm_active else "",
+                controller.status_message if not controller.drop_path_active and not controller.import_overlay_active and not controller.chop_overlay_active and not controller.chain_edit_active and not controller.kit_load_active and not controller.project_save_as_active and not controller.audio_export_active and not controller.audio_export_options_active and not controller.kit_export_active and not controller.kit_export_options_active and not controller.humanize_edit_active and not controller.probability_edit_active and not controller.track_rename_active and not controller.swing_edit_active and not controller.track_params_dialog_active and not controller.confirm_dialog_active else "",
                 controller.pattern_menu_active,
                 controller.pattern_menu_kind,
                 controller.pattern_menu_index,
                 controller.patterns_overlay_active,
                 controller.patterns_overlay_index,
-                controller.patterns_overlay_delete_confirm_index,
                 controller.import_overlay_active,
                 controller.import_overlay_index,
                 controller.import_overlay_path,
@@ -4161,6 +4319,9 @@ def ui_loop(stdscr, seq, colors=None, export_settings=None):
                 controller.track_params_dialog_track,
                 controller.track_params_dialog_index,
                 controller.track_params_dialog_input,
+                controller.confirm_dialog_active,
+                controller.confirm_dialog_message,
+                controller.confirm_dialog_index,
                 theme
             )
 

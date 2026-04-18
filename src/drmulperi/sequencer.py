@@ -23,6 +23,8 @@ from .config import (
 
 class Sequencer:
     """Pattern sequencer state, persistence, scheduling, and high-level actions."""
+    DEFAULT_PATTERN_NAME = "new pattern"
+
     def __init__(
         self,
         kit_path,
@@ -35,6 +37,7 @@ class Sequencer:
         max_step_count=32,
         default_pattern_count=1,
         humanize_amount=50,
+        track_shift_step_ms=5,
     ):
         self.kit_path = kit_path
         self.default_new_project_kit = default_new_project_kit if default_new_project_kit is not None else kit_path
@@ -60,6 +63,10 @@ class Sequencer:
             self.humanize_amount = max(0, min(100, int(humanize_amount)))
         except Exception:
             self.humanize_amount = 50
+        try:
+            self.track_shift_step_ms = max(1, min(50, int(track_shift_step_ms)))
+        except Exception:
+            self.track_shift_step_ms = 5
 
         self.grid = [self._new_pattern_grid() for _ in range(PATTERNS)]
         self.ratchet_grid = [self._new_pattern_ratchet() for _ in range(PATTERNS)]
@@ -90,6 +97,7 @@ class Sequencer:
         self.seq_track_probability = [0 for _ in range(TRACKS)]
         self.seq_track_group = [0 for _ in range(TRACKS)]
         self.seq_track_pitch = [0 for _ in range(TRACKS)]
+        self.seq_track_shift = [5 for _ in range(TRACKS)]
         self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
         self.audio_track_slot_shift = [[12 for _ in range(TRACKS - 1)] for _ in range(PATTERNS)]
@@ -108,6 +116,7 @@ class Sequencer:
         self.pattern_length = [self.default_step_count for _ in range(PATTERNS)]
         self.pattern_swing = [50 for _ in range(PATTERNS)]
         self.pattern_humanize = [False for _ in range(PATTERNS)]
+        self.pattern_names = [self.DEFAULT_PATTERN_NAME for _ in range(PATTERNS)]
         self.muted_rows = [False for _ in range(TRACKS)]
         self.pattern_clipboard = None
         self.midi = MidiOut()
@@ -153,6 +162,32 @@ class Sequencer:
 
     def pattern_count(self):
         return len(self.grid)
+
+    def _sanitize_pattern_name(self, name):
+        """Normalize a pattern name for UI/storage."""
+        text = str(name or "").strip()
+        if not text:
+            text = self.DEFAULT_PATTERN_NAME
+        return text[:64]
+
+    def get_pattern_name(self, pattern_index):
+        """Return pattern name for index with safe fallback."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return self.DEFAULT_PATTERN_NAME
+        if pattern_index >= len(self.pattern_names):
+            return self.DEFAULT_PATTERN_NAME
+        return self._sanitize_pattern_name(self.pattern_names[pattern_index])
+
+    def set_pattern_name(self, pattern_index, name):
+        """Set pattern name for index and mark project dirty when changed."""
+        if pattern_index < 0 or pattern_index >= self.pattern_count():
+            return
+        target = self._sanitize_pattern_name(name)
+        while len(self.pattern_names) < self.pattern_count():
+            self.pattern_names.append(self.DEFAULT_PATTERN_NAME)
+        if self.pattern_names[pattern_index] != target:
+            self.pattern_names[pattern_index] = target
+            self.dirty = True
 
     def pattern_note_count(self, pattern_index):
         """Return count of non-accent active steps for one pattern."""
@@ -470,10 +505,17 @@ class Sequencer:
             "track_probability": self.seq_track_probability,
             "track_group": self.seq_track_group,
             "track_pitch": self.seq_track_pitch,
+            "track_shift": self.seq_track_shift,
             "audio_tracks": audio_tracks,
             "pattern_length": self.pattern_length,
             "pattern_swing": [self.swing_internal_to_ui(v) for v in self.pattern_swing],
             "pattern_humanize": self.pattern_humanize,
+            "patterns": [
+                {
+                    "name": self.get_pattern_name(i),
+                }
+                for i in range(self.pattern_count())
+            ],
             "ratchet_grid": self.ratchet_grid,
             "detune_grid": self.detune_grid,
             "pan_grid": self.pan_grid,
@@ -627,6 +669,21 @@ class Sequencer:
             normalized_pattern_humanize = [derived > 0 for _ in range(pattern_count)]
         self.pattern_humanize = normalized_pattern_humanize
 
+        loaded_pattern_names = [self.DEFAULT_PATTERN_NAME for _ in range(pattern_count)]
+        loaded_patterns = data.get("patterns", [])
+        if isinstance(loaded_patterns, list):
+            for i in range(min(pattern_count, len(loaded_patterns))):
+                item = loaded_patterns[i]
+                if isinstance(item, dict):
+                    loaded_pattern_names[i] = self._sanitize_pattern_name(item.get("name", self.DEFAULT_PATTERN_NAME))
+        else:
+            # Backward compatibility: older format may store plain list of names.
+            legacy_names = data.get("pattern_names", [])
+            if isinstance(legacy_names, list):
+                for i in range(min(pattern_count, len(legacy_names))):
+                    loaded_pattern_names[i] = self._sanitize_pattern_name(legacy_names[i])
+        self.pattern_names = loaded_pattern_names
+
         loaded_prob = data.get("track_probability", self.seq_track_probability)
         normalized_prob = [100 for _ in range(TRACKS)]
         if isinstance(loaded_prob, list):
@@ -659,6 +716,17 @@ class Sequencer:
                     normalized_track_pitch[i] = 0
         normalized_track_pitch[ACCENT_TRACK] = 0
         self.seq_track_pitch = normalized_track_pitch
+
+        loaded_track_shift = data.get("track_shift", self.seq_track_shift)
+        normalized_track_shift = [5 for _ in range(TRACKS)]
+        if isinstance(loaded_track_shift, list):
+            for i in range(min(TRACKS, len(loaded_track_shift))):
+                try:
+                    normalized_track_shift[i] = max(0, min(9, int(loaded_track_shift[i])))
+                except (ValueError, TypeError):
+                    normalized_track_shift[i] = 5
+        normalized_track_shift[ACCENT_TRACK] = 5
+        self.seq_track_shift = normalized_track_shift
 
         base_dir = os.path.dirname(self.pattern_path) if self.pattern_path else os.getcwd()
         loaded_seq_samples = data.get("seq_samples", {})
@@ -989,9 +1057,11 @@ class Sequencer:
         self.seq_track_probability = [0 for _ in range(TRACKS)]
         self.seq_track_group = [0 for _ in range(TRACKS)]
         self.seq_track_pitch = [0 for _ in range(TRACKS)]
+        self.seq_track_shift = [5 for _ in range(TRACKS)]
         self.pattern_length = [self.default_step_count for _ in range(n)]
         self.pattern_swing = [50 for _ in range(n)]
         self.pattern_humanize = [False for _ in range(n)]
+        self.pattern_names = [self.DEFAULT_PATTERN_NAME for _ in range(n)]
         self.muted_rows = [False for _ in range(TRACKS)]
         self.pattern_clipboard = None
         self.pitch_semitones = 0
@@ -1834,13 +1904,21 @@ class Sequencer:
                 if step_sample is None:
                     continue
                 for i in range(ratchet):
-                    start = int(round((step_start + (i * interval)) * sr))
+                    shift_sec = self.seq_shift_ui_to_ms(self.seq_track_shift[t]) / 1000.0
+                    event_time = step_start + (i * interval) + shift_sec
+                    start = int(round(event_time * sr))
+                    sample_offset = 0
+                    if start < 0:
+                        sample_offset = -start
+                        start = 0
                     if start >= total_samples:
                         continue
-                    n = min(len(step_sample), total_samples - start)
+                    if sample_offset >= len(step_sample):
+                        continue
+                    n = min(len(step_sample) - sample_offset, total_samples - start)
                     if n <= 0:
                         continue
-                    chunk = step_sample[:n] * v
+                    chunk = step_sample[sample_offset:sample_offset + n] * v
                     mix[start:start + n, 0] += chunk * pan_l
                     mix[start:start + n, 1] += chunk * pan_r
 
@@ -1946,9 +2024,10 @@ class Sequencer:
                                 interval = step_time / ratchet
                                 step_rate = self.pitch_rate(t) * self.step_detune_rate(t, self.step)
                                 step_pan = max(0, min(9, int(self.pan_grid[self.pattern][t][self.step])))
+                                shift_seconds = self.seq_shift_ui_to_ms(self.seq_track_shift[t]) / 1000.0
 
                                 for i in range(ratchet):
-                                    fire_time = next_time + (i * interval)
+                                    fire_time = next_time + (i * interval) + shift_seconds
                                     if humanize > 0.0:
                                         jitter_max = min(step_time * 0.2, interval * 0.45) * humanize
                                         fire_time += random.uniform(-jitter_max, jitter_max)
@@ -2475,6 +2554,7 @@ class Sequencer:
             self.pattern_length.append(self.default_step_count)
             self.pattern_swing.append(50)
             self.pattern_humanize.append(False)
+            self.pattern_names.append(self.DEFAULT_PATTERN_NAME)
             self.audio_track_slot_pan.append([5 for _ in range(TRACKS - 1)])
             self.audio_track_slot_volume.append([9 for _ in range(TRACKS - 1)])
             self.audio_track_slot_shift.append([12 for _ in range(TRACKS - 1)])
@@ -2499,6 +2579,7 @@ class Sequencer:
             length = int(self.pattern_length[self.view_pattern])
             swing = int(self.pattern_swing[self.view_pattern])
             humanize = bool(self.pattern_humanize[self.view_pattern])
+            name = self.DEFAULT_PATTERN_NAME
             slot_pan = self.audio_track_slot_pan[self.view_pattern][:]
             slot_vol = self.audio_track_slot_volume[self.view_pattern][:]
             slot_shift = self.audio_track_slot_shift[self.view_pattern][:]
@@ -2514,6 +2595,7 @@ class Sequencer:
             length = self.default_step_count
             swing = 50
             humanize = False
+            name = self.DEFAULT_PATTERN_NAME
             slot_pan = [5 for _ in range(TRACKS - 1)]
             slot_vol = [9 for _ in range(TRACKS - 1)]
             slot_shift = [12 for _ in range(TRACKS - 1)]
@@ -2529,6 +2611,7 @@ class Sequencer:
         self.pattern_length.insert(insert_at, length)
         self.pattern_swing.insert(insert_at, swing)
         self.pattern_humanize.insert(insert_at, humanize)
+        self.pattern_names.insert(insert_at, name)
         self.audio_track_slot_pan.insert(insert_at, slot_pan)
         self.audio_track_slot_volume.insert(insert_at, slot_vol)
         self.audio_track_slot_shift.insert(insert_at, slot_shift)
@@ -2565,6 +2648,7 @@ class Sequencer:
         del self.pattern_length[idx]
         del self.pattern_swing[idx]
         del self.pattern_humanize[idx]
+        del self.pattern_names[idx]
         del self.audio_track_slot_pan[idx]
         del self.audio_track_slot_volume[idx]
         del self.audio_track_slot_shift[idx]
@@ -2788,6 +2872,7 @@ class Sequencer:
             self.pattern_length = []
             self.pattern_swing = []
             self.pattern_humanize = []
+            self.pattern_names = []
             for grid, ratchet, detune, pan, row_width in parsed:
                 self.grid.append([row[:] for row in grid])
                 self.ratchet_grid.append([row[:] for row in ratchet])
@@ -2796,6 +2881,7 @@ class Sequencer:
                 self.pattern_length.append(max(1, min(self.max_step_count, int(row_width))))
                 self.pattern_swing.append(50)
                 self.pattern_humanize.append(False)
+                self.pattern_names.append(self.DEFAULT_PATTERN_NAME)
 
             self.audio_track_slot_pan = [[5 for _ in range(TRACKS - 1)] for _ in range(count)]
             self.audio_track_slot_volume = [[9 for _ in range(TRACKS - 1)] for _ in range(count)]
@@ -3236,6 +3322,18 @@ class Sequencer:
         if track == ACCENT_TRACK:
             return
         self.set_track_pitch(track, int(value_0_24) - 12)
+
+    def seq_shift_ui_to_ms(self, shift_ui):
+        """Convert sequencer track shift UI value (0..9) to milliseconds around neutral 5."""
+        ui = max(0, min(9, int(shift_ui)))
+        return (ui - 5) * int(self.track_shift_step_ms)
+
+    def set_track_shift(self, track, shift_ui):
+        """Set sequencer track timing shift UI value (0..9, 5 = neutral)."""
+        if track == ACCENT_TRACK:
+            return
+        self.seq_track_shift[track] = max(0, min(9, int(shift_ui)))
+        self.dirty = True
 
     def preview_row(self, track):
         """Preview current track sample (or MIDI note when MIDI mode is on)."""
